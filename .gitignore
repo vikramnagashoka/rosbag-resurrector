@@ -47,3 +47,12 @@ resurrector/dashboard/static/
 
 # Environment
 .env
+
+# Packaging artifacts
+*.dmg
+*.deb
+*.spec
+dist/obfuscated/
+dist/macos/
+dist/ubuntu/
+dist/build/
