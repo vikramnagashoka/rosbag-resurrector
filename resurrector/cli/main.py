@@ -17,12 +17,25 @@ app = typer.Typer(
 console = Console()
 
 
+def _setup_logging(verbose: bool = False, log_file: str | None = None):
+    """Initialize logging based on CLI flags."""
+    from resurrector.logging_config import setup_logging
+    setup_logging(
+        level="DEBUG" if verbose else "WARNING",
+        log_file=log_file,
+        verbose=verbose,
+    )
+
+
 @app.command()
 def scan(
     path: Annotated[Path, typer.Argument(help="Directory or file to scan for bag files")],
     db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
+    log_file: Annotated[Optional[str], typer.Option("--log-file", help="Write logs to file")] = None,
 ):
     """Scan a directory for bag files and index them."""
+    _setup_logging(verbose, log_file)
     from resurrector.ingest.scanner import scan_path
     from resurrector.ingest.parser import parse_bag
     from resurrector.ingest.indexer import BagIndex

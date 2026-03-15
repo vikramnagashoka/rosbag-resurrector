@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 
 from resurrector.ingest.parser import BagMetadata, MCAPParser, Message, TopicInfo, parse_bag
-from resurrector.ingest.health_check import BagHealthReport, HealthChecker
+from resurrector.ingest.health_check import BagHealthReport, HealthChecker, HealthConfig
 
 
 class TopicView:

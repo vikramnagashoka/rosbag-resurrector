@@ -76,17 +76,55 @@ class BagHealthReport:
         return [i for i in self.issues if i.severity in (Severity.ERROR, Severity.CRITICAL)]
 
 
-class HealthChecker:
-    """Run all quality checks on a bag file."""
+@dataclass
+class HealthConfig:
+    """Configurable thresholds for health checks.
+
+    Override defaults for different robot platforms — a humanoid at 200Hz IMU
+    needs different thresholds than a drone at 10Hz lidar.
+    """
+    # Message rate stability: flag if rate drops below (1 - rate_drop_threshold) of median
+    rate_drop_threshold: float = 0.25  # 25% drop
+    rate_drop_window_ms: float = 500.0  # Window size for rate analysis
+
+    # Time gaps: flag intervals > gap_multiplier * expected_period
+    gap_multiplier: float = 2.0
+
+    # Topic completeness: flag if topic starts/ends beyond this fraction of bag duration
+    completeness_threshold: float = 0.05  # 5%
+
+    # Message size anomalies: flag if size deviates more than this fraction from median
+    size_deviation_threshold: float = 0.5  # 50%
+
+    # Clock jump: minimum jump to flag (seconds)
+    clock_jump_min_sec: float = 1.0
+    # Clock jump: multiplier of median interval
+    clock_jump_multiplier: float = 100.0
+
+    # Minimum messages per topic to run rate/gap checks
+    min_messages_for_rate_check: int = 10
+    min_messages_for_size_check: int = 10
 
     # Weights for aggregate scoring
-    WEIGHTS = {
+    weights: dict[str, int] = field(default_factory=lambda: {
         "message_rate_stability": 25,
         "time_gaps": 25,
         "timestamp_ordering": 20,
         "topic_completeness": 15,
         "message_size_anomalies": 15,
-    }
+    })
+
+
+class HealthChecker:
+    """Run all quality checks on a bag file."""
+
+    def __init__(self, config: HealthConfig | None = None):
+        self.config = config or HealthConfig()
+
+    # Weights for aggregate scoring (kept for backward compat, delegates to config)
+    @property
+    def WEIGHTS(self) -> dict[str, int]:
+        return self.config.weights
 
     def run_all_checks(
         self,
@@ -111,6 +149,10 @@ class HealthChecker:
 
         for topic, timestamps in topic_timestamps.items():
             if len(timestamps) < 2:
+                # Not enough data to run checks — score as healthy
+                topic_healths[topic] = TopicHealth(
+                    topic=topic, score=100, results=[], issues=[],
+                )
                 continue
 
             ts_arr = np.array(timestamps, dtype=np.int64)
@@ -189,11 +231,11 @@ class HealthChecker:
 
         Flags if rate drops below 80% of median for > 500ms.
         """
-        if len(timestamps_ns) < 10 or expected_hz is None:
+        if len(timestamps_ns) < self.config.min_messages_for_rate_check or expected_hz is None:
             return HealthResult("message_rate_stability", True, 100)
 
-        # Compute rolling message rate using 500ms windows
-        window_ns = int(0.5e9)
+        # Compute rolling message rate using configurable windows
+        window_ns = int(self.config.rate_drop_window_ms * 1e6)
         issues = []
 
         # Calculate inter-message intervals
@@ -201,8 +243,8 @@ class HealthChecker:
         expected_interval = 1e9 / expected_hz
         median_interval = np.median(intervals)
 
-        # Find regions where interval is > 1.25x median (rate drops below 80%)
-        threshold = median_interval * 1.25
+        # Find regions where interval exceeds threshold (rate drops)
+        threshold = median_interval * (1.0 / (1.0 - self.config.rate_drop_threshold))
         slow_mask = intervals > threshold
 
         if not np.any(slow_mask):
@@ -264,7 +306,7 @@ class HealthChecker:
         else:
             expected_interval = float(np.median(intervals))
 
-        gap_threshold = expected_interval * 2.0
+        gap_threshold = expected_interval * self.config.gap_multiplier
         gap_mask = intervals > gap_threshold
         issues = []
 
@@ -327,7 +369,7 @@ class HealthChecker:
         # Clock jumps: sudden large forward jumps (> 1 second)
         median_diff = np.median(diffs[diffs > 0]) if np.any(diffs > 0) else 0
         if median_diff > 0:
-            jump_threshold = max(1e9, median_diff * 100)  # At least 1 second
+            jump_threshold = max(self.config.clock_jump_min_sec * 1e9, median_diff * self.config.clock_jump_multiplier)
             jump_indices = np.where(diffs > jump_threshold)[0]
             for idx in jump_indices:
                 issues.append(HealthIssue(
@@ -361,9 +403,9 @@ class HealthChecker:
         topic_end = timestamps_ns[-1]
 
         issues = []
-        # Check if topic starts late (> 5% of recording duration)
+        # Check if topic starts late (> configurable threshold of recording duration)
         start_delay = topic_start - bag_start_ns
-        threshold = bag_duration * 0.05
+        threshold = bag_duration * self.config.completeness_threshold
 
         if start_delay > threshold:
             issues.append(HealthIssue(
@@ -399,16 +441,16 @@ class HealthChecker:
         self, topic: str, sizes: np.ndarray,
     ) -> HealthResult:
         """Detect sudden changes in message size."""
-        if len(sizes) < 10:
+        if len(sizes) < self.config.min_messages_for_size_check:
             return HealthResult("message_size_anomalies", True, 100)
 
         median_size = np.median(sizes)
         if median_size == 0:
             return HealthResult("message_size_anomalies", True, 100)
 
-        # Flag messages whose size deviates > 50% from median
+        # Flag messages whose size deviates beyond threshold from median
         deviation = np.abs(sizes - median_size) / median_size
-        anomaly_mask = deviation > 0.5
+        anomaly_mask = deviation > self.config.size_deviation_threshold
         issues = []
 
         if np.any(anomaly_mask):

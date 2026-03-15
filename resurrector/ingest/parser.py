@@ -6,12 +6,15 @@ from any supported bag format without requiring a ROS installation.
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
+
+logger = logging.getLogger("resurrector.ingest.parser")
 
 from mcap.reader import make_reader
 
@@ -153,6 +156,8 @@ class MCAPParser:
                     if schema:
                         channel_schemas[ch.id] = schema.name
 
+            warned_types: set[str] = set()
+
             for schema, channel, message in reader.iter_messages(
                 topics=topics,
                 start_time=start_time_ns,
@@ -162,6 +167,15 @@ class MCAPParser:
 
                 # Try to parse the CDR data
                 parsed = _parse_cdr_message(msg_type, message.data)
+
+                # Warn once per unsupported type
+                if parsed.get("_unparsed") and msg_type not in warned_types:
+                    logger.warning(
+                        "Topic '%s': no parser for message type '%s' — "
+                        "data will be available as raw bytes only",
+                        channel.topic, msg_type,
+                    )
+                    warned_types.add(msg_type)
 
                 yield Message(
                     topic=channel.topic,
@@ -194,9 +208,13 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
         elif msg_type == "sensor_msgs/msg/LaserScan":
             result = _parse_laser_scan(buf)
         else:
-            result = {"_raw_size": len(data)}
-    except Exception:
-        result = {"_parse_error": True, "_raw_size": len(data)}
+            logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
+            result = {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
+    except Exception as exc:
+        logger.warning(
+            "CDR parse error for '%s' (%d bytes): %s", msg_type, len(data), exc
+        )
+        result = {"_parse_error": True, "_msg_type": msg_type, "_raw_size": len(data)}
 
     return result
 

@@ -321,6 +321,29 @@ class BagIndex:
         """Return total number of indexed bags."""
         return self.conn.execute("SELECT COUNT(*) FROM bags").fetchone()[0]
 
+    def validate_paths(self) -> list[dict[str, Any]]:
+        """Check all indexed bags for stale paths (file moved/deleted).
+
+        Returns list of bags with missing files. Marks them in the index
+        with health_score = -1 to indicate unavailable.
+        """
+        stale = []
+        rows = self.conn.execute("SELECT id, path FROM bags").fetchall()
+        for bag_id, path_str in rows:
+            if not Path(path_str).exists():
+                stale.append({"id": bag_id, "path": path_str})
+                self.conn.execute(
+                    "UPDATE bags SET health_score = -1 WHERE id = ?", [bag_id]
+                )
+        return stale
+
+    def remove_stale(self) -> int:
+        """Remove all bags whose files no longer exist on disk. Returns count removed."""
+        stale = self.validate_paths()
+        for entry in stale:
+            self.remove_bag(entry["id"])
+        return len(stale)
+
     def remove_bag(self, bag_id: int):
         """Remove a bag and its associated topics/tags from the index."""
         self.conn.execute("DELETE FROM topics WHERE bag_id = ?", [bag_id])

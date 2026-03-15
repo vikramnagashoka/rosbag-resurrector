@@ -19,11 +19,38 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Configurable allowed roots for path operations (scan, export)
+_ALLOWED_ROOTS: list[str] = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "").split(os.pathsep)
+_ALLOWED_ROOTS = [r for r in _ALLOWED_ROOTS if r]
+
+
+def _validate_path(path_str: str) -> Path:
+    """Validate a path is safe to operate on. Prevents directory traversal."""
+    resolved = Path(path_str).resolve()
+    # Block obvious traversal attempts
+    if ".." in Path(path_str).parts:
+        raise HTTPException(400, "Path must not contain '..' components")
+    # If allowed roots are configured, enforce them
+    if _ALLOWED_ROOTS:
+        if not any(str(resolved).startswith(str(Path(root).resolve())) for root in _ALLOWED_ROOTS):
+            raise HTTPException(
+                403,
+                f"Path '{resolved}' is outside allowed roots. "
+                f"Set RESURRECTOR_ALLOWED_ROOTS to allow more directories.",
+            )
+    return resolved
 
 
 def _get_index():
@@ -198,8 +225,10 @@ async def export_bag(
     topics: str | None = Query(default=None, description="Comma-separated topics"),
     format: str = Query(default="parquet"),
     sync: bool = Query(default=False),
+    output_dir: str = Query(default="./export", description="Output directory"),
 ) -> dict[str, str]:
     """Trigger an export job."""
+    validated_output = _validate_path(output_dir)
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -212,6 +241,7 @@ async def export_bag(
         output_path = bf.export(
             topics=topic_list,
             format=format,
+            output=str(validated_output),
             sync=sync,
         )
         return {"status": "completed", "output_path": str(output_path)}
@@ -238,7 +268,7 @@ async def trigger_scan(
     from resurrector.ingest.parser import parse_bag
     from resurrector.core.bag_frame import BagFrame
 
-    scan_path_obj = Path(path)
+    scan_path_obj = _validate_path(path)
     if not scan_path_obj.exists():
         raise HTTPException(400, f"Path does not exist: {path}")
 
