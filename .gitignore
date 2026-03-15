@@ -1,0 +1,49 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated test bags
+tests/fixtures/*.mcap
+tests/fixtures/*.bag
+tests/fixtures/*.db3
+
+# DuckDB index
+*.db
+*.db.wal
+
+# Export output
+export/
+
+# Node modules (dashboard frontend)
+node_modules/
+resurrector/dashboard/app/node_modules/
+resurrector/dashboard/static/
+
+# Environment
+.env
