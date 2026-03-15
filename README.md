@@ -178,6 +178,37 @@ for c in clips:
     print(f"{c.bag_path} [{c.start_sec:.1f}s - {c.end_sec:.1f}s] — {c.frame_count} frames")
 ```
 
+### Resurrector Bridge (PlotJuggler-compatible WebSocket Streaming)
+
+Stream bag data over WebSocket for real-time visualization — no DDS network config needed:
+
+```bash
+# Replay a bag at 2x speed — opens built-in web viewer automatically
+resurrector bridge playback experiment.mcap --speed 2.0 --loop
+
+# Connect PlotJuggler → WebSocket Client → ws://localhost:9090/ws
+
+# Stream live ROS2 topics (requires rclpy)
+resurrector bridge live --topic /imu/data --topic /joint_states
+```
+
+**Two modes:**
+- **Playback** — replay recorded MCAP bags at configurable speed (0.1x–20x) with play/pause/seek
+- **Live** — subscribe to real ROS2 topics via rclpy and relay over WebSocket
+
+**PlotJuggler compatible** — uses the same flat JSON format PlotJuggler expects, so you can connect PlotJuggler's WebSocket client plugin directly. Also includes a built-in browser-based viewer with Plotly.js live plotting.
+
+**REST API for playback control:**
+```
+POST /api/playback/play          Start/resume
+POST /api/playback/pause         Pause
+POST /api/playback/seek?t=5.0    Seek to timestamp
+POST /api/playback/speed?v=2.0   Set speed
+GET  /api/topics                 Discover available topics
+GET  /api/status                 Playback state + progress
+WS   /ws                        Data stream (PlotJuggler format)
+```
+
 ### Multi-Stream Synchronization
 
 Topics publish at independent rates. Resurrector aligns them:
@@ -381,6 +412,10 @@ resurrector dataset list
 
 # Launch web dashboard
 resurrector dashboard --port 8080
+
+# Bridge — stream bag data over WebSocket
+resurrector bridge playback experiment.mcap --speed 2.0 --loop --port 9090
+resurrector bridge live --topic /imu/data --port 9090
 ```
 
 ## Comparison
@@ -403,6 +438,8 @@ resurrector dashboard --port 8080
 | Semantic frame search | Yes (CLIP) | No | No | No |
 | Video/image export | Yes (MP4/PNG/JPEG) | No | No | No |
 | CompressedImage support | Yes | Yes | Yes | Yes |
+| WebSocket bridge | Yes (PlotJuggler compat) | Foxglove Bridge | PlotJuggler Bridge | No |
+| Bag playback streaming | Yes (0.1x–20x) | No | No | No |
 | Structured logging | Yes | N/A | N/A | No |
 
 ## Supported Formats
@@ -441,7 +478,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (151+ tests)
+# Run tests (164+ tests)
 pytest tests/ -v
 
 # Build dashboard frontend
@@ -467,6 +504,10 @@ npm install && npm run build
 | test_compressed_image | 7 | CompressedImage CDR parsing, decoding, iter_images |
 | test_export_frames | 5 | PNG/JPEG sequences, MP4 video, subsampling |
 | test_vision | 8 | FrameSampler, CLIPEmbedder, FrameSearchEngine (auto-skip) |
+| test_bridge_protocol | 6 | PlotJuggler encoding, key format, list expansion |
+| test_bridge_buffer | 7 | Ring buffer put/get, overflow, multi-consumer, threading |
+| test_bridge_playback | 6 | Playback engine: play, pause, resume, speed, topic filter |
+| test_bridge_server | 6 | REST API: topics, metadata, status, playback controls |
 
 ## Contributing
 
