@@ -665,6 +665,82 @@ def search_frames_cmd(
     index.close()
 
 
+# --- Bridge commands ---
+
+bridge_app = typer.Typer(help="Resurrector Bridge — stream bag data over WebSocket.")
+app.add_typer(bridge_app, name="bridge")
+
+
+@bridge_app.command("playback")
+def bridge_playback(
+    bag: Annotated[Path, typer.Argument(help="Path to MCAP bag file")],
+    port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 9090,
+    host: Annotated[str, typer.Option("--host", help="Bind host")] = "0.0.0.0",
+    speed: Annotated[float, typer.Option("--speed", "-s", help="Playback speed")] = 1.0,
+    topics: Annotated[Optional[list[str]], typer.Option("--topic", "-t", help="Topics to stream")] = None,
+    loop: Annotated[bool, typer.Option("--loop", help="Loop playback")] = False,
+    no_browser: Annotated[bool, typer.Option("--no-browser", help="Don't open browser")] = False,
+    max_rate: Annotated[float, typer.Option("--max-rate", help="Max message rate (Hz)")] = 50.0,
+):
+    """Stream bag playback over WebSocket (PlotJuggler compatible).
+
+    Connect PlotJuggler → WebSocket Client → ws://host:port/ws
+    Or open http://host:port/ for the built-in viewer.
+    """
+    import uvicorn
+    from resurrector.bridge.server import create_bridge_app
+
+    bridge = create_bridge_app(
+        mode="playback", bag_path=bag, speed=speed,
+        topics=topics, loop_playback=loop, max_rate_hz=max_rate,
+    )
+
+    console.print(f"[bold]Resurrector Bridge — Playback Mode[/bold]")
+    console.print(f"  WebSocket: [cyan]ws://{host}:{port}/ws[/cyan]")
+    console.print(f"  Viewer:    [cyan]http://{host}:{port}/[/cyan]")
+    console.print(f"  PlotJuggler: connect WebSocket Client to ws://{host}:{port}/ws")
+    console.print(f"  Speed: {speed}x | Loop: {loop}")
+    console.print()
+
+    if not no_browser:
+        try:
+            import webbrowser
+            webbrowser.open(f"http://localhost:{port}/")
+        except Exception:
+            pass
+
+    uvicorn.run(bridge, host=host, port=port, log_level="info")
+
+
+@bridge_app.command("live")
+def bridge_live(
+    port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 9090,
+    host: Annotated[str, typer.Option("--host", help="Bind host")] = "0.0.0.0",
+    topics: Annotated[Optional[list[str]], typer.Option("--topic", "-t", help="Topics to subscribe")] = None,
+    max_rate: Annotated[float, typer.Option("--max-rate", help="Max message rate (Hz)")] = 50.0,
+):
+    """Relay live ROS2 topics over WebSocket (requires rclpy).
+
+    Connect PlotJuggler → WebSocket Client → ws://host:port/ws
+    """
+    from resurrector.bridge.live import is_rclpy_available
+
+    if not is_rclpy_available():
+        console.print("[red]Live mode requires rclpy (ROS2). Use 'bridge playback' instead.[/red]")
+        raise typer.Exit(1)
+
+    import uvicorn
+    from resurrector.bridge.server import create_bridge_app
+
+    bridge = create_bridge_app(mode="live", topics=topics, max_rate_hz=max_rate)
+
+    console.print(f"[bold]Resurrector Bridge — Live Mode[/bold]")
+    console.print(f"  WebSocket: [cyan]ws://{host}:{port}/ws[/cyan]")
+    console.print(f"  Topics: {topics or 'all (auto-discover)'}")
+
+    uvicorn.run(bridge, host=host, port=port, log_level="info")
+
+
 @app.command()
 def dashboard(
     port: Annotated[int, typer.Option("--port", "-p", help="Port to run the dashboard on")] = 8080,

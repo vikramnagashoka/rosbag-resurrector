@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resurrector Bridge</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; }
+        .header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460; }
+        .header h1 { font-size: 18px; color: #e94560; }
+        .status { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #666; }
+        .status-dot.connected { background: #4ecca3; }
+        .controls { background: #16213e; padding: 10px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #0f3460; }
+        .controls button { background: #0f3460; color: #e0e0e0; border: 1px solid #533483; padding: 6px 16px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+        .controls button:hover { background: #533483; }
+        .controls button.active { background: #e94560; border-color: #e94560; }
+        .controls input[type="range"] { width: 200px; accent-color: #e94560; }
+        .controls label { font-size: 12px; color: #888; }
+        .controls .time { font-family: monospace; font-size: 13px; min-width: 100px; }
+        .main { display: flex; height: calc(100vh - 100px); }
+        .sidebar { width: 240px; background: #16213e; border-right: 1px solid #0f3460; overflow-y: auto; padding: 12px; flex-shrink: 0; }
+        .sidebar h3 { font-size: 13px; color: #888; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+        .topic-item { padding: 6px 8px; font-size: 12px; cursor: pointer; border-radius: 4px; display: flex; align-items: center; gap: 8px; }
+        .topic-item:hover { background: #0f3460; }
+        .topic-item input { accent-color: #e94560; }
+        .topic-item .name { font-family: monospace; word-break: break-all; }
+        .topic-item .type { color: #666; font-size: 11px; }
+        .plots { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+        .plot-container { background: #16213e; border-radius: 8px; border: 1px solid #0f3460; min-height: 250px; }
+        .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #666; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Resurrector Bridge</h1>
+        <div class="status">
+            <div class="status-dot" id="status-dot"></div>
+            <span id="status-text">Disconnected</span>
+            <span id="msg-rate" style="color:#666">0 msg/s</span>
+        </div>
+    </div>
+    <div class="controls">
+        <button id="play-btn" onclick="viewer.play()">Play</button>
+        <button id="pause-btn" onclick="viewer.pause()">Pause</button>
+        <label>Seek:</label>
+        <input type="range" id="seek-slider" min="0" max="100" value="0" step="0.1" oninput="viewer.onSeekInput(this.value)">
+        <span class="time" id="time-display">0.0s / 0.0s</span>
+        <label>Speed:</label>
+        <select id="speed-select" onchange="viewer.setSpeed(this.value)" style="background:#0f3460;color:#e0e0e0;border:1px solid #533483;padding:4px;border-radius:4px;">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="4">4x</option>
+            <option value="8">8x</option>
+        </select>
+    </div>
+    <div class="main">
+        <div class="sidebar">
+            <h3>Topics</h3>
+            <div id="topic-list"></div>
+        </div>
+        <div class="plots" id="plots-container">
+            <div class="empty-state" id="empty-state">Select topics to start plotting</div>
+        </div>
+    </div>
+    <script src="/viewer.js"></script>
+</body>
+</html>
