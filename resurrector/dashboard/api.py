@@ -390,6 +390,147 @@ async def get_timeline(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+# --- Frame / Vision endpoints ---
+
+@app.get("/api/bags/{bag_id}/topics/{topic_name:path}/frame/{frame_index}")
+async def get_frame_image(
+    bag_id: int,
+    topic_name: str,
+    frame_index: int,
+    width: int | None = Query(default=None, description="Resize width"),
+) -> Any:
+    """Serve a single frame as JPEG."""
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+
+        from resurrector.core.bag_frame import BagFrame
+        topic_name = "/" + topic_name if not topic_name.startswith("/") else topic_name
+        bf = BagFrame(bag["path"])
+        try:
+            view = bf[topic_name]
+        except KeyError:
+            raise HTTPException(404, f"Topic '{topic_name}' not found")
+
+        if not view.is_image_topic:
+            raise HTTPException(400, f"Topic '{topic_name}' is not an image topic")
+
+        # Seek to the frame
+        for i, (ts, arr) in enumerate(view.iter_images()):
+            if i == frame_index:
+                from PIL import Image as PILImage
+                import io
+                img = PILImage.fromarray(arr)
+                if width:
+                    ratio = width / img.width
+                    img = img.resize((width, int(img.height * ratio)))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                from starlette.responses import Response
+                return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+        raise HTTPException(404, f"Frame {frame_index} not found")
+    finally:
+        index.close()
+
+
+@app.get("/api/bags/{bag_id}/topics/{topic_name:path}/thumbnail")
+async def get_topic_thumbnail(bag_id: int, topic_name: str) -> Any:
+    """Serve a thumbnail of the first frame from an image topic."""
+    return await get_frame_image(bag_id, topic_name, frame_index=0, width=320)
+
+
+@app.get("/api/search/frames")
+async def search_frames_api(
+    q: str = Query(description="Natural language search query"),
+    top_k: int = Query(default=20, le=100),
+    bag_id: int | None = Query(default=None),
+    min_similarity: float = Query(default=0.15),
+    clips: bool = Query(default=False),
+    clip_duration: float = Query(default=5.0),
+) -> dict[str, Any]:
+    """Semantic search across frame embeddings."""
+    index = _get_index()
+    try:
+        from resurrector.core.vision import FrameSearchEngine
+
+        engine = FrameSearchEngine(index)
+
+        if clips:
+            results = engine.search_temporal(
+                q, clip_duration_sec=clip_duration,
+                top_k=top_k, bag_id=bag_id, min_similarity=min_similarity,
+            )
+            return {
+                "query": q,
+                "mode": "clips",
+                "results": [
+                    {
+                        "bag_id": r.bag_id,
+                        "bag_path": r.bag_path,
+                        "topic": r.topic,
+                        "start_timestamp_sec": round(r.start_sec, 2),
+                        "end_timestamp_sec": round(r.end_sec, 2),
+                        "duration_sec": round(r.duration_sec, 2),
+                        "avg_similarity": round(r.avg_similarity, 4),
+                        "peak_similarity": round(r.peak_similarity, 4),
+                        "frame_count": r.frame_count,
+                    }
+                    for r in results
+                ],
+            }
+        else:
+            results = engine.search(
+                q, top_k=top_k, bag_id=bag_id, min_similarity=min_similarity,
+            )
+            return {
+                "query": q,
+                "mode": "frames",
+                "results": [
+                    {
+                        "bag_id": r.bag_id,
+                        "bag_path": r.bag_path,
+                        "topic": r.topic,
+                        "timestamp_sec": round(r.timestamp_sec, 2),
+                        "frame_index": r.frame_index,
+                        "similarity": round(r.similarity, 4),
+                        "thumbnail_url": f"/api/bags/{r.bag_id}/topics/{r.topic.lstrip('/')}/frame/{r.frame_index}?width=320",
+                    }
+                    for r in results
+                ],
+            }
+    finally:
+        index.close()
+
+
+@app.get("/api/bags/{bag_id}/frame-index-status")
+async def get_frame_index_status(bag_id: int) -> dict[str, Any]:
+    """Check if frames have been indexed for a bag."""
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+
+        count = index.count_frame_embeddings(bag_id)
+        # Get indexed topics
+        rows = index.conn.execute(
+            "SELECT DISTINCT topic FROM frame_embeddings WHERE bag_id = ?", [bag_id]
+        ).fetchall()
+        topics = [r[0] for r in rows]
+
+        return {
+            "bag_id": bag_id,
+            "indexed": count > 0,
+            "frame_count": count,
+            "topics_indexed": topics,
+        }
+    finally:
+        index.close()
+
+
 # Serve static frontend files
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():

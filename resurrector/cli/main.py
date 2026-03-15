@@ -486,6 +486,185 @@ def dataset_list(
     mgr.close()
 
 
+@app.command(name="export-frames")
+def export_frames_cmd(
+    path: Annotated[Path, typer.Argument(help="Path to a bag file")],
+    topic: Annotated[str, typer.Option("--topic", "-t", help="Image topic name")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Output directory or video path")] = Path("./frames"),
+    format: Annotated[str, typer.Option("--format", "-f", help="Image format: png or jpeg")] = "png",
+    video: Annotated[bool, typer.Option("--video", help="Export as MP4 video instead of frames")] = False,
+    fps: Annotated[Optional[float], typer.Option("--fps", help="Video FPS (default: topic frequency)")] = None,
+    max_frames: Annotated[Optional[int], typer.Option("--max-frames", help="Maximum frames to export")] = None,
+    every_n: Annotated[int, typer.Option("--every-n", help="Export every Nth frame")] = 1,
+):
+    """Export image topic as frame sequence (PNG/JPEG) or MP4 video."""
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.core.export import Exporter
+
+    bf = BagFrame(path)
+    view = bf[topic]
+    if not view.is_image_topic:
+        console.print(f"[red]Topic '{topic}' is not an image topic.[/red]")
+        raise typer.Exit(1)
+
+    exporter = Exporter()
+    if video:
+        result = exporter.export_video(view, output, fps=fps)
+        console.print(f"[green]Video exported to {result}[/green]")
+    else:
+        result = exporter.export_frames(
+            view, output, format=format, max_frames=max_frames, every_n=every_n,
+        )
+        console.print(f"[green]Frames exported to {result}[/green]")
+
+
+@app.command(name="index-frames")
+def index_frames_cmd(
+    path: Annotated[Path, typer.Argument(help="Path to a bag file or directory")],
+    topic: Annotated[Optional[str], typer.Option("--topic", "-t", help="Image topic (auto-detects if omitted)")] = None,
+    sample_hz: Annotated[float, typer.Option("--sample-hz", help="Frame sampling rate")] = 5.0,
+    batch_size: Annotated[int, typer.Option("--batch-size", help="Embedding batch size")] = 32,
+    force: Annotated[bool, typer.Option("--force", help="Re-index even if embeddings exist")] = False,
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+):
+    """Generate CLIP embeddings for image frames in bags for semantic search.
+
+    Requires: pip install rosbag-resurrector[vision]
+    """
+    from resurrector.ingest.scanner import scan_path
+    from resurrector.ingest.indexer import BagIndex
+    from resurrector.core.vision import FrameSearchEngine
+    from resurrector.cli.formatters import create_progress
+
+    # Collect bag files
+    if path.is_dir():
+        files = scan_path(path)
+        bag_paths = [f.path for f in files]
+    else:
+        bag_paths = [path]
+
+    if not bag_paths:
+        console.print("[yellow]No bag files found.[/yellow]")
+        raise typer.Exit()
+
+    index = BagIndex(db) if db else BagIndex()
+    engine = FrameSearchEngine(index)
+    total_frames = 0
+
+    with create_progress() as progress:
+        task = progress.add_task("Indexing frames...", total=len(bag_paths))
+        for bag_path in bag_paths:
+            bag = index.get_bag_by_path(bag_path)
+            if bag is None:
+                console.print(f"[yellow]Bag not indexed: {bag_path.name}. Run 'resurrector scan' first.[/yellow]")
+                progress.advance(task)
+                continue
+            try:
+                n = engine.index_bag(
+                    bag_id=bag["id"], bag_path=bag_path,
+                    topic=topic, sample_hz=sample_hz,
+                    batch_size=batch_size, force=force,
+                )
+                total_frames += n
+            except Exception as e:
+                console.print(f"[red]Error: {bag_path.name}: {e}[/red]")
+            progress.advance(task)
+
+    console.print(f"[green]Indexed {total_frames} frames from {len(bag_paths)} bag(s).[/green]")
+    index.close()
+
+
+@app.command(name="search-frames")
+def search_frames_cmd(
+    query: Annotated[str, typer.Argument(help="Natural language search query")],
+    top_k: Annotated[int, typer.Option("--top-k", "-k", help="Number of results")] = 20,
+    clips: Annotated[bool, typer.Option("--clips", help="Group results into temporal clips")] = False,
+    clip_duration: Annotated[float, typer.Option("--clip-duration", help="Clip grouping window (seconds)")] = 5.0,
+    min_similarity: Annotated[float, typer.Option("--min-sim", help="Minimum cosine similarity")] = 0.15,
+    save: Annotated[Optional[Path], typer.Option("--save", help="Save results (frames/clips + results.json)")] = None,
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+):
+    """Search bag frames by natural language description.
+
+    Examples:
+        resurrector search-frames "robot picks up red ball"
+        resurrector search-frames "collision event" --clips
+        resurrector search-frames "robot arm" --save ./results
+    """
+    from rich.table import Table
+    from resurrector.ingest.indexer import BagIndex
+    from resurrector.core.vision import FrameSearchEngine, save_search_results
+
+    index = BagIndex(db) if db else BagIndex()
+    engine = FrameSearchEngine(index)
+
+    if clips:
+        results = engine.search_temporal(
+            query, clip_duration_sec=clip_duration,
+            top_k=top_k, min_similarity=min_similarity,
+        )
+        if not results:
+            console.print("[dim]No matching clips found.[/dim]")
+            index.close()
+            return
+
+        table = Table(title=f"Clip Search: \"{query}\"", show_header=True, header_style="bold")
+        table.add_column("Rank", justify="right", width=5)
+        table.add_column("Similarity", justify="right", width=12)
+        table.add_column("Bag", style="cyan", max_width=30)
+        table.add_column("Topic", style="dim")
+        table.add_column("Time Range", justify="right")
+        table.add_column("Frames", justify="right")
+
+        for i, r in enumerate(results, 1):
+            table.add_row(
+                str(i),
+                f"{r.avg_similarity:.3f} avg",
+                Path(r.bag_path).name,
+                r.topic,
+                f"{r.start_sec:.1f}s - {r.end_sec:.1f}s",
+                str(r.frame_count),
+            )
+        console.print(table)
+
+        if save:
+            save_search_results(results, query, save, extract_clips=True)
+            console.print(f"[green]Results saved to {save}[/green]")
+    else:
+        results = engine.search(
+            query, top_k=top_k, min_similarity=min_similarity,
+        )
+        if not results:
+            console.print("[dim]No matching frames found.[/dim]")
+            index.close()
+            return
+
+        table = Table(title=f"Frame Search: \"{query}\"", show_header=True, header_style="bold")
+        table.add_column("Rank", justify="right", width=5)
+        table.add_column("Similarity", justify="right", width=12)
+        table.add_column("Bag", style="cyan", max_width=30)
+        table.add_column("Topic", style="dim")
+        table.add_column("Time", justify="right")
+        table.add_column("Frame", justify="right")
+
+        for i, r in enumerate(results, 1):
+            table.add_row(
+                str(i),
+                f"{r.similarity:.3f}",
+                Path(r.bag_path).name,
+                r.topic,
+                f"{r.timestamp_sec:.2f}s",
+                f"#{r.frame_index}",
+            )
+        console.print(table)
+
+        if save:
+            save_search_results(results, query, save, extract_clips=False)
+            console.print(f"[green]Results saved to {save}[/green]")
+
+    index.close()
+
+
 @app.command()
 def dashboard(
     port: Annotated[int, typer.Option("--port", "-p", help="Port to run the dashboard on")] = 8080,
