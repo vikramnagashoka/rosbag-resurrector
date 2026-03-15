@@ -248,6 +248,245 @@ def tag(
 
 
 @app.command()
+def quicklook(
+    path: Annotated[Path, typer.Argument(help="Path to a bag file")],
+):
+    """Quick rich summary: health badge, topic sparklines, anomaly highlights."""
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.core.topic_groups import classify_topics
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from resurrector.cli.formatters import health_badge, format_size
+
+    bf = BagFrame(path)
+    meta = bf.metadata
+    health = bf.health_report()
+    groups = classify_topics(bf.topic_names)
+
+    # Header panel
+    badge = health_badge(health.score)
+    console.print()
+    header = Text()
+    header.append(f"  {meta.path.name}\n", style="bold")
+    header.append(f"  Health: ", style="dim")
+    header.append_text(badge)
+    header.append(
+        f"  Duration: {meta.duration_sec:.1f}s  "
+        f"Size: {format_size(path.stat().st_size)}  "
+        f"Topics: {len(meta.topics)}  "
+        f"Messages: {meta.message_count:,}",
+        style="dim",
+    )
+    console.print(Panel(header, title="[bold blue]quicklook[/bold blue]", border_style="blue"))
+
+    # Topic table grouped
+    table = Table(show_header=True, header_style="bold", show_lines=False, pad_edge=False)
+    table.add_column("Group", style="dim", width=14)
+    table.add_column("Topic", style="cyan", min_width=25)
+    table.add_column("Hz", justify="right", width=8)
+    table.add_column("Count", justify="right", width=10)
+    table.add_column("Rate", width=20)  # sparkline
+    table.add_column("Health", justify="center", width=8)
+
+    for group in groups:
+        for i, topic_name in enumerate(group.topics):
+            topic = bf._find_topic(topic_name)
+            freq = f"{topic.frequency_hz:.0f}" if topic.frequency_hz else "?"
+            th = health.topic_scores.get(topic_name)
+            if th:
+                if th.score >= 90:
+                    h = "[green]OK[/green]"
+                elif th.score >= 70:
+                    h = f"[yellow]{th.score}[/yellow]"
+                else:
+                    h = f"[red]{th.score}[/red]"
+            else:
+                h = "[dim]?[/dim]"
+
+            # Simple sparkline based on message count relative to max
+            max_count = max(t.message_count for t in meta.topics) if meta.topics else 1
+            bar_len = int(15 * topic.message_count / max_count)
+            bar = "█" * bar_len + "░" * (15 - bar_len)
+
+            g_label = group.name if i == 0 else ""
+            table.add_row(g_label, topic_name, freq, f"{topic.message_count:,}", f"[cyan]{bar}[/cyan]", h)
+
+    console.print(table)
+
+    # Highlight anomalies
+    if health.issues:
+        console.print()
+        n_errors = len([i for i in health.issues if i.severity.value in ("error", "critical")])
+        n_warns = len([i for i in health.issues if i.severity.value == "warning"])
+        summary = []
+        if n_errors:
+            summary.append(f"[red]{n_errors} error(s)[/red]")
+        if n_warns:
+            summary.append(f"[yellow]{n_warns} warning(s)[/yellow]")
+        console.print(f"  Issues: {', '.join(summary)}")
+        for rec in health.recommendations[:3]:
+            console.print(f"  [dim]→ {rec}[/dim]")
+
+    console.print()
+
+
+@app.command()
+def watch(
+    path: Annotated[Path, typer.Argument(help="Directory to watch for new bag files")],
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+    interval: Annotated[float, typer.Option("--interval", "-i", help="Poll interval in seconds")] = 5.0,
+):
+    """Watch a directory for new bag files and auto-index them."""
+    import time
+    from resurrector.ingest.scanner import scan_path, BAG_EXTENSIONS
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.ingest.indexer import BagIndex
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.cli.formatters import health_badge
+
+    if not path.is_dir():
+        console.print(f"[red]Not a directory: {path}[/red]")
+        raise typer.Exit(1)
+
+    index = BagIndex(db) if db else BagIndex()
+    seen: set[str] = set()
+
+    # Index existing files first
+    existing = scan_path(path)
+    for f in existing:
+        seen.add(str(f.path))
+
+    console.print(f"[bold]Watching[/bold] {path} (poll every {interval}s, {len(seen)} existing files)")
+    console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+
+    try:
+        while True:
+            time.sleep(interval)
+            current = scan_path(path)
+            for scanned in current:
+                key = str(scanned.path)
+                if key not in seen:
+                    seen.add(key)
+                    console.print(f"[cyan]New bag detected:[/cyan] {scanned.path.name}")
+                    try:
+                        parser = parse_bag(scanned.path)
+                        metadata = parser.get_metadata()
+                        bag_id = index.upsert_bag(scanned, metadata)
+
+                        bf = BagFrame(scanned.path)
+                        report = bf.health_report()
+                        index.update_health_score(bag_id, report.score)
+
+                        badge = health_badge(report.score)
+                        console.print(f"  Indexed: {len(metadata.topics)} topics, health: ", end="")
+                        console.print(badge)
+                    except Exception as e:
+                        console.print(f"  [red]Error: {e}[/red]")
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching.[/dim]")
+    finally:
+        index.close()
+
+
+# --- Dataset commands ---
+
+dataset_app = typer.Typer(help="Manage reproducible datasets.")
+app.add_typer(dataset_app, name="dataset")
+
+
+@dataset_app.command("create")
+def dataset_create(
+    name: Annotated[str, typer.Argument(help="Dataset name")],
+    description: Annotated[str, typer.Option("--desc", "-d", help="Description")] = "",
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+):
+    """Create a new dataset."""
+    from resurrector.core.dataset import DatasetManager
+    mgr = DatasetManager(db)
+    did = mgr.create(name, description)
+    console.print(f"[green]Created dataset '{name}' (id={did})[/green]")
+    mgr.close()
+
+
+@dataset_app.command("add-version")
+def dataset_add_version(
+    name: Annotated[str, typer.Argument(help="Dataset name")],
+    version: Annotated[str, typer.Argument(help="Version string (e.g., '1.0')")],
+    bags: Annotated[list[Path], typer.Option("--bag", "-b", help="Bag file paths")],
+    topics: Annotated[Optional[list[str]], typer.Option("--topic", "-t", help="Topics to include")] = None,
+    format: Annotated[str, typer.Option("--format", "-f", help="Export format")] = "parquet",
+    sync_method: Annotated[Optional[str], typer.Option("--sync", help="Sync method")] = None,
+    downsample: Annotated[Optional[float], typer.Option("--downsample", help="Target Hz")] = None,
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+):
+    """Add a version to a dataset with bag references and config."""
+    from resurrector.core.dataset import DatasetManager, BagRef, SyncConfig
+    mgr = DatasetManager(db)
+    bag_refs = [BagRef(path=str(b.resolve())) for b in bags]
+    sync_cfg = SyncConfig(method=sync_method) if sync_method else None
+    vid = mgr.create_version(
+        dataset_name=name,
+        version=version,
+        bag_refs=bag_refs,
+        topics=topics,
+        sync_config=sync_cfg,
+        export_format=format,
+        downsample_hz=downsample,
+    )
+    console.print(f"[green]Added version '{version}' (id={vid}) to dataset '{name}'[/green]")
+    mgr.close()
+
+
+@dataset_app.command("export")
+def dataset_export(
+    name: Annotated[str, typer.Argument(help="Dataset name")],
+    version: Annotated[str, typer.Argument(help="Version to export")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Output directory")] = Path("./datasets"),
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+):
+    """Export a dataset version to disk with README and manifest."""
+    from resurrector.core.dataset import DatasetManager
+    mgr = DatasetManager(db)
+    result = mgr.export_version(name, version, str(output))
+    console.print(f"[green]Exported to {result}[/green]")
+    mgr.close()
+
+
+@dataset_app.command("list")
+def dataset_list(
+    db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
+):
+    """List all datasets."""
+    from resurrector.core.dataset import DatasetManager
+    from rich.table import Table
+
+    mgr = DatasetManager(db)
+    datasets = mgr.list_datasets()
+    if not datasets:
+        console.print("[dim]No datasets found.[/dim]")
+        mgr.close()
+        return
+
+    table = Table(title="Datasets", show_header=True, header_style="bold")
+    table.add_column("Name", style="cyan")
+    table.add_column("Description")
+    table.add_column("Versions", justify="right")
+    table.add_column("Updated", style="dim")
+
+    for ds in datasets:
+        table.add_row(
+            ds["name"],
+            ds.get("description", ""),
+            str(len(ds.get("versions", []))),
+            str(ds.get("updated_at", "")),
+        )
+
+    console.print(table)
+    mgr.close()
+
+
+@app.command()
 def dashboard(
     port: Annotated[int, typer.Option("--port", "-p", help="Port to run the dashboard on")] = 8080,
     host: Annotated[str, typer.Option("--host", help="Host to bind to")] = "127.0.0.1",

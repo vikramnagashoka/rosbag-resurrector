@@ -317,6 +317,86 @@ class BagFrame:
             f"messages={self.metadata.message_count:,})"
         )
 
+    def _repr_html_(self) -> str:
+        """Rich HTML representation for Jupyter notebooks."""
+        from resurrector.core.topic_groups import get_topic_group
+
+        meta = self.metadata
+        try:
+            health = self.health_report()
+            score = health.score
+            n_warnings = len(health.warnings)
+        except Exception:
+            score = None
+            n_warnings = 0
+
+        # Health badge color
+        if score is not None:
+            if score >= 90:
+                badge_color, badge_bg = "#fff", "#28a745"
+            elif score >= 70:
+                badge_color, badge_bg = "#000", "#ffc107"
+            else:
+                badge_color, badge_bg = "#fff", "#dc3545"
+            badge = (
+                f'<span style="background:{badge_bg};color:{badge_color};'
+                f'padding:2px 8px;border-radius:4px;font-weight:bold">'
+                f'{score}/100</span>'
+            )
+        else:
+            badge = '<span style="color:#888">?</span>'
+
+        # Header
+        html = f"""
+        <div style="font-family:sans-serif;border:1px solid #ddd;border-radius:8px;padding:16px;max-width:800px">
+        <h3 style="margin:0 0 8px 0">🤖 {meta.path.name}</h3>
+        <div style="margin-bottom:12px">
+            Health: {badge}
+            &nbsp;|&nbsp; Duration: <b>{meta.duration_sec:.1f}s</b>
+            &nbsp;|&nbsp; Size: <b>{_format_size(self._path.stat().st_size)}</b>
+            &nbsp;|&nbsp; Topics: <b>{len(meta.topics)}</b>
+            &nbsp;|&nbsp; Messages: <b>{meta.message_count:,}</b>
+        </div>
+        <table style="border-collapse:collapse;width:100%;font-size:13px">
+        <tr style="background:#f8f9fa">
+            <th style="text-align:left;padding:6px;border-bottom:2px solid #dee2e6">Topic</th>
+            <th style="text-align:left;padding:6px;border-bottom:2px solid #dee2e6">Type</th>
+            <th style="text-align:left;padding:6px;border-bottom:2px solid #dee2e6">Group</th>
+            <th style="text-align:right;padding:6px;border-bottom:2px solid #dee2e6">Count</th>
+            <th style="text-align:right;padding:6px;border-bottom:2px solid #dee2e6">Hz</th>
+            <th style="text-align:center;padding:6px;border-bottom:2px solid #dee2e6">Health</th>
+        </tr>
+        """
+
+        for topic in meta.topics:
+            freq = f"{topic.frequency_hz:.1f}" if topic.frequency_hz else "?"
+            group = get_topic_group(topic.name)
+            if score is not None:
+                th = health.topic_scores.get(topic.name)
+                if th and th.score >= 90:
+                    h_icon = "✅"
+                elif th and th.score >= 70:
+                    h_icon = f"⚠️ {th.score}"
+                elif th:
+                    h_icon = f"❌ {th.score}"
+                else:
+                    h_icon = "?"
+            else:
+                h_icon = "?"
+
+            html += f"""
+            <tr style="border-bottom:1px solid #eee">
+                <td style="padding:4px 6px;font-family:monospace">{topic.name}</td>
+                <td style="padding:4px 6px;color:#666">{topic.message_type}</td>
+                <td style="padding:4px 6px;color:#888;font-size:12px">{group}</td>
+                <td style="padding:4px 6px;text-align:right">{topic.message_count:,}</td>
+                <td style="padding:4px 6px;text-align:right">{freq}</td>
+                <td style="padding:4px 6px;text-align:center">{h_icon}</td>
+            </tr>"""
+
+        html += "</table></div>"
+        return html
+
 
 class TimeslicedBagFrame:
     """A time-filtered view of a BagFrame."""

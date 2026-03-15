@@ -6,10 +6,14 @@ import os
 from pathlib import Path
 from typing import Any
 
+import asyncio
+import json
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import StreamingResponse
 
 app = FastAPI(
     title="RosBag Resurrector",
@@ -262,15 +266,29 @@ async def search_bags(q: str = Query(description="Search query")) -> list[dict[s
 @app.post("/api/scan")
 async def trigger_scan(
     path: str = Query(description="Directory path to scan"),
-) -> dict[str, Any]:
-    """Trigger a directory scan."""
-    from resurrector.ingest.scanner import scan_path
-    from resurrector.ingest.parser import parse_bag
-    from resurrector.core.bag_frame import BagFrame
-
+    stream: bool = Query(default=False, description="Stream progress via SSE"),
+) -> Any:
+    """Trigger a directory scan. Set stream=true for Server-Sent Events progress."""
     scan_path_obj = _validate_path(path)
     if not scan_path_obj.exists():
         raise HTTPException(400, f"Path does not exist: {path}")
+
+    if stream:
+        return StreamingResponse(
+            _scan_stream(scan_path_obj),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Non-streaming fallback
+    return await _scan_blocking(scan_path_obj)
+
+
+async def _scan_blocking(scan_path_obj: Path) -> dict[str, Any]:
+    """Blocking scan (original behavior)."""
+    from resurrector.ingest.scanner import scan_path
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.core.bag_frame import BagFrame
 
     files = scan_path(scan_path_obj)
     index = _get_index()
@@ -298,6 +316,45 @@ async def trigger_scan(
         "indexed": indexed,
         "errors": errors,
     }
+
+
+async def _scan_stream(scan_path_obj: Path):
+    """Stream scan progress as Server-Sent Events."""
+    from resurrector.ingest.scanner import scan_path
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.core.bag_frame import BagFrame
+
+    files = scan_path(scan_path_obj)
+    total = len(files)
+    index = _get_index()
+    indexed = 0
+    errors = []
+
+    yield f"data: {json.dumps({'event': 'start', 'total': total})}\n\n"
+
+    try:
+        for i, scanned in enumerate(files):
+            try:
+                parser = parse_bag(scanned.path)
+                metadata = parser.get_metadata()
+                bag_id = index.upsert_bag(scanned, metadata)
+
+                bf = BagFrame(scanned.path)
+                report = bf.health_report()
+                index.update_health_score(bag_id, report.score)
+                indexed += 1
+
+                yield f"data: {json.dumps({'event': 'indexed', 'file': scanned.path.name, 'health': report.score, 'progress': i + 1, 'total': total})}\n\n"
+            except Exception as e:
+                errors.append({"file": str(scanned.path), "error": str(e)})
+                yield f"data: {json.dumps({'event': 'error', 'file': scanned.path.name, 'error': str(e), 'progress': i + 1, 'total': total})}\n\n"
+
+            # Yield control to event loop so SSE messages flush
+            await asyncio.sleep(0)
+    finally:
+        index.close()
+
+    yield f"data: {json.dumps({'event': 'complete', 'scanned': total, 'indexed': indexed, 'errors': errors})}\n\n"
 
 
 @app.get("/api/bags/{bag_id}/timeline")

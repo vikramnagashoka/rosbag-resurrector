@@ -11,5 +11,14 @@ __version__ = "0.1.0"
 from resurrector.core.bag_frame import BagFrame
 from resurrector.ingest.scanner import scan
 from resurrector.core.query import search
+from resurrector.core.dataset import DatasetManager, BagRef, SyncConfig, DatasetMetadata
 
-__all__ = ["BagFrame", "scan", "search"]
+__all__ = [
+    "BagFrame",
+    "scan",
+    "search",
+    "DatasetManager",
+    "BagRef",
+    "SyncConfig",
+    "DatasetMetadata",
+]
