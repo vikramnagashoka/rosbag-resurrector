@@ -99,6 +99,85 @@ bf = BagFrame("experiment.mcap")
 bf  # Renders interactive HTML table with health badges and topic groups
 ```
 
+### Video & Image Support
+
+Full support for both raw and compressed image topics:
+
+```python
+# Iterate frames from any image topic
+for timestamp_ns, frame in bf["/camera/rgb"].iter_images():
+    print(f"Frame at {timestamp_ns}: shape={frame.shape}")
+
+# Works with compressed images too (JPEG/PNG)
+for ts, frame in bf["/camera/compressed"].iter_images():
+    process(frame)
+
+# Export as frame sequence
+bf["/camera/rgb"].is_image_topic  # True
+```
+
+**Export frames or video:**
+
+```bash
+# Export as numbered PNG files
+resurrector export-frames experiment.mcap --topic /camera/rgb --output ./frames
+
+# Export as MP4 video
+resurrector export-frames experiment.mcap --topic /camera/rgb --video --output video.mp4 --fps 30
+```
+
+### Semantic Frame Search (CLIP-powered)
+
+Search your bag collection by describing what's happening — no manual scrubbing:
+
+```bash
+# Index frames for semantic search
+resurrector index-frames /path/to/bags/ --sample-hz 5
+
+# Search by natural language
+resurrector search-frames "robot fails to catch ball"
+resurrector search-frames "gripper collision with table" --clips --clip-duration 5
+
+# Save matching frames + metadata to disk
+resurrector search-frames "robot arm reaching" --save ./results
+```
+
+Uses CLIP embeddings stored in DuckDB for fast cosine similarity search. Supports two backends:
+
+```bash
+# Option 1: Local CLIP (recommended, ~2GB model download)
+pip install rosbag-resurrector[vision]
+
+# Option 2: OpenAI API (lighter install, requires API key)
+pip install rosbag-resurrector[vision-openai]
+
+# Option 3: Just image parsing + video export, no ML
+pip install rosbag-resurrector[vision-lite]
+```
+
+**Python API:**
+
+```python
+from resurrector.core.vision import FrameSearchEngine, CLIPEmbedder
+from resurrector.ingest.indexer import BagIndex
+
+index = BagIndex()
+engine = FrameSearchEngine(index)
+
+# Index a bag's image frames
+engine.index_bag(bag_id=1, bag_path="experiment.mcap", sample_hz=5.0)
+
+# Search by text
+results = engine.search("robot drops the object", top_k=10)
+for r in results:
+    print(f"{r.bag_path} @ {r.timestamp_sec:.1f}s — similarity: {r.similarity:.3f}")
+
+# Search for temporal clips
+clips = engine.search_temporal("grasping attempt", clip_duration_sec=5.0)
+for c in clips:
+    print(f"{c.bag_path} [{c.start_sec:.1f}s - {c.end_sec:.1f}s] — {c.frame_count} frames")
+```
+
 ### Multi-Stream Synchronization
 
 Topics publish at independent rates. Resurrector aligns them:
@@ -321,6 +400,9 @@ resurrector dashboard --port 8080
 | DuckDB search index | Yes | No | No | No |
 | Streaming export (OOM-safe) | Yes | No | No | No |
 | Batch processing | Yes | No | No | Yes |
+| Semantic frame search | Yes (CLIP) | No | No | No |
+| Video/image export | Yes (MP4/PNG/JPEG) | No | No | No |
+| CompressedImage support | Yes | Yes | Yes | Yes |
 | Structured logging | Yes | N/A | N/A | No |
 
 ## Supported Formats
@@ -359,7 +441,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (127 tests)
+# Run tests (151+ tests)
 pytest tests/ -v
 
 # Build dashboard frontend
@@ -382,6 +464,9 @@ npm install && npm run build
 | test_health_config | 5 | Configurable thresholds, edge cases |
 | test_export | 8 | All export formats, downsampling |
 | test_topic_groups | 12 | Topic classification, custom patterns |
+| test_compressed_image | 7 | CompressedImage CDR parsing, decoding, iter_images |
+| test_export_frames | 5 | PNG/JPEG sequences, MP4 video, subsampling |
+| test_vision | 8 | FrameSampler, CLIPEmbedder, FrameSearchEngine (auto-skip) |
 
 ## Contributing
 

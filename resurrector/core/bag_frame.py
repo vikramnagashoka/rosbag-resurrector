@@ -13,8 +13,16 @@ from typing import Any, Iterator
 import numpy as np
 import polars as pl
 
-from resurrector.ingest.parser import BagMetadata, MCAPParser, Message, TopicInfo, parse_bag
+from resurrector.ingest.parser import (
+    BagMetadata, MCAPParser, Message, TopicInfo, parse_bag,
+    get_image_array, get_compressed_image_array,
+)
 from resurrector.ingest.health_check import BagHealthReport, HealthChecker, HealthConfig
+
+_IMAGE_TYPES = {
+    "sensor_msgs/msg/Image",
+    "sensor_msgs/msg/CompressedImage",
+}
 
 
 class TopicView:
@@ -55,6 +63,11 @@ class TopicView:
     def frequency_hz(self) -> float | None:
         return self._topic_info.frequency_hz
 
+    @property
+    def is_image_topic(self) -> bool:
+        """True if this topic contains image data (raw or compressed)."""
+        return self._topic_info.message_type in _IMAGE_TYPES
+
     def iter_messages(self) -> Iterator[Message]:
         """Iterate over raw messages for this topic."""
         parser = parse_bag(self._bag_path)
@@ -63,6 +76,30 @@ class TopicView:
             start_time_ns=self._start_time_ns,
             end_time_ns=self._end_time_ns,
         )
+
+    def iter_images(self) -> Iterator[tuple[int, np.ndarray]]:
+        """Yield (timestamp_ns, numpy_array) for image topics.
+
+        Works with both sensor_msgs/msg/Image and
+        sensor_msgs/msg/CompressedImage topics.
+
+        Raises:
+            TypeError: If this topic is not an image type.
+        """
+        if not self.is_image_topic:
+            raise TypeError(
+                f"Topic '{self._topic_name}' is not an image topic "
+                f"(type: {self._topic_info.message_type})"
+            )
+
+        is_compressed = self._topic_info.message_type == "sensor_msgs/msg/CompressedImage"
+        for msg in self.iter_messages():
+            if is_compressed:
+                arr = get_compressed_image_array(msg)
+            else:
+                arr = get_image_array(msg)
+            if arr is not None:
+                yield msg.timestamp_ns, arr
 
     def to_polars(self) -> pl.DataFrame:
         """Convert topic messages to a Polars DataFrame.
