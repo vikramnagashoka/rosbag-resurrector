@@ -6,10 +6,14 @@ import os
 from pathlib import Path
 from typing import Any
 
+import asyncio
+import json
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import StreamingResponse
 
 app = FastAPI(
     title="RosBag Resurrector",
@@ -19,11 +23,38 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Configurable allowed roots for path operations (scan, export)
+_ALLOWED_ROOTS: list[str] = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "").split(os.pathsep)
+_ALLOWED_ROOTS = [r for r in _ALLOWED_ROOTS if r]
+
+
+def _validate_path(path_str: str) -> Path:
+    """Validate a path is safe to operate on. Prevents directory traversal."""
+    resolved = Path(path_str).resolve()
+    # Block obvious traversal attempts
+    if ".." in Path(path_str).parts:
+        raise HTTPException(400, "Path must not contain '..' components")
+    # If allowed roots are configured, enforce them
+    if _ALLOWED_ROOTS:
+        if not any(str(resolved).startswith(str(Path(root).resolve())) for root in _ALLOWED_ROOTS):
+            raise HTTPException(
+                403,
+                f"Path '{resolved}' is outside allowed roots. "
+                f"Set RESURRECTOR_ALLOWED_ROOTS to allow more directories.",
+            )
+    return resolved
 
 
 def _get_index():
@@ -198,8 +229,10 @@ async def export_bag(
     topics: str | None = Query(default=None, description="Comma-separated topics"),
     format: str = Query(default="parquet"),
     sync: bool = Query(default=False),
+    output_dir: str = Query(default="./export", description="Output directory"),
 ) -> dict[str, str]:
     """Trigger an export job."""
+    validated_output = _validate_path(output_dir)
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -212,6 +245,7 @@ async def export_bag(
         output_path = bf.export(
             topics=topic_list,
             format=format,
+            output=str(validated_output),
             sync=sync,
         )
         return {"status": "completed", "output_path": str(output_path)}
@@ -232,15 +266,29 @@ async def search_bags(q: str = Query(description="Search query")) -> list[dict[s
 @app.post("/api/scan")
 async def trigger_scan(
     path: str = Query(description="Directory path to scan"),
-) -> dict[str, Any]:
-    """Trigger a directory scan."""
+    stream: bool = Query(default=False, description="Stream progress via SSE"),
+) -> Any:
+    """Trigger a directory scan. Set stream=true for Server-Sent Events progress."""
+    scan_path_obj = _validate_path(path)
+    if not scan_path_obj.exists():
+        raise HTTPException(400, f"Path does not exist: {path}")
+
+    if stream:
+        return StreamingResponse(
+            _scan_stream(scan_path_obj),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Non-streaming fallback
+    return await _scan_blocking(scan_path_obj)
+
+
+async def _scan_blocking(scan_path_obj: Path) -> dict[str, Any]:
+    """Blocking scan (original behavior)."""
     from resurrector.ingest.scanner import scan_path
     from resurrector.ingest.parser import parse_bag
     from resurrector.core.bag_frame import BagFrame
-
-    scan_path_obj = Path(path)
-    if not scan_path_obj.exists():
-        raise HTTPException(400, f"Path does not exist: {path}")
 
     files = scan_path(scan_path_obj)
     index = _get_index()
@@ -268,6 +316,45 @@ async def trigger_scan(
         "indexed": indexed,
         "errors": errors,
     }
+
+
+async def _scan_stream(scan_path_obj: Path):
+    """Stream scan progress as Server-Sent Events."""
+    from resurrector.ingest.scanner import scan_path
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.core.bag_frame import BagFrame
+
+    files = scan_path(scan_path_obj)
+    total = len(files)
+    index = _get_index()
+    indexed = 0
+    errors = []
+
+    yield f"data: {json.dumps({'event': 'start', 'total': total})}\n\n"
+
+    try:
+        for i, scanned in enumerate(files):
+            try:
+                parser = parse_bag(scanned.path)
+                metadata = parser.get_metadata()
+                bag_id = index.upsert_bag(scanned, metadata)
+
+                bf = BagFrame(scanned.path)
+                report = bf.health_report()
+                index.update_health_score(bag_id, report.score)
+                indexed += 1
+
+                yield f"data: {json.dumps({'event': 'indexed', 'file': scanned.path.name, 'health': report.score, 'progress': i + 1, 'total': total})}\n\n"
+            except Exception as e:
+                errors.append({"file": str(scanned.path), "error": str(e)})
+                yield f"data: {json.dumps({'event': 'error', 'file': scanned.path.name, 'error': str(e), 'progress': i + 1, 'total': total})}\n\n"
+
+            # Yield control to event loop so SSE messages flush
+            await asyncio.sleep(0)
+    finally:
+        index.close()
+
+    yield f"data: {json.dumps({'event': 'complete', 'scanned': total, 'indexed': indexed, 'errors': errors})}\n\n"
 
 
 @app.get("/api/bags/{bag_id}/timeline")

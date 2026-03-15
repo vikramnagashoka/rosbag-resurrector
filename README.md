@@ -2,7 +2,7 @@
 
 **Stop letting your rosbag data rot. Analyze it.**
 
-A pandas-like data analysis tool for robotics bag files with automatic quality validation, multi-stream synchronization, ML-ready export, and an interactive web dashboard.
+A pandas-like data analysis tool for robotics bag files with automatic quality validation, multi-stream synchronization, ML-ready export, reproducible datasets, and an interactive web dashboard.
 
 > "We have terabytes of rosbag data and no good way to work with it after recording. Every time someone wants to analyze something, they write throwaway scripts to convert to CSV. Most bags never get analyzed at all."
 >
@@ -57,6 +57,20 @@ report = bf.health_report()
 # Recommendation: increase buffer size or reduce recording frequency
 ```
 
+**Configurable thresholds** — every robot is different. Tune thresholds for your platform:
+
+```python
+from resurrector.ingest.health_check import HealthChecker, HealthConfig
+
+config = HealthConfig(
+    rate_drop_threshold=0.4,      # 40% drop before flagging (default: 25%)
+    gap_multiplier=3.0,           # 3x expected period for gap detection (default: 2x)
+    completeness_threshold=0.1,   # 10% start/end delay tolerance (default: 5%)
+    size_deviation_threshold=0.8, # 80% size deviation tolerance (default: 50%)
+)
+checker = HealthChecker(config)
+```
+
 ### Pandas-Like API
 
 Work with robotics data the way you work with any tabular data:
@@ -75,6 +89,16 @@ df = imu.to_polars()
 #           angular_velocity.x, .y, .z, orientation.x, .y, .z, .w
 ```
 
+### Jupyter Notebook Integration
+
+BagFrame renders rich HTML tables in Jupyter with health badges, topic groups, and styled output:
+
+```python
+# In a Jupyter notebook cell, just display the object:
+bf = BagFrame("experiment.mcap")
+bf  # Renders interactive HTML table with health badges and topic groups
+```
+
 ### Multi-Stream Synchronization
 
 Topics publish at independent rates. Resurrector aligns them:
@@ -90,6 +114,68 @@ synced = bf.sync(["/imu/data", "/joint_states"], method="interpolate")
 synced = bf.sync(["/imu/data", "/camera/rgb"], method="sample_and_hold")
 ```
 
+### Reproducible Datasets
+
+Create named, versioned dataset collections with full provenance tracking — the bridge between raw bags and ML training pipelines:
+
+```python
+from resurrector import DatasetManager, BagRef, SyncConfig, DatasetMetadata
+
+mgr = DatasetManager()
+
+# Create a dataset
+mgr.create("pick-and-place-v1", description="Training data for manipulation")
+
+# Add a version with specific bags, topics, and sync config
+mgr.create_version(
+    dataset_name="pick-and-place-v1",
+    version="1.0",
+    bag_refs=[
+        BagRef(path="session_001.mcap", topics=["/imu/data", "/joint_states"]),
+        BagRef(path="session_002.mcap", start_time="10s", end_time="60s"),
+    ],
+    sync_config=SyncConfig(method="nearest", tolerance_ms=25),
+    export_format="parquet",
+    downsample_hz=50,
+    metadata=DatasetMetadata(
+        description="6-DOF arm pick-and-place demonstrations",
+        license="MIT",
+        robot_type="UR5e",
+        task="pick_and_place",
+        tags=["manipulation", "imitation-learning"],
+    ),
+)
+
+# Export — creates data files, manifest.json, dataset_config.json, and README.md
+output = mgr.export_version("pick-and-place-v1", "1.0", output_dir="./datasets")
+```
+
+Each exported dataset includes:
+- **manifest.json** — SHA256 hashes of every file for reproducibility
+- **dataset_config.json** — full configuration for re-creating the dataset
+- **README.md** — auto-generated documentation with sources, config, and a Python code snippet to load the data
+
+### Smart Topic Grouping
+
+Topics are automatically categorized into semantic groups for easier navigation:
+
+```python
+from resurrector.core.topic_groups import classify_topics
+
+groups = classify_topics(bf.topic_names)
+# [TopicGroup(name='Perception', topics=['/camera/rgb', '/lidar/scan']),
+#  TopicGroup(name='State', topics=['/imu/data', '/joint_states']),
+#  TopicGroup(name='Transforms', topics=['/tf', '/tf_static'])]
+```
+
+Built-in groups: **Perception**, **State**, **Navigation**, **Control**, **Transforms**, **Diagnostics**. Override with custom patterns:
+
+```python
+groups = classify_topics(bf.topic_names, custom_patterns={
+    "MyRobot Sensors": ["/my_sensor", "/custom_lidar"],
+})
+```
+
 ### ML-Ready Export
 
 Export directly to the formats your training pipeline expects:
@@ -100,6 +186,8 @@ bf.export(topics=["/imu/data", "/joint_states"],
           sync=True,
           downsample_hz=10)
 ```
+
+Large topics (>50k messages) are automatically streamed to Parquet in chunks to prevent out-of-memory errors.
 
 | Format | Best For |
 |--------|----------|
@@ -139,6 +227,14 @@ resurrector dashboard --port 8080
 - **Health** — Visual quality reports with recommendations
 - **Compare** — Side-by-side bag comparison
 
+The scan endpoint supports **Server-Sent Events** for real-time progress streaming:
+
+```
+POST /api/scan?path=/data/bags&stream=true
+```
+
+Returns SSE events as bags are indexed, so the UI can show bags appearing in real-time.
+
 ### Searchable Index
 
 DuckDB-powered index for fast queries across your entire bag collection:
@@ -149,11 +245,25 @@ from resurrector import search
 results = search("topic:/camera/rgb health:>80 after:2025-01")
 ```
 
+**Stale index detection** — automatically detects when indexed bags have been moved or deleted:
+
+```python
+from resurrector.ingest.indexer import BagIndex
+
+index = BagIndex()
+stale = index.validate_paths()   # Find missing files
+removed = index.remove_stale()   # Clean up stale entries
+```
+
 ## CLI Reference
 
 ```bash
 # Scan and index a directory
 resurrector scan /path/to/bags/
+resurrector scan /path/to/bags/ --verbose --log-file scan.log
+
+# Quick summary with sparklines and grouped topics
+resurrector quicklook experiment.mcap
 
 # Show bag info
 resurrector info experiment.mcap
@@ -178,6 +288,18 @@ resurrector diff bag1.mcap bag2.mcap
 # Tag bags for organization
 resurrector tag experiment.mcap --add "task:pick_and_place" "robot:digit"
 
+# Watch a directory for new bags (auto-index on arrival)
+resurrector watch /path/to/recording/dir/ --interval 5
+
+# Dataset management
+resurrector dataset create my-dataset --desc "Pick and place training"
+resurrector dataset add-version my-dataset 1.0 \
+  --bag session_001.mcap --bag session_002.mcap \
+  --topic /imu/data --topic /joint_states \
+  --format parquet
+resurrector dataset export my-dataset 1.0 --output ./datasets
+resurrector dataset list
+
 # Launch web dashboard
 resurrector dashboard --port 8080
 ```
@@ -186,14 +308,20 @@ resurrector dashboard --port 8080
 
 | Feature | Resurrector | Foxglove | PlotJuggler | rosbag2_py |
 |---------|------------|----------|-------------|------------|
-| Automatic health checks | Yes | No | No | No |
+| Automatic health checks | Yes (configurable) | No | No | No |
 | Pandas/Polars API | Yes | No | No | Partial |
-| Multi-stream sync | Yes | Visual only | Visual only | No |
-| ML-ready export | Yes | No | CSV only | No |
+| Multi-stream sync | Yes (3 methods) | Visual only | Visual only | No |
+| ML-ready export | Yes (5 formats) | No | CSV only | No |
+| Reproducible datasets | Yes (versioned) | No | No | No |
+| Smart topic grouping | Yes | No | No | No |
 | Web dashboard | Yes | Yes (paid) | No | No |
+| Jupyter integration | Yes (rich HTML) | No | No | No |
+| Directory watch mode | Yes | No | No | No |
 | No ROS install needed | Yes | Yes | Needs ROS | Needs ROS |
 | DuckDB search index | Yes | No | No | No |
+| Streaming export (OOM-safe) | Yes | No | No | No |
 | Batch processing | Yes | No | No | Yes |
+| Structured logging | Yes | N/A | N/A | No |
 
 ## Supported Formats
 
@@ -208,7 +336,7 @@ resurrector dashboard --port 8080
 ```
 resurrector/
   ingest/          # Scanner, parser, indexer, health checks
-  core/            # BagFrame, sync engine, transforms, export
+  core/            # BagFrame, sync, transforms, export, datasets, topic groups
   cli/             # Typer CLI with Rich formatting
   dashboard/       # FastAPI backend + React frontend
 ```
@@ -219,24 +347,41 @@ resurrector/
 3. **Escape hatches** — `.to_polars()` / `.to_pandas()` / `.to_numpy()` to drop into familiar tools
 4. **ROS-aware but not ROS-dependent** — parses MCAP directly, no ROS installation needed
 5. **Fast** — Polars for processing, DuckDB for queries, lazy evaluation
+6. **Reproducible** — versioned datasets with manifests and auto-generated documentation
 
 ## Development
 
 ```bash
-git clone https://github.com/your-org/rosbag-resurrector.git
+git clone https://github.com/vikramnagashoka/rosbag-resurrector.git
 cd rosbag-resurrector
 pip install -e ".[dev]"
 
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests
+# Run tests (127 tests)
 pytest tests/ -v
 
 # Build dashboard frontend
 cd resurrector/dashboard/app
 npm install && npm run build
 ```
+
+### Test Coverage
+
+| Test Suite | Tests | Covers |
+|-----------|-------|--------|
+| test_integration | 5 | Full pipeline: scan → index → health → sync → export |
+| test_cli | 14 | All CLI commands including quicklook, watch, dataset |
+| test_api | 13 | FastAPI endpoints: CRUD, health, sync, search, export |
+| test_dataset | 14 | Dataset manager: create, version, export, manifest |
+| test_bag_frame | 13 | BagFrame API, time slicing, conversions |
+| test_ingest | 17 | Scanner, parser, indexer |
+| test_sync | 6 | All 3 sync methods |
+| test_health | 7 | Health checks, recommendations, caching |
+| test_health_config | 5 | Configurable thresholds, edge cases |
+| test_export | 8 | All export formats, downsampling |
+| test_topic_groups | 12 | Topic classification, custom patterns |
 
 ## Contributing
 
@@ -245,6 +390,7 @@ Contributions welcome! Key extension points:
 - **New export formats**: Add a method to `resurrector/core/export.py`
 - **New health checks**: Add a method to `resurrector/ingest/health_check.py`
 - **New transforms**: Add to `resurrector/core/transforms.py`
+- **New topic groups**: Add patterns to `resurrector/core/topic_groups.py`
 - **ROS1 support**: Implement a `ROS1Parser` in `resurrector/ingest/parser.py`
 
 ## License

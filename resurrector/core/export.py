@@ -1,10 +1,11 @@
 """Export bag data to ML-friendly formats.
 
-Supports: Parquet, HDF5, CSV, NumPy, Zarr, RLDS, LeRobot.
+Supports: Parquet, HDF5, CSV, NumPy, Zarr.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,11 @@ import numpy as np
 
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import BagFrame
+
+logger = logging.getLogger("resurrector.core.export")
+
+# Maximum rows to hold in memory per chunk when streaming
+CHUNK_SIZE = 50_000
 
 
 class Exporter:
@@ -56,15 +62,78 @@ class Exporter:
                 try:
                     view = bag_frame[topic]
                 except KeyError:
+                    logger.warning("Topic '%s' not found, skipping", topic)
                     continue
-                df = view.to_polars()
+
+                # Stream large topics in chunks to avoid OOM
+                msg_count = view.message_count
+                if msg_count > CHUNK_SIZE and format == "parquet":
+                    logger.info(
+                        "Streaming export for '%s' (%d messages)", topic, msg_count
+                    )
+                    safe_name = topic.lstrip("/").replace("/", "_")
+                    self._export_streaming_parquet(
+                        view, output_path, safe_name, downsample_hz,
+                    )
+                else:
+                    df = view.to_polars()
+                    if downsample_hz:
+                        from resurrector.core.transforms import downsample_temporal
+                        df = downsample_temporal(df, downsample_hz)
+                    safe_name = topic.lstrip("/").replace("/", "_")
+                    self._export_dataframe(df, format, output_path, safe_name)
+
+        return output_path
+
+    def _export_streaming_parquet(
+        self, view, output_path: Path, name: str, downsample_hz: float | None,
+    ) -> None:
+        """Stream large topics to Parquet without loading all into memory."""
+        import polars as pl
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        filepath = output_path / f"{name}.parquet"
+        writer = None
+        rows_written = 0
+
+        try:
+            chunk_rows: list[dict] = []
+            for msg in view.iter_messages():
+                row = {"timestamp_ns": msg.timestamp_ns}
+                from resurrector.core.bag_frame import _flatten_dict
+                _flatten_dict(msg.data, row)
+                chunk_rows.append(row)
+
+                if len(chunk_rows) >= CHUNK_SIZE:
+                    df = pl.DataFrame(chunk_rows)
+                    if downsample_hz:
+                        from resurrector.core.transforms import downsample_temporal
+                        df = downsample_temporal(df, downsample_hz)
+                    table = df.to_arrow()
+                    if writer is None:
+                        writer = pq.ParquetWriter(str(filepath), table.schema)
+                    writer.write_table(table)
+                    rows_written += df.height
+                    chunk_rows.clear()
+
+            # Write remaining
+            if chunk_rows:
+                df = pl.DataFrame(chunk_rows)
                 if downsample_hz:
                     from resurrector.core.transforms import downsample_temporal
                     df = downsample_temporal(df, downsample_hz)
-                safe_name = topic.lstrip("/").replace("/", "_")
-                self._export_dataframe(df, format, output_path, safe_name)
+                table = df.to_arrow()
+                if writer is None:
+                    writer = pq.ParquetWriter(str(filepath), table.schema)
+                writer.write_table(table)
+                rows_written += df.height
 
-        return output_path
+        finally:
+            if writer is not None:
+                writer.close()
+
+        logger.info("Streamed %d rows to %s", rows_written, filepath)
 
     def _export_dataframe(
         self, df, format: str, output_path: Path, name: str,
@@ -112,15 +181,7 @@ class Exporter:
                     pass
 
     def _to_csv(self, df, output_path: Path, name: str) -> None:
-        """Export to CSV (numeric columns only)."""
-        # Filter to numeric columns + timestamp
-        numeric_cols = ["timestamp_ns"] + [
-            c for c in df.columns
-            if c != "timestamp_ns" and df[c].dtype in (
-                    getattr(df[c].dtype, '__class__', type(None)),
-            ) or str(df[c].dtype).startswith(("Int", "Float", "UInt", "f", "i", "u"))
-        ]
-        # Simpler approach: just write all columns, CSV handles mixed types
+        """Export to CSV."""
         df.write_csv(output_path / f"{name}.csv")
 
     def _to_numpy(self, df, output_path: Path, name: str) -> None:
