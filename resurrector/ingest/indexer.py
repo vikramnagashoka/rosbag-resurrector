@@ -75,6 +75,22 @@ class BagIndex:
         self.conn.execute("""
             CREATE SEQUENCE IF NOT EXISTS tag_id_seq START 1
         """)
+        # Frame embeddings for semantic image search
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS frame_embeddings (
+                id INTEGER PRIMARY KEY,
+                bag_id INTEGER NOT NULL,
+                topic VARCHAR NOT NULL,
+                timestamp_ns BIGINT NOT NULL,
+                frame_index INTEGER NOT NULL,
+                embedding DOUBLE[512] NOT NULL,
+                indexed_at TIMESTAMP DEFAULT current_timestamp,
+                UNIQUE(bag_id, topic, timestamp_ns)
+            )
+        """)
+        self.conn.execute("""
+            CREATE SEQUENCE IF NOT EXISTS frame_embedding_id_seq START 1
+        """)
 
     def upsert_bag(self, scanned: ScannedFile, metadata: BagMetadata) -> int:
         """Insert or update a bag in the index. Returns the bag ID."""
@@ -345,10 +361,100 @@ class BagIndex:
         return len(stale)
 
     def remove_bag(self, bag_id: int):
-        """Remove a bag and its associated topics/tags from the index."""
+        """Remove a bag and its associated topics/tags/embeddings from the index."""
+        self.conn.execute("DELETE FROM frame_embeddings WHERE bag_id = ?", [bag_id])
         self.conn.execute("DELETE FROM topics WHERE bag_id = ?", [bag_id])
         self.conn.execute("DELETE FROM tags WHERE bag_id = ?", [bag_id])
         self.conn.execute("DELETE FROM bags WHERE id = ?", [bag_id])
+
+    # --- Frame embedding methods ---
+
+    def upsert_frame_embeddings(
+        self,
+        bag_id: int,
+        topic: str,
+        timestamps_ns: list[int],
+        frame_indices: list[int],
+        embeddings: list[list[float]],
+    ) -> int:
+        """Bulk insert frame embeddings. Returns count inserted."""
+        count = 0
+        for ts, idx, emb in zip(timestamps_ns, frame_indices, embeddings):
+            eid = self.conn.execute("SELECT nextval('frame_embedding_id_seq')").fetchone()[0]
+            self.conn.execute("""
+                INSERT INTO frame_embeddings (id, bag_id, topic, timestamp_ns, frame_index, embedding)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+            """, [eid, bag_id, topic, ts, idx, emb])
+            count += 1
+        return count
+
+    def has_frame_embeddings(self, bag_id: int, topic: str | None = None) -> bool:
+        """Check if a bag already has frame embeddings indexed."""
+        if topic:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM frame_embeddings WHERE bag_id = ? AND topic = ?",
+                [bag_id, topic],
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM frame_embeddings WHERE bag_id = ?",
+                [bag_id],
+            ).fetchone()
+        return row[0] > 0
+
+    def count_frame_embeddings(self, bag_id: int | None = None) -> int:
+        """Count frame embeddings, optionally filtered to a bag."""
+        if bag_id is not None:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM frame_embeddings WHERE bag_id = ?", [bag_id]
+            ).fetchone()[0]
+        return self.conn.execute("SELECT COUNT(*) FROM frame_embeddings").fetchone()[0]
+
+    def search_embeddings(
+        self,
+        query_embedding: list[float],
+        top_k: int = 20,
+        bag_id: int | None = None,
+        min_similarity: float = 0.15,
+    ) -> list[dict[str, Any]]:
+        """Cosine similarity search against frame embeddings."""
+        conditions = ["list_cosine_similarity(fe.embedding, ?::DOUBLE[512]) >= ?"]
+        params: list[Any] = [query_embedding, min_similarity]
+
+        if bag_id is not None:
+            conditions.append("fe.bag_id = ?")
+            params.append(bag_id)
+
+        where = " AND ".join(conditions)
+        params.extend([query_embedding, top_k])
+
+        rows = self.conn.execute(f"""
+            SELECT
+                fe.bag_id, fe.topic, fe.timestamp_ns, fe.frame_index,
+                list_cosine_similarity(fe.embedding, ?::DOUBLE[512]) AS similarity,
+                b.path AS bag_path
+            FROM frame_embeddings fe
+            JOIN bags b ON b.id = fe.bag_id
+            WHERE {where}
+            ORDER BY similarity DESC
+            LIMIT ?
+        """, params).fetchall()
+
+        cols = [desc[0] for desc in self.conn.description]
+        return [dict(zip(cols, row)) for row in rows]
+
+    def delete_frame_embeddings(self, bag_id: int, topic: str | None = None):
+        """Delete embeddings for a bag (used for re-indexing)."""
+        if topic:
+            self.conn.execute(
+                "DELETE FROM frame_embeddings WHERE bag_id = ? AND topic = ?",
+                [bag_id, topic],
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM frame_embeddings WHERE bag_id = ?", [bag_id]
+            )
 
     def close(self):
         """Close the database connection."""

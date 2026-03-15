@@ -207,6 +207,8 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
             result = _parse_image(buf)
         elif msg_type == "sensor_msgs/msg/LaserScan":
             result = _parse_laser_scan(buf)
+        elif msg_type == "sensor_msgs/msg/CompressedImage":
+            result = _parse_compressed_image(buf)
         else:
             logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
             result = {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
@@ -385,6 +387,65 @@ def get_image_array(msg: Message) -> np.ndarray | None:
     if channels == 1:
         return arr.reshape(height, width)
     return arr.reshape(height, width, channels)
+
+
+def _parse_compressed_image(buf: bytes) -> dict[str, Any]:
+    """Parse sensor_msgs/CompressedImage from CDR buffer.
+
+    CDR layout: Header header + string format + uint8[] data
+    """
+    sec, nsec, frame_id, off = _read_header(buf, 0)
+    # format string (e.g., "jpeg", "png")
+    fmt_len = struct.unpack_from("<I", buf, off)[0]
+    off += 4
+    fmt = buf[off:off + fmt_len].decode("utf-8", errors="replace").rstrip("\x00")
+    off += fmt_len
+    off = (off + 3) & ~3
+    # compressed data: uint8[] (length-prefixed)
+    data_len = struct.unpack_from("<I", buf, off)[0]
+    off += 4
+    return {
+        "header": {"stamp_sec": sec, "stamp_nsec": nsec, "frame_id": frame_id},
+        "format": fmt,
+        "data_length": data_len,
+        "_compressed_data_offset": off,
+    }
+
+
+def get_compressed_image_array(msg: Message) -> np.ndarray | None:
+    """Decode a CompressedImage message (JPEG/PNG) to a numpy array.
+
+    Requires Pillow: pip install rosbag-resurrector[vision-lite]
+    """
+    if msg.raw_data is None or "format" not in msg.data:
+        return None
+    offset = msg.data.get("_compressed_data_offset")
+    if offset is None:
+        return None
+
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        raise ImportError(
+            "CompressedImage decoding requires Pillow. "
+            "Install with: pip install rosbag-resurrector[vision-lite]"
+        )
+
+    import io
+
+    data_len = msg.data["data_length"]
+    raw = msg.raw_data[4:]  # Skip CDR encapsulation header
+    compressed_bytes = raw[offset:offset + data_len]
+
+    if not compressed_bytes:
+        return None
+
+    try:
+        img = PILImage.open(io.BytesIO(compressed_bytes))
+        return np.array(img)
+    except Exception:
+        logger.warning("Failed to decode CompressedImage (%s, %d bytes)", msg.data["format"], data_len)
+        return None
 
 
 def parse_bag(path: str | Path) -> MCAPParser:

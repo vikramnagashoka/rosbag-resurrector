@@ -212,3 +212,103 @@ class Exporter:
                     root.create_dataset(col, data=data, chunks=True)
             except Exception:
                 pass
+
+    def export_frames(
+        self,
+        topic_view,
+        output_dir: str | Path,
+        format: str = "png",
+        max_frames: int | None = None,
+        every_n: int = 1,
+    ) -> Path:
+        """Export an image topic as a sequence of numbered image files.
+
+        Args:
+            topic_view: A TopicView for an image topic.
+            output_dir: Directory to save frames.
+            format: Image format — "png" or "jpeg".
+            max_frames: Maximum number of frames to export.
+            every_n: Export every Nth frame (for subsampling).
+
+        Returns:
+            Path to the output directory.
+        """
+        try:
+            from PIL import Image as PILImage
+        except ImportError:
+            raise ImportError(
+                "Frame export requires Pillow. "
+                "Install with: pip install rosbag-resurrector[vision-lite]"
+            )
+
+        output_path = Path(output_dir)
+        safe_name = topic_view.name.lstrip("/").replace("/", "_")
+        frames_dir = output_path / safe_name
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        count = 0
+        for i, (ts, arr) in enumerate(topic_view.iter_images()):
+            if i % every_n != 0:
+                continue
+            img = PILImage.fromarray(arr)
+            ext = "jpg" if format == "jpeg" else format
+            img.save(frames_dir / f"frame_{count:06d}.{ext}")
+            count += 1
+            if max_frames and count >= max_frames:
+                break
+
+        logger.info("Exported %d frames to %s", count, frames_dir)
+        return frames_dir
+
+    def export_video(
+        self,
+        topic_view,
+        output_path: str | Path,
+        fps: float | None = None,
+        codec: str = "mp4v",
+    ) -> Path:
+        """Export an image topic as an MP4 video file.
+
+        Args:
+            topic_view: A TopicView for an image topic.
+            output_path: Path for the output video file.
+            fps: Frames per second. Defaults to the topic's native frequency.
+            codec: FourCC codec string.
+
+        Returns:
+            Path to the output video file.
+        """
+        try:
+            import cv2
+        except ImportError:
+            raise ImportError(
+                "Video export requires OpenCV. "
+                "Install with: pip install rosbag-resurrector[vision-lite]"
+            )
+
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        if fps is None:
+            fps = topic_view.frequency_hz or 30.0
+
+        writer = None
+        count = 0
+        try:
+            for ts, arr in topic_view.iter_images():
+                if writer is None:
+                    h, w = arr.shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    writer = cv2.VideoWriter(str(output_file), fourcc, fps, (w, h))
+
+                # Convert RGB to BGR for OpenCV
+                if len(arr.shape) == 3 and arr.shape[2] == 3:
+                    arr = arr[:, :, ::-1]
+                writer.write(arr)
+                count += 1
+        finally:
+            if writer is not None:
+                writer.release()
+
+        logger.info("Exported %d frames as video to %s", count, output_file)
+        return output_file
