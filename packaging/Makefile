@@ -15,9 +15,11 @@
 .PHONY: all build-base macos ubuntu obfuscate clean
 
 VERSION ?= 0.2.0
-ROOT := $(shell cd .. && pwd)
+MKFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+ROOT := $(abspath $(MKFILE_DIR)/..)
 DIST := $(ROOT)/dist
 SRC := $(ROOT)/resurrector
+PKG := $(ROOT)/packaging
 
 # Detect platform
 UNAME := $(shell uname -s)
@@ -74,12 +76,12 @@ build-base:
 # --- macOS DMG ---
 
 macos: build-base
-	bash packaging/macos/create_dmg.sh $(VERSION)
+	bash $(PKG)/macos/create_dmg.sh $(VERSION)
 
 # --- Ubuntu DEB ---
 
 ubuntu: build-base
-	bash packaging/ubuntu/build_deb.sh $(VERSION)
+	bash $(PKG)/ubuntu/build_deb.sh $(VERSION)
 
 # --- With obfuscation (production builds) ---
 
@@ -104,7 +106,7 @@ macos-release: obfuscate
 		--exclude-module sentence_transformers \
 		--exclude-module pytest \
 		$(DIST)/obfuscated/resurrector/cli/main.py
-	bash packaging/macos/create_dmg.sh $(VERSION)
+	bash $(PKG)/macos/create_dmg.sh $(VERSION)
 
 ubuntu-release: obfuscate
 	@echo "=== Building obfuscated Ubuntu release ==="
@@ -127,7 +129,7 @@ ubuntu-release: obfuscate
 		--exclude-module sentence_transformers \
 		--exclude-module pytest \
 		$(DIST)/obfuscated/resurrector/cli/main.py
-	bash packaging/ubuntu/build_deb.sh $(VERSION)
+	bash $(PKG)/ubuntu/build_deb.sh $(VERSION)
 
 # --- Clean ---
 
