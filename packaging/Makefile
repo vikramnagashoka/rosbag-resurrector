@@ -36,7 +36,7 @@ endif
 
 obfuscate:
 	@echo "=== Obfuscating source with Pyarmor ==="
-	cd $(ROOT) && python -m pyarmor gen \
+	cd $(ROOT) && pyarmor gen \
 		--output $(DIST)/obfuscated \
 		--recursive \
 		$(SRC)/
