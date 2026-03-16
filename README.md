@@ -2,7 +2,11 @@
 
 **Stop letting your rosbag data rot. Analyze it.**
 
-A pandas-like data analysis tool for robotics bag files with automatic quality validation, multi-stream synchronization, ML-ready export, reproducible datasets, and an interactive web dashboard.
+<p align="center">
+  <img src="assets/demo.gif" alt="RosBag Resurrector Demo" width="800">
+</p>
+
+A pandas-like data analysis tool for robotics bag files with automatic quality validation, multi-stream synchronization, ML-ready export, CLIP-powered semantic search, and a PlotJuggler-compatible WebSocket bridge.
 
 > "We have terabytes of rosbag data and no good way to work with it after recording. Every time someone wants to analyze something, they write throwaway scripts to convert to CSV. Most bags never get analyzed at all."
 >
