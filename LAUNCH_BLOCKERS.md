@@ -11,7 +11,7 @@ All items must land before HN / Reddit / Twitter launch.
 
 - [x] **#3 — Full streaming for all export formats + LazyTopicView** — DONE (177 tests pass)
 - [x] **#2 — DRY'd export error collection + ExportError** — DONE as part of #3
-- [ ] **#1 — CDR parser bounds checks + typed errors + tests** (1-2 hrs) — IN PROGRESS
+- [x] **#1 — CDR parser bounds checks + typed errors + tests** — DONE (12 new tests)
 - [ ] **#4 — RLDS + LeRobot export formats** (1-2 days)
 - [ ] **#5 — DuckDB thread safety** (2-3 hrs)
 - [ ] **#6 — Dashboard path validation default** (30 min)

@@ -186,11 +186,65 @@ class MCAPParser:
                 )
 
 
+class CDRParseError(ValueError):
+    """Raised when a CDR-encoded message is truncated or malformed.
+
+    Indicates the message's declared field counts or string lengths exceed
+    the actual buffer size — typically from a corrupted recording or
+    a mismatched schema.
+    """
+
+    def __init__(self, msg_type: str, offset: int, needed: int, available: int, detail: str = ""):
+        self.msg_type = msg_type
+        self.offset = offset
+        self.needed = needed
+        self.available = available
+        super().__init__(
+            f"CDR parse failed for {msg_type} at offset {offset}: "
+            f"needed {needed} bytes, buffer has {available}"
+            f"{' — ' + detail if detail else ''}"
+        )
+
+
+def _safe_unpack(fmt: str, buf: bytes, offset: int, msg_type: str = "?") -> tuple:
+    """struct.unpack_from with explicit bounds checking.
+
+    Raises CDRParseError with actionable context instead of letting
+    struct.error propagate with opaque positional details.
+    """
+    needed = struct.calcsize(fmt)
+    if offset + needed > len(buf):
+        raise CDRParseError(msg_type, offset, needed, len(buf) - offset)
+    return struct.unpack_from(fmt, buf, offset)
+
+
+def _safe_read_string(buf: bytes, offset: int, msg_type: str = "?") -> tuple[str, int]:
+    """Read a length-prefixed CDR string with bounds validation.
+
+    Returns (string, new_offset). Raises CDRParseError if the declared
+    string length would read past the buffer.
+    """
+    (str_len,) = _safe_unpack("<I", buf, offset, msg_type)
+    offset += 4
+    if offset + str_len > len(buf):
+        raise CDRParseError(
+            msg_type, offset, str_len, len(buf) - offset,
+            detail=f"string length {str_len} exceeds buffer",
+        )
+    s = buf[offset:offset + str_len].decode("utf-8", errors="replace").rstrip("\x00")
+    offset += str_len
+    # Align to 4 bytes
+    offset = (offset + 3) & ~3
+    return s, offset
+
+
 def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
     """Best-effort CDR deserialization for common ROS2 message types.
 
-    This handles the most common sensor message types without needing
-    the full ROS2 type system.
+    Handles the most common sensor message types without needing the
+    full ROS2 type system. On malformed input, a CDRParseError is
+    caught here and surfaced in the returned dict rather than
+    propagating up — so one bad message doesn't abort a whole bag scan.
     """
     result: dict[str, Any] = {}
     if len(data) < 4:
@@ -212,6 +266,12 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
         else:
             logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
             result = {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
+    except CDRParseError as exc:
+        logger.warning("CDR parse error: %s", exc)
+        result = {
+            "_parse_error": True, "_msg_type": msg_type, "_raw_size": len(data),
+            "_error": str(exc),
+        }
     except Exception as exc:
         logger.warning(
             "CDR parse error for '%s' (%d bytes): %s", msg_type, len(data), exc
@@ -221,34 +281,37 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
     return result
 
 
-def _read_header(buf: bytes, offset: int) -> tuple[int, int, str, int]:
-    """Read a std_msgs/Header from CDR buffer. Returns (sec, nsec, frame_id, new_offset)."""
-    sec, nsec = struct.unpack_from("<II", buf, offset)
+def _read_header(buf: bytes, offset: int, msg_type: str = "?") -> tuple[int, int, str, int]:
+    """Read a std_msgs/Header from CDR buffer.
+
+    Returns (sec, nsec, frame_id, new_offset). Bounds-checked.
+    """
+    sec, nsec = _safe_unpack("<II", buf, offset, msg_type)
     offset += 8
-    str_len = struct.unpack_from("<I", buf, offset)[0]
-    offset += 4
-    frame_id = buf[offset:offset + str_len].decode("utf-8", errors="replace").rstrip("\x00")
-    offset += str_len
-    # Align to 4 bytes
-    offset = (offset + 3) & ~3
+    frame_id, offset = _safe_read_string(buf, offset, msg_type)
     return sec, nsec, frame_id, offset
 
 
 def _parse_imu(buf: bytes) -> dict[str, Any]:
     """Parse sensor_msgs/Imu from CDR buffer."""
-    sec, nsec, frame_id, off = _read_header(buf, 0)
+    mt = "sensor_msgs/msg/Imu"
+    sec, nsec, frame_id, off = _read_header(buf, 0, mt)
     # orientation: 4 x float64
-    qx, qy, qz, qw = struct.unpack_from("<4d", buf, off)
+    qx, qy, qz, qw = _safe_unpack("<4d", buf, off, mt)
     off += 32
     # orientation_covariance: 9 x float64
     off += 72
+    if off > len(buf):
+        raise CDRParseError(mt, off, 0, 0, detail="truncated before angular_velocity")
     # angular_velocity: 3 x float64
-    gx, gy, gz = struct.unpack_from("<3d", buf, off)
+    gx, gy, gz = _safe_unpack("<3d", buf, off, mt)
     off += 24
     # angular_velocity_covariance: 9 x float64
     off += 72
+    if off > len(buf):
+        raise CDRParseError(mt, off, 0, 0, detail="truncated before linear_acceleration")
     # linear_acceleration: 3 x float64
-    ax, ay, az = struct.unpack_from("<3d", buf, off)
+    ax, ay, az = _safe_unpack("<3d", buf, off, mt)
 
     return {
         "header": {"stamp_sec": sec, "stamp_nsec": nsec, "frame_id": frame_id},
@@ -258,35 +321,42 @@ def _parse_imu(buf: bytes) -> dict[str, Any]:
     }
 
 
+# Upper bounds to guard against malicious / corrupted n-prefixes before
+# we try to allocate or read. 10M fields/names is far larger than any
+# real ROS message; past this we reject rather than attempt to parse.
+_MAX_ARRAY_LEN = 10_000_000
+
+
 def _parse_joint_state(buf: bytes) -> dict[str, Any]:
     """Parse sensor_msgs/JointState from CDR buffer."""
-    sec, nsec, frame_id, off = _read_header(buf, 0)
+    mt = "sensor_msgs/msg/JointState"
+    sec, nsec, frame_id, off = _read_header(buf, 0, mt)
 
     # names: string[]
-    n_names = struct.unpack_from("<I", buf, off)[0]
+    (n_names,) = _safe_unpack("<I", buf, off, mt)
     off += 4
-    names = []
+    if n_names > _MAX_ARRAY_LEN:
+        raise CDRParseError(mt, off - 4, 0, 0, detail=f"n_names={n_names} exceeds max")
+    names: list[str] = []
     for _ in range(n_names):
-        str_len = struct.unpack_from("<I", buf, off)[0]
-        off += 4
-        name = buf[off:off + str_len].decode("utf-8", errors="replace").rstrip("\x00")
-        off += str_len
-        off = (off + 3) & ~3
+        name, off = _safe_read_string(buf, off, mt)
         names.append(name)
 
-    def read_float64_array() -> tuple[list[float], int]:
+    def read_float64_array() -> list[float]:
         nonlocal off
-        n = struct.unpack_from("<I", buf, off)[0]
+        (n,) = _safe_unpack("<I", buf, off, mt)
         off += 4
+        if n > _MAX_ARRAY_LEN:
+            raise CDRParseError(mt, off - 4, 0, 0, detail=f"array length {n} exceeds max")
         # Align to 8 bytes for float64
         off = (off + 7) & ~7
-        values = list(struct.unpack_from(f"<{n}d", buf, off))
+        values = list(_safe_unpack(f"<{n}d", buf, off, mt)) if n > 0 else []
         off += n * 8
-        return values, off
+        return values
 
-    positions, off = read_float64_array()
-    velocities, off = read_float64_array()
-    efforts, off = read_float64_array()
+    positions = read_float64_array()
+    velocities = read_float64_array()
+    efforts = read_float64_array()
 
     return {
         "header": {"stamp_sec": sec, "stamp_nsec": nsec, "frame_id": frame_id},
@@ -299,20 +369,17 @@ def _parse_joint_state(buf: bytes) -> dict[str, Any]:
 
 def _parse_image(buf: bytes) -> dict[str, Any]:
     """Parse sensor_msgs/Image from CDR buffer (metadata only, not pixel data)."""
-    sec, nsec, frame_id, off = _read_header(buf, 0)
-    height, width = struct.unpack_from("<II", buf, off)
+    mt = "sensor_msgs/msg/Image"
+    sec, nsec, frame_id, off = _read_header(buf, 0, mt)
+    height, width = _safe_unpack("<II", buf, off, mt)
     off += 8
-    enc_len = struct.unpack_from("<I", buf, off)[0]
-    off += 4
-    encoding = buf[off:off + enc_len].decode("utf-8", errors="replace").rstrip("\x00")
-    off += enc_len
-    off = (off + 3) & ~3
-    is_bigendian = struct.unpack_from("<B", buf, off)[0]
+    encoding, off = _safe_read_string(buf, off, mt)
+    (is_bigendian,) = _safe_unpack("<B", buf, off, mt)
     off += 1
     off = (off + 3) & ~3
-    step = struct.unpack_from("<I", buf, off)[0]
+    (step,) = _safe_unpack("<I", buf, off, mt)
     off += 4
-    data_len = struct.unpack_from("<I", buf, off)[0]
+    (data_len,) = _safe_unpack("<I", buf, off, mt)
     off += 4
     # Don't store pixel data in the dict — too large
     return {
@@ -329,18 +396,23 @@ def _parse_image(buf: bytes) -> dict[str, Any]:
 
 def _parse_laser_scan(buf: bytes) -> dict[str, Any]:
     """Parse sensor_msgs/LaserScan from CDR buffer."""
-    sec, nsec, frame_id, off = _read_header(buf, 0)
-    angle_min, angle_max, angle_inc, time_inc, scan_time = struct.unpack_from("<5f", buf, off)
+    mt = "sensor_msgs/msg/LaserScan"
+    sec, nsec, frame_id, off = _read_header(buf, 0, mt)
+    angle_min, angle_max, angle_inc, time_inc, scan_time = _safe_unpack("<5f", buf, off, mt)
     off += 20
-    range_min, range_max = struct.unpack_from("<2f", buf, off)
+    range_min, range_max = _safe_unpack("<2f", buf, off, mt)
     off += 8
-    n_ranges = struct.unpack_from("<I", buf, off)[0]
+    (n_ranges,) = _safe_unpack("<I", buf, off, mt)
     off += 4
-    ranges = list(struct.unpack_from(f"<{n_ranges}f", buf, off))
+    if n_ranges > _MAX_ARRAY_LEN:
+        raise CDRParseError(mt, off - 4, 0, 0, detail=f"n_ranges={n_ranges} exceeds max")
+    ranges = list(_safe_unpack(f"<{n_ranges}f", buf, off, mt)) if n_ranges > 0 else []
     off += n_ranges * 4
-    n_intensities = struct.unpack_from("<I", buf, off)[0]
+    (n_intensities,) = _safe_unpack("<I", buf, off, mt)
     off += 4
-    intensities = list(struct.unpack_from(f"<{n_intensities}f", buf, off))
+    if n_intensities > _MAX_ARRAY_LEN:
+        raise CDRParseError(mt, off - 4, 0, 0, detail=f"n_intensities={n_intensities} exceeds max")
+    intensities = list(_safe_unpack(f"<{n_intensities}f", buf, off, mt)) if n_intensities > 0 else []
 
     return {
         "header": {"stamp_sec": sec, "stamp_nsec": nsec, "frame_id": frame_id},
@@ -394,15 +466,11 @@ def _parse_compressed_image(buf: bytes) -> dict[str, Any]:
 
     CDR layout: Header header + string format + uint8[] data
     """
-    sec, nsec, frame_id, off = _read_header(buf, 0)
-    # format string (e.g., "jpeg", "png")
-    fmt_len = struct.unpack_from("<I", buf, off)[0]
-    off += 4
-    fmt = buf[off:off + fmt_len].decode("utf-8", errors="replace").rstrip("\x00")
-    off += fmt_len
-    off = (off + 3) & ~3
+    mt = "sensor_msgs/msg/CompressedImage"
+    sec, nsec, frame_id, off = _read_header(buf, 0, mt)
+    fmt, off = _safe_read_string(buf, off, mt)
     # compressed data: uint8[] (length-prefixed)
-    data_len = struct.unpack_from("<I", buf, off)[0]
+    (data_len,) = _safe_unpack("<I", buf, off, mt)
     off += 4
     return {
         "header": {"stamp_sec": sec, "stamp_nsec": nsec, "frame_id": frame_id},
