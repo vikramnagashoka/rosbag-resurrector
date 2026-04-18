@@ -6,7 +6,9 @@
   <img src="assets/demo.gif" alt="RosBag Resurrector Demo" width="800">
 </p>
 
-A pandas-like data analysis tool for robotics bag files with automatic quality validation, multi-stream synchronization, ML-ready export, CLIP-powered semantic search, and a PlotJuggler-compatible WebSocket bridge.
+A pandas-like data analysis tool for **ROS 2 (MCAP)** bag files — with automatic quality validation, multi-stream synchronization, ML-ready export, CLIP-powered semantic search, and a PlotJuggler-compatible WebSocket bridge.
+
+**No ROS installation required.** Works on Linux, macOS, and Windows with just `pip install`.
 
 > "We have terabytes of rosbag data and no good way to work with it after recording. Every time someone wants to analyze something, they write throwaway scripts to convert to CSV. Most bags never get analyzed at all."
 >
@@ -448,11 +450,15 @@ resurrector bridge live --topic /imu/data --port 9090
 
 ## Supported Formats
 
+Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since ROS 2 Iron) and the format we optimize for — self-describing, cross-platform, and readable without a ROS installation.
+
 | Format | Extension | Status |
 |--------|-----------|--------|
-| MCAP (ROS2 default) | `.mcap` | Fully supported |
-| ROS1 bag | `.bag` | Planned (`pip install rosbag-resurrector[ros1]`) |
-| ROS2 SQLite | `.db3` | Planned |
+| **MCAP (ROS 2 default)** | `.mcap` | **Fully supported** — primary format |
+| ROS 2 SQLite | `.db3` | Planned |
+| ROS 1 bag | `.bag` | Planned (`pip install rosbag-resurrector[ros1]`) |
+
+> **Tip:** Have older ROS 2 `.db3` bags? Convert them to MCAP with `ros2 bag convert` and you're good to go. Same for ROS 1 — use [`mcap convert`](https://mcap.dev/guides/cli) to migrate `.bag` files.
 
 ## Architecture
 
