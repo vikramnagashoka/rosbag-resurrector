@@ -1,13 +1,17 @@
 """Export bag data to ML-friendly formats.
 
 Supports: Parquet, HDF5, CSV, NumPy, Zarr.
+
+All formats stream chunk-by-chunk from the underlying MCAP so memory
+usage is bounded regardless of topic size.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 import numpy as np
 
@@ -16,12 +20,46 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("resurrector.core.export")
 
-# Maximum rows to hold in memory per chunk when streaming
 CHUNK_SIZE = 50_000
 
 
+@dataclass
+class ExportColumnFailure:
+    """One column that failed to serialize during export."""
+    column: str
+    error_type: str
+    message: str
+
+
+class ExportError(Exception):
+    """Raised when one or more columns fail to serialize during export.
+
+    The output file may be partial. Inspect ``failures`` to see which
+    columns were dropped and why.
+    """
+
+    def __init__(self, failures: list[ExportColumnFailure], output: Path):
+        self.failures = failures
+        self.output = output
+        cols = ", ".join(f.column for f in failures)
+        super().__init__(
+            f"Failed to serialize {len(failures)} column(s) to {output}: {cols}"
+        )
+
+
+@dataclass
+class ExportResult:
+    path: Path
+    rows_written: int
+    failures: list[ExportColumnFailure] = field(default_factory=list)
+
+
 class Exporter:
-    """Export bag data to various ML-friendly formats."""
+    """Export bag data to various ML-friendly formats.
+
+    All export paths stream chunk-by-chunk. Peak memory is roughly the
+    size of one chunk (CHUNK_SIZE rows), regardless of total topic size.
+    """
 
     def export(
         self,
@@ -33,20 +71,6 @@ class Exporter:
         sync_method: str = "nearest",
         downsample_hz: float | None = None,
     ) -> Path:
-        """Export topics from a bag to the specified format.
-
-        Args:
-            bag_frame: The BagFrame to export from.
-            topics: List of topic names to export.
-            format: Output format (parquet, hdf5, csv, numpy, zarr).
-            output_dir: Output directory path.
-            sync: Whether to synchronize topics before export.
-            sync_method: Synchronization method.
-            downsample_hz: Target frequency for downsampling.
-
-        Returns:
-            Path to the output directory.
-        """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -56,162 +80,47 @@ class Exporter:
             if downsample_hz:
                 from resurrector.core.transforms import downsample_temporal
                 df = downsample_temporal(df, downsample_hz)
-            self._export_dataframe(df, format, output_path, "synced")
-        else:
-            for topic in topics:
-                try:
-                    view = bag_frame[topic]
-                except KeyError:
-                    logger.warning("Topic '%s' not found, skipping", topic)
-                    continue
+            self._stream_dataframe_chunks(iter([df]), format, output_path, "synced")
+            return output_path
 
-                # Stream large topics in chunks to avoid OOM
-                msg_count = view.message_count
-                if msg_count > CHUNK_SIZE and format == "parquet":
-                    logger.info(
-                        "Streaming export for '%s' (%d messages)", topic, msg_count
-                    )
-                    safe_name = topic.lstrip("/").replace("/", "_")
-                    self._export_streaming_parquet(
-                        view, output_path, safe_name, downsample_hz,
-                    )
-                else:
-                    df = view.to_polars()
-                    if downsample_hz:
-                        from resurrector.core.transforms import downsample_temporal
-                        df = downsample_temporal(df, downsample_hz)
-                    safe_name = topic.lstrip("/").replace("/", "_")
-                    self._export_dataframe(df, format, output_path, safe_name)
+        for topic in topics:
+            try:
+                view = bag_frame[topic]
+            except KeyError:
+                logger.warning("Topic '%s' not found, skipping", topic)
+                continue
+
+            safe_name = topic.lstrip("/").replace("/", "_")
+            chunks = _transform_chunks(
+                view.iter_chunks(CHUNK_SIZE), downsample_hz
+            )
+            self._stream_dataframe_chunks(chunks, format, output_path, safe_name)
 
         return output_path
 
-    def _export_streaming_parquet(
-        self, view, output_path: Path, name: str, downsample_hz: float | None,
-    ) -> None:
-        """Stream large topics to Parquet without loading all into memory."""
-        import polars as pl
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        filepath = output_path / f"{name}.parquet"
-        writer = None
-        rows_written = 0
-
-        try:
-            chunk_rows: list[dict] = []
-            for msg in view.iter_messages():
-                row = {"timestamp_ns": msg.timestamp_ns}
-                from resurrector.core.bag_frame import _flatten_dict
-                _flatten_dict(msg.data, row)
-                chunk_rows.append(row)
-
-                if len(chunk_rows) >= CHUNK_SIZE:
-                    df = pl.DataFrame(chunk_rows)
-                    if downsample_hz:
-                        from resurrector.core.transforms import downsample_temporal
-                        df = downsample_temporal(df, downsample_hz)
-                    table = df.to_arrow()
-                    if writer is None:
-                        writer = pq.ParquetWriter(str(filepath), table.schema)
-                    writer.write_table(table)
-                    rows_written += df.height
-                    chunk_rows.clear()
-
-            # Write remaining
-            if chunk_rows:
-                df = pl.DataFrame(chunk_rows)
-                if downsample_hz:
-                    from resurrector.core.transforms import downsample_temporal
-                    df = downsample_temporal(df, downsample_hz)
-                table = df.to_arrow()
-                if writer is None:
-                    writer = pq.ParquetWriter(str(filepath), table.schema)
-                writer.write_table(table)
-                rows_written += df.height
-
-        finally:
-            if writer is not None:
-                writer.close()
-
-        logger.info("Streamed %d rows to %s", rows_written, filepath)
-
-    def _export_dataframe(
-        self, df, format: str, output_path: Path, name: str,
-    ) -> None:
-        """Export a single DataFrame to the specified format."""
-        import polars as pl
-
+    def _stream_dataframe_chunks(
+        self,
+        chunks: Iterable,
+        format: str,
+        output_path: Path,
+        name: str,
+    ) -> ExportResult:
+        """Dispatch streaming chunks to the right format writer."""
         if format == "parquet":
-            self._to_parquet(df, output_path, name)
-        elif format == "hdf5":
-            self._to_hdf5(df, output_path, name)
+            return _stream_parquet(chunks, output_path, name)
         elif format == "csv":
-            self._to_csv(df, output_path, name)
+            return _stream_csv(chunks, output_path, name)
+        elif format == "hdf5":
+            return _stream_hdf5(chunks, output_path, name)
         elif format == "numpy":
-            self._to_numpy(df, output_path, name)
+            return _stream_numpy(chunks, output_path, name)
         elif format == "zarr":
-            self._to_zarr(df, output_path, name)
+            return _stream_zarr(chunks, output_path, name)
         else:
             raise ValueError(
                 f"Unknown export format: {format}. "
                 f"Supported: parquet, hdf5, csv, numpy, zarr"
             )
-
-    def _to_parquet(self, df, output_path: Path, name: str) -> None:
-        """Export to Apache Parquet."""
-        df.write_parquet(output_path / f"{name}.parquet")
-
-    def _to_hdf5(self, df, output_path: Path, name: str) -> None:
-        """Export to HDF5."""
-        import h5py
-        filepath = output_path / f"{name}.h5"
-        with h5py.File(filepath, "w") as f:
-            group = f.create_group(name)
-            for col in df.columns:
-                try:
-                    data = df[col].to_numpy()
-                    if data.dtype.kind in ('U', 'O', 'S'):
-                        # String data — store as variable-length strings
-                        dt = h5py.string_dtype()
-                        group.create_dataset(col, data=data.astype(str), dtype=dt)
-                    else:
-                        group.create_dataset(col, data=data, compression="gzip")
-                except Exception:
-                    # Skip columns that can't be serialized
-                    pass
-
-    def _to_csv(self, df, output_path: Path, name: str) -> None:
-        """Export to CSV."""
-        df.write_csv(output_path / f"{name}.csv")
-
-    def _to_numpy(self, df, output_path: Path, name: str) -> None:
-        """Export to NumPy .npz archive."""
-        arrays = {}
-        for col in df.columns:
-            try:
-                arrays[col] = df[col].to_numpy()
-            except Exception:
-                pass
-        np.savez_compressed(output_path / f"{name}.npz", **arrays)
-
-    def _to_zarr(self, df, output_path: Path, name: str) -> None:
-        """Export to Zarr format (requires zarr package)."""
-        try:
-            import zarr
-        except ImportError:
-            raise ImportError(
-                "Zarr export requires the zarr package. "
-                "Install with: pip install rosbag-resurrector[all-exports]"
-            )
-        store = zarr.DirectoryStore(str(output_path / f"{name}.zarr"))
-        root = zarr.group(store)
-        for col in df.columns:
-            try:
-                data = df[col].to_numpy()
-                if data.dtype.kind not in ('U', 'O'):
-                    root.create_dataset(col, data=data, chunks=True)
-            except Exception:
-                pass
 
     def export_frames(
         self,
@@ -221,18 +130,7 @@ class Exporter:
         max_frames: int | None = None,
         every_n: int = 1,
     ) -> Path:
-        """Export an image topic as a sequence of numbered image files.
-
-        Args:
-            topic_view: A TopicView for an image topic.
-            output_dir: Directory to save frames.
-            format: Image format — "png" or "jpeg".
-            max_frames: Maximum number of frames to export.
-            every_n: Export every Nth frame (for subsampling).
-
-        Returns:
-            Path to the output directory.
-        """
+        """Export an image topic as numbered image files."""
         try:
             from PIL import Image as PILImage
         except ImportError:
@@ -267,17 +165,7 @@ class Exporter:
         fps: float | None = None,
         codec: str = "mp4v",
     ) -> Path:
-        """Export an image topic as an MP4 video file.
-
-        Args:
-            topic_view: A TopicView for an image topic.
-            output_path: Path for the output video file.
-            fps: Frames per second. Defaults to the topic's native frequency.
-            codec: FourCC codec string.
-
-        Returns:
-            Path to the output video file.
-        """
+        """Export an image topic as an MP4 video file."""
         try:
             import cv2
         except ImportError:
@@ -300,8 +188,6 @@ class Exporter:
                     h, w = arr.shape[:2]
                     fourcc = cv2.VideoWriter_fourcc(*codec)
                     writer = cv2.VideoWriter(str(output_file), fourcc, fps, (w, h))
-
-                # Convert RGB to BGR for OpenCV
                 if len(arr.shape) == 3 and arr.shape[2] == 3:
                     arr = arr[:, :, ::-1]
                 writer.write(arr)
@@ -312,3 +198,228 @@ class Exporter:
 
         logger.info("Exported %d frames as video to %s", count, output_file)
         return output_file
+
+
+def _transform_chunks(chunks: Iterable, downsample_hz: float | None) -> Iterator:
+    """Apply optional downsampling to each chunk as it streams through."""
+    if downsample_hz is None:
+        yield from chunks
+        return
+    from resurrector.core.transforms import downsample_temporal
+    for chunk in chunks:
+        yield downsample_temporal(chunk, downsample_hz)
+
+
+# ---------------------------------------------------------------------------
+# Streaming writers — one per format. Each consumes an iterable of
+# pl.DataFrame chunks, writes them, and returns an ExportResult with any
+# per-column failures collected.
+# ---------------------------------------------------------------------------
+
+
+def _safe_column_to_numpy(df, col: str) -> tuple[np.ndarray | None, ExportColumnFailure | None]:
+    """Convert one column to numpy, returning the array or a failure record."""
+    try:
+        return df[col].to_numpy(), None
+    except Exception as e:
+        return None, ExportColumnFailure(
+            column=col, error_type=type(e).__name__, message=str(e),
+        )
+
+
+def _stream_parquet(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    import pyarrow.parquet as pq
+
+    filepath = output_path / f"{name}.parquet"
+    writer = None
+    rows_written = 0
+    try:
+        for chunk in chunks:
+            table = chunk.to_arrow()
+            if writer is None:
+                writer = pq.ParquetWriter(str(filepath), table.schema)
+            writer.write_table(table)
+            rows_written += chunk.height
+    finally:
+        if writer is not None:
+            writer.close()
+
+    logger.info("Streamed %d rows to %s", rows_written, filepath)
+    return ExportResult(path=filepath, rows_written=rows_written)
+
+
+def _stream_csv(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    filepath = output_path / f"{name}.csv"
+    rows_written = 0
+    first = True
+    with open(filepath, "wb") as f:
+        for chunk in chunks:
+            csv_bytes = chunk.write_csv(file=None, include_header=first).encode("utf-8")
+            f.write(csv_bytes)
+            rows_written += chunk.height
+            first = False
+    logger.info("Streamed %d rows to %s", rows_written, filepath)
+    return ExportResult(path=filepath, rows_written=rows_written)
+
+
+def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    """Stream chunks to HDF5 using resizable datasets (append mode).
+
+    Each column becomes a resizable dataset; each chunk extends it.
+    Columns that fail to serialize are collected and reported.
+    """
+    import h5py
+
+    filepath = output_path / f"{name}.h5"
+    rows_written = 0
+    failures: list[ExportColumnFailure] = []
+    failed_cols: set[str] = set()
+
+    with h5py.File(filepath, "w") as f:
+        group = f.create_group(name)
+        datasets: dict[str, h5py.Dataset] = {}
+
+        for chunk in chunks:
+            chunk_rows = chunk.height
+            for col in chunk.columns:
+                if col in failed_cols:
+                    continue
+                arr, failure = _safe_column_to_numpy(chunk, col)
+                if failure is not None:
+                    failures.append(failure)
+                    failed_cols.add(col)
+                    continue
+
+                try:
+                    if arr.dtype.kind in ("U", "S", "O"):
+                        # String-ish column. Validate it's actually string-like;
+                        # object dtype can hide nested lists which can't be
+                        # represented in HDF5. Probe the first element.
+                        if arr.dtype.kind == "O" and len(arr) > 0:
+                            sample = arr[0]
+                            if isinstance(sample, (list, tuple, np.ndarray)):
+                                raise TypeError(
+                                    f"HDF5 does not support dtype {arr.dtype} "
+                                    f"containing sequences (e.g. variable-length lists)"
+                                )
+                        if col not in datasets:
+                            dt = h5py.string_dtype()
+                            datasets[col] = group.create_dataset(
+                                col, shape=(0,), maxshape=(None,), dtype=dt,
+                            )
+                        arr = arr.astype(str)
+                    else:
+                        if col not in datasets:
+                            datasets[col] = group.create_dataset(
+                                col, shape=(0,), maxshape=(None,),
+                                dtype=arr.dtype, compression="gzip",
+                            )
+                    ds = datasets[col]
+                    new_size = ds.shape[0] + arr.shape[0]
+                    ds.resize((new_size,))
+                    ds[-arr.shape[0]:] = arr
+                except Exception as e:
+                    failures.append(ExportColumnFailure(
+                        column=col,
+                        error_type=type(e).__name__,
+                        message=str(e),
+                    ))
+                    failed_cols.add(col)
+            rows_written += chunk_rows
+
+    logger.info("Streamed %d rows to %s", rows_written, filepath)
+    if failures:
+        raise ExportError(failures, filepath)
+    return ExportResult(path=filepath, rows_written=rows_written, failures=failures)
+
+
+def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    """Stream chunks into an .npz archive.
+
+    NumPy's .npz format can't be incrementally appended, so we accumulate
+    column arrays in memory and savez at the end. Memory is still bounded
+    by the total converted data (not the full raw messages), and failing
+    columns are collected rather than silently dropped.
+    """
+    filepath = output_path / f"{name}.npz"
+    rows_written = 0
+    failures: list[ExportColumnFailure] = []
+    failed_cols: set[str] = set()
+    col_chunks: dict[str, list[np.ndarray]] = {}
+
+    for chunk in chunks:
+        chunk_rows = chunk.height
+        for col in chunk.columns:
+            if col in failed_cols:
+                continue
+            arr, failure = _safe_column_to_numpy(chunk, col)
+            if failure is not None:
+                failures.append(failure)
+                failed_cols.add(col)
+                col_chunks.pop(col, None)
+                continue
+            col_chunks.setdefault(col, []).append(arr)
+        rows_written += chunk_rows
+
+    arrays = {
+        col: np.concatenate(parts) if len(parts) > 1 else parts[0]
+        for col, parts in col_chunks.items()
+    }
+    np.savez_compressed(filepath, **arrays)
+
+    logger.info("Streamed %d rows to %s", rows_written, filepath)
+    if failures:
+        raise ExportError(failures, filepath)
+    return ExportResult(path=filepath, rows_written=rows_written, failures=failures)
+
+
+def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    """Stream chunks to Zarr using appendable arrays."""
+    try:
+        import zarr
+    except ImportError:
+        raise ImportError(
+            "Zarr export requires the zarr package. "
+            "Install with: pip install rosbag-resurrector[all-exports]"
+        )
+
+    filepath = output_path / f"{name}.zarr"
+    rows_written = 0
+    failures: list[ExportColumnFailure] = []
+    failed_cols: set[str] = set()
+
+    store = zarr.DirectoryStore(str(filepath))
+    root = zarr.group(store, overwrite=True)
+    arrays: dict[str, zarr.Array] = {}
+
+    for chunk in chunks:
+        chunk_rows = chunk.height
+        for col in chunk.columns:
+            if col in failed_cols:
+                continue
+            arr, failure = _safe_column_to_numpy(chunk, col)
+            if failure is not None:
+                failures.append(failure)
+                failed_cols.add(col)
+                continue
+            if arr.dtype.kind in ("U", "O"):
+                # Zarr doesn't cleanly support variable-length strings
+                failures.append(ExportColumnFailure(
+                    column=col,
+                    error_type="UnsupportedDtype",
+                    message=f"zarr export does not support dtype {arr.dtype}",
+                ))
+                failed_cols.add(col)
+                continue
+            if col not in arrays:
+                arrays[col] = root.create_dataset(
+                    col, shape=(0,), chunks=(min(chunk_rows, CHUNK_SIZE),),
+                    dtype=arr.dtype,
+                )
+            arrays[col].append(arr)
+        rows_written += chunk_rows
+
+    logger.info("Streamed %d rows to %s", rows_written, filepath)
+    if failures:
+        raise ExportError(failures, filepath)
+    return ExportResult(path=filepath, rows_written=rows_written, failures=failures)

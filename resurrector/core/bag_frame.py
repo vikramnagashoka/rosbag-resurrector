@@ -101,26 +101,65 @@ class TopicView:
             if arr is not None:
                 yield msg.timestamp_ns, arr
 
+    def iter_chunks(self, chunk_size: int = 50_000) -> Iterator[pl.DataFrame]:
+        """Yield topic messages as Polars DataFrames in fixed-size chunks.
+
+        This is the core streaming primitive. Memory usage is bounded by
+        chunk_size regardless of total topic size.
+
+        Yields:
+            pl.DataFrame of up to chunk_size rows with flattened columns.
+        """
+        buffer: list[dict[str, Any]] = []
+        for msg in self.iter_messages():
+            row = {"timestamp_ns": msg.timestamp_ns}
+            _flatten_dict(msg.data, row)
+            buffer.append(row)
+            if len(buffer) >= chunk_size:
+                yield pl.DataFrame(buffer)
+                buffer = []
+        if buffer:
+            yield pl.DataFrame(buffer)
+
+    def to_lazy_polars(self, chunk_size: int = 50_000) -> pl.LazyFrame:
+        """Return a Polars LazyFrame backed by streaming chunks.
+
+        Prefer this over to_polars() for large topics — filters and
+        projections push down into the scan instead of materializing
+        every row in memory first.
+        """
+        chunks = list(self.iter_chunks(chunk_size))
+        if not chunks:
+            return pl.LazyFrame({"timestamp_ns": []})
+        return pl.concat(chunks, how="diagonal_relaxed").lazy()
+
     def to_polars(self) -> pl.DataFrame:
         """Convert topic messages to a Polars DataFrame.
 
         Flattens nested message fields using dot notation:
         e.g., linear_acceleration.x, orientation.w
+
+        For topics with more than ~100k messages, this materializes the
+        entire topic in memory. Use iter_chunks() or to_lazy_polars()
+        instead for large topics.
         """
         if self._cached_df is not None:
             return self._cached_df
 
-        rows: list[dict[str, Any]] = []
-        for msg in self.iter_messages():
-            row = {"timestamp_ns": msg.timestamp_ns}
-            _flatten_dict(msg.data, row)
-            rows.append(row)
+        if self._topic_info.message_count > 100_000:
+            import logging
+            logging.getLogger("resurrector.core.bag_frame").warning(
+                "Materializing %d messages for '%s' — consider iter_chunks() "
+                "or to_lazy_polars() to avoid OOM",
+                self._topic_info.message_count, self._topic_name,
+            )
 
-        if not rows:
+        chunks = list(self.iter_chunks())
+        if not chunks:
             self._cached_df = pl.DataFrame({"timestamp_ns": []})
             return self._cached_df
 
-        self._cached_df = pl.DataFrame(rows)
+        self._cached_df = pl.concat(chunks, how="diagonal_relaxed")
         return self._cached_df
 
     def to_pandas(self):
@@ -128,14 +167,22 @@ class TopicView:
         return self.to_polars().to_pandas()
 
     def to_numpy(self) -> dict[str, np.ndarray]:
-        """Convert numeric columns to numpy arrays."""
+        """Convert numeric columns to numpy arrays.
+
+        Columns that cannot be converted (e.g., nested lists of varying length)
+        are skipped and their names collected in the returned dict's
+        ``__skipped__`` key so callers can inspect what was dropped.
+        """
         df = self.to_polars()
-        result = {}
+        result: dict[str, np.ndarray] = {}
+        skipped: list[str] = []
         for col in df.columns:
             try:
                 result[col] = df[col].to_numpy()
-            except Exception:
-                pass
+            except Exception as e:
+                skipped.append(f"{col}: {type(e).__name__}: {e}")
+        if skipped:
+            result["__skipped__"] = np.array(skipped, dtype=object)
         return result
 
     def __len__(self) -> int:
