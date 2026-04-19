@@ -274,6 +274,10 @@ class BagIndex:
                 conditions.append("EXISTS (SELECT 1 FROM tags tg WHERE tg.bag_id = b.id AND tg.key = ?)")
                 params.append(key)
 
+        # SAFETY: every entry in `conditions` is a string literal built
+        # from the parameterized branches above; no user input is ever
+        # interpolated into the SQL string itself. All values flow
+        # through the `params` list. Treat `where` as trusted-by-construction.
         where = " AND ".join(conditions) if conditions else "1=1"
         params.extend([limit, offset])
 
@@ -346,6 +350,8 @@ class BagIndex:
                 conditions.append("b.path LIKE ?")
                 params.append(f"%{token}%")
 
+        # SAFETY: see list_bags — `conditions` is constructed from string
+        # literals only; user input flows through `params`.
         where = " AND ".join(conditions) if conditions else "1=1"
         with self._lock:
             rows = self.conn.execute(f"""

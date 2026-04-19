@@ -178,7 +178,17 @@ class BridgeServer:
                         if subscribed_topics is None or msg.topic in subscribed_topics:
                             try:
                                 await ws.send_text(msg.raw_json)
-                            except Exception:
+                            except WebSocketDisconnect:
+                                return
+                            except Exception as e:
+                                logger.warning(
+                                    "ws send failed for client %s: %s",
+                                    client_id[:8], e,
+                                )
+                                try:
+                                    await ws.close(code=1011)
+                                except Exception:
+                                    pass
                                 return
                     await asyncio.sleep(interval)
 

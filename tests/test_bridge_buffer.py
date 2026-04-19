@@ -136,3 +136,40 @@ class TestRingBuffer:
         t2.join()
 
         assert len(errors) == 0
+
+
+class TestLagWarning:
+    def test_warns_when_consumer_falls_behind(self, caplog):
+        """A consumer that doesn't read for >50% capacity should trigger a warning."""
+        import logging
+        buf = RingBuffer(capacity=10)
+        buf.register_consumer("slow")
+
+        # Fill the buffer past the warn threshold
+        for i in range(8):
+            buf.put(_make_msg("/imu", float(i)))
+
+        with caplog.at_level(logging.WARNING, logger="resurrector.bridge.buffer"):
+            # Slow consumer reads — should trip the lag warning
+            buf.get_since("slow", max_count=1)
+
+        warns = [r for r in caplog.records if "behind" in r.message]
+        assert warns, "Expected a lag warning when consumer is >50% behind"
+
+    def test_warning_resets_after_catchup(self, caplog):
+        """Once the consumer catches up, the warning re-arms for next time."""
+        import logging
+        buf = RingBuffer(capacity=10)
+        buf.register_consumer("slow")
+        for i in range(8):
+            buf.put(_make_msg("/imu", float(i)))
+
+        with caplog.at_level(logging.WARNING, logger="resurrector.bridge.buffer"):
+            buf.get_since("slow", max_count=8)  # catch up
+            caplog.clear()
+            for i in range(8):
+                buf.put(_make_msg("/imu", float(10 + i)))
+            buf.get_since("slow", max_count=1)  # fall behind again
+
+        warns = [r for r in caplog.records if "behind" in r.message]
+        assert warns, "Expected a fresh warning after re-falling-behind"
