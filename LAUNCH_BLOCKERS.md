@@ -14,7 +14,7 @@ All items must land before HN / Reddit / Twitter launch.
 - [x] **#1 — CDR parser bounds checks + typed errors + tests** — DONE (12 new tests)
 - [ ] **#4 — RLDS + LeRobot export formats** (1-2 days)
 - [x] **#5 — DuckDB thread safety** — DONE (4 new concurrency tests)
-- [ ] **#6 — Dashboard path validation default** (30 min)
+- [x] **#6 — Dashboard path validation default** — DONE (default = ~/, opt-in to broaden)
 - [ ] **#7 — Hardening PR: SQL f-strings, WebSocket error swallow, ring buffer sizing** (3-4 hrs)
 
 Recommended order: #3 first (largest, touches the core), then #1/#2/#5/#6/#7 in parallel, #4 last (builds on the streaming refactor).

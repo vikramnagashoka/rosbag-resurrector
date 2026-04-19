@@ -35,26 +35,52 @@ app.add_middleware(
 )
 
 
-# Configurable allowed roots for path operations (scan, export)
-_ALLOWED_ROOTS: list[str] = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "").split(os.pathsep)
-_ALLOWED_ROOTS = [r for r in _ALLOWED_ROOTS if r]
+# Configurable allowed roots for path operations (scan, export). When the
+# RESURRECTOR_ALLOWED_ROOTS env var is unset we default to the user's home
+# directory rather than allowing any path on disk — the dashboard ships in
+# distribution packages and we never want a curl-able endpoint to expose
+# arbitrary paths like /etc/passwd.
+def _resolve_allowed_roots() -> list[Path]:
+    raw = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "")
+    parts = [r for r in raw.split(os.pathsep) if r]
+    if not parts:
+        return [Path.home().resolve()]
+    return [Path(r).resolve() for r in parts]
+
+
+_ALLOWED_ROOTS: list[Path] = _resolve_allowed_roots()
 
 
 def _validate_path(path_str: str) -> Path:
-    """Validate a path is safe to operate on. Prevents directory traversal."""
-    resolved = Path(path_str).resolve()
-    # Block obvious traversal attempts
+    """Validate a path is safe to operate on.
+
+    Rejects:
+      - paths containing ``..`` traversal components, and
+      - paths that resolve outside the configured allowed roots.
+
+    Allowed roots default to the user's home directory; override via
+    the ``RESURRECTOR_ALLOWED_ROOTS`` environment variable
+    (os.pathsep-separated).
+    """
     if ".." in Path(path_str).parts:
         raise HTTPException(400, "Path must not contain '..' components")
-    # If allowed roots are configured, enforce them
-    if _ALLOWED_ROOTS:
-        if not any(str(resolved).startswith(str(Path(root).resolve())) for root in _ALLOWED_ROOTS):
-            raise HTTPException(
-                403,
-                f"Path '{resolved}' is outside allowed roots. "
-                f"Set RESURRECTOR_ALLOWED_ROOTS to allow more directories.",
-            )
+    resolved = Path(path_str).resolve()
+    if not any(_is_within(resolved, root) for root in _ALLOWED_ROOTS):
+        raise HTTPException(
+            403,
+            f"Path '{resolved}' is outside allowed roots. "
+            f"Set RESURRECTOR_ALLOWED_ROOTS to allow more directories.",
+        )
     return resolved
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    """True if child resolves under parent (no symlink escape)."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _get_index():

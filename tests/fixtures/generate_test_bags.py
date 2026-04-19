@@ -162,14 +162,20 @@ def _encode_joint_state(
             result += struct.pack("<I", len(s_bytes)) + s_bytes + b"\x00" * padding
         return result
 
-    def encode_float64_array(values: list[float]) -> bytes:
-        # Align to 8 bytes before the array data
-        return struct.pack("<I", len(values)) + b"\x00" * 4 + struct.pack(f"<{len(values)}d", *values)
+    def encode_float64_array(values: list[float], current_offset: int) -> tuple[bytes, int]:
+        # CDR rule: pad before float64 data so it lands on an 8-byte boundary,
+        # measured from the start of the inner CDR payload (post-encapsulation).
+        count_bytes = struct.pack("<I", len(values))
+        offset_after_count = current_offset + 4
+        pad_len = (-offset_after_count) % 8
+        data_bytes = struct.pack(f"<{len(values)}d", *values) if values else b""
+        return count_bytes + b"\x00" * pad_len + data_bytes, offset_after_count + pad_len + len(data_bytes)
 
     names_data = encode_string_array(names)
-    pos_data = encode_float64_array(positions)
-    vel_data = encode_float64_array(velocities)
-    eff_data = encode_float64_array(efforts)
+    cur = len(header) + len(names_data)
+    pos_data, cur = encode_float64_array(positions, cur)
+    vel_data, cur = encode_float64_array(velocities, cur)
+    eff_data, _ = encode_float64_array(efforts, cur)
 
     return _cdr_encapsulate(header + names_data + pos_data + vel_data + eff_data)
 

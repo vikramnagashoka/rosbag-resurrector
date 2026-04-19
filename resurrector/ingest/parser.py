@@ -211,8 +211,14 @@ def _safe_unpack(fmt: str, buf: bytes, offset: int, msg_type: str = "?") -> tupl
 
     Raises CDRParseError with actionable context instead of letting
     struct.error propagate with opaque positional details.
+
+    A zero-byte read (e.g. ``<0d`` for an empty array) is always allowed
+    even if offset is at end of buffer, matching struct.unpack_from's
+    behavior so that empty trailing arrays don't trip the bounds check.
     """
     needed = struct.calcsize(fmt)
+    if needed == 0:
+        return ()
     if offset + needed > len(buf):
         raise CDRParseError(msg_type, offset, needed, len(buf) - offset)
     return struct.unpack_from(fmt, buf, offset)
