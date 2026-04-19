@@ -191,8 +191,10 @@ Handled by `resurrector/core/export.py`:
 | NumPy | `.npz` | Jupyter workflows |
 | CSV | `.csv` | Quick inspection |
 | Zarr | `.zarr/` | Cloud-native, chunked, very large datasets |
+| **LeRobot** | dataset/ | Hugging Face LeRobot training pipelines |
+| **RLDS** | `.tfrecord` | OpenX / RT-2 / robotic foundation models |
 
-**OOM-safe streaming**: topics with >50k messages are streamed to Parquet in chunks. Tests: 8.
+**OOM-safe streaming**: every export format streams chunk-by-chunk via the new `TopicView.iter_chunks()` primitive. Peak memory is bounded by chunk size (50k rows by default) regardless of topic size. Tests: 8 (existing) + 13 (streaming) + 6 (LeRobot/RLDS) = 27.
 
 ### 4.5 Video & image support
 
@@ -381,13 +383,13 @@ Items that exist as stubs or were considered and postponed:
 | ROS 1 `.bag` parser | Stub — raises error | `rosbags` dep is heavy; users can `mcap convert` |
 | Streaming export for HDF5/Zarr | Not implemented | Only Parquet streams today; OOM risk on 100k+ topics |
 | Dataset split generators (train/val/test) | Not implemented | Users do this externally |
-| RLDS / LeRobot export formats | Not implemented | Mentioned in marketing, actually only Parquet/HDF5/CSV/NumPy/Zarr exist today |
+| ~~RLDS / LeRobot export formats~~ | ✅ DONE | Built as part of pre-launch hardening (2026-04-18) |
 | Live ROS 1 bridge (via rosbags) | Not implemented | Only ROS 2 live bridge works |
 | Structured eval harness for health thresholds | Not implemented | Thresholds are currently "trust the defaults" |
 | Distributed indexing | Not implemented | Single-machine only, OK for now |
 | Auth / multi-tenant dashboard | Not implemented | Single-user local tool |
 
-**NOTE:** The Twitter thread and marketing plan mention **RLDS** and **LeRobot** export formats. These are NOT implemented in code today. Either we build them before amplifying distribution, or we correct the marketing copy.
+**~~NOTE~~ RESOLVED:** RLDS and LeRobot exports are now implemented (see [resurrector/core/export.py](resurrector/core/export.py)). The marketing copy is now truthful.
 
 ---
 

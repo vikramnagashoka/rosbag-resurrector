@@ -298,12 +298,12 @@ Export directly to the formats your training pipeline expects:
 
 ```python
 bf.export(topics=["/imu/data", "/joint_states"],
-          format="parquet",    # Also: hdf5, csv, numpy, zarr
+          format="parquet",    # Also: hdf5, csv, numpy, zarr, lerobot, rlds
           sync=True,
           downsample_hz=10)
 ```
 
-Large topics (>50k messages) are automatically streamed to Parquet in chunks to prevent out-of-memory errors.
+All export paths stream chunk-by-chunk so memory stays bounded even on multi-gigabyte topics.
 
 | Format | Best For |
 |--------|----------|
@@ -312,6 +312,10 @@ Large topics (>50k messages) are automatically streamed to Parquet in chunks to 
 | NumPy (.npz) | Jupyter notebook workflows |
 | CSV | Quick inspection, sharing with non-technical team members |
 | Zarr | Cloud-native, chunked, very large datasets |
+| **LeRobot** | Hugging Face LeRobot training (parquet + meta JSON) |
+| **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) |
+
+LeRobot needs no extra deps. RLDS needs `tensorflow`: `pip install rosbag-resurrector[all-exports]`.
 
 ### Robotics Transforms
 

@@ -12,7 +12,7 @@ All items must land before HN / Reddit / Twitter launch.
 - [x] **#3 — Full streaming for all export formats + LazyTopicView** — DONE (177 tests pass)
 - [x] **#2 — DRY'd export error collection + ExportError** — DONE as part of #3
 - [x] **#1 — CDR parser bounds checks + typed errors + tests** — DONE (12 new tests)
-- [ ] **#4 — RLDS + LeRobot export formats** (1-2 days)
+- [x] **#4 — RLDS + LeRobot export formats** — DONE (6 LeRobot tests + 2 RLDS tests, RLDS auto-skips without TF)
 - [x] **#5 — DuckDB thread safety** — DONE (4 new concurrency tests)
 - [x] **#6 — Dashboard path validation default** — DONE (default = ~/, opt-in to broaden)
 - [x] **#7 — Hardening PR: SQL f-strings, WebSocket error swallow, ring buffer sizing** — DONE (2 new tests, ws send-loop logs+closes, lag warning)
