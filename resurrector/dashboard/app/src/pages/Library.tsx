@@ -48,6 +48,9 @@ export default function Library() {
   const [bags, setBags] = useState<BagEntry[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
+  const [scanPath, setScanPath] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [scanMsg, setScanMsg] = useState<string | null>(null)
 
   useEffect(() => {
     fetchBags()
@@ -71,6 +74,28 @@ export default function Library() {
   function handleSearch(e: React.FormEvent) {
     e.preventDefault()
     fetchBags(search || undefined)
+  }
+
+  async function handleScan(e: React.FormEvent) {
+    e.preventDefault()
+    if (!scanPath.trim()) return
+    setScanning(true)
+    setScanMsg(null)
+    try {
+      const res = await fetch(`/api/scan?path=${encodeURIComponent(scanPath)}`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || 'Scan failed')
+      }
+      const data = await res.json()
+      setScanMsg(`Indexed ${data.indexed ?? '?'} bag(s). Reloading...`)
+      await fetchBags()
+    } catch (err: any) {
+      setScanMsg(`Error: ${err.message || err}`)
+    }
+    setScanning(false)
   }
 
   return (
@@ -113,9 +138,61 @@ export default function Library() {
       {loading ? (
         <p style={{ color: '#8b949e' }}>Loading...</p>
       ) : bags.length === 0 ? (
-        <p style={{ color: '#8b949e' }}>
-          No bags found. Run <code>resurrector scan /path/to/bags</code> to index your bag files.
-        </p>
+        <div style={{
+          background: '#161b22',
+          border: '1px solid #30363d',
+          borderRadius: '8px',
+          padding: '32px',
+          textAlign: 'center',
+        }}>
+          <h2 style={{ fontSize: '18px', marginBottom: '8px' }}>No bags indexed yet</h2>
+          <p style={{ color: '#8b949e', marginBottom: '24px' }}>
+            Point at a folder of bag files to get started.
+          </p>
+          <form onSubmit={handleScan} style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '12px' }}>
+            <input
+              type="text"
+              value={scanPath}
+              onChange={e => setScanPath(e.target.value)}
+              placeholder="/path/to/bags"
+              style={{
+                background: '#0d1117',
+                border: '1px solid #30363d',
+                borderRadius: '6px',
+                padding: '8px 12px',
+                color: '#e1e4e8',
+                width: '400px',
+                fontSize: '14px',
+              }}
+            />
+            <button
+              type="submit"
+              disabled={scanning}
+              style={{
+                background: scanning ? '#21262d' : '#238636',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '6px',
+                padding: '8px 16px',
+                cursor: scanning ? 'not-allowed' : 'pointer',
+                fontSize: '14px',
+              }}
+            >
+              {scanning ? 'Scanning...' : 'Scan folder'}
+            </button>
+          </form>
+          {scanMsg && (
+            <p style={{ color: scanMsg.startsWith('Error') ? '#f85149' : '#3fb950', fontSize: '13px' }}>
+              {scanMsg}
+            </p>
+          )}
+          <p style={{ color: '#8b949e', fontSize: '13px', marginTop: '16px' }}>
+            No data handy? Run <code style={{ background: '#0d1117', padding: '2px 6px', borderRadius: '4px' }}>resurrector demo</code> in a terminal to generate a sample bag.
+          </p>
+          <p style={{ color: '#8b949e', fontSize: '13px', marginTop: '8px' }}>
+            Or from a terminal: <code style={{ background: '#0d1117', padding: '2px 6px', borderRadius: '4px' }}>resurrector scan /path/to/bags</code>
+          </p>
+        </div>
       ) : (
         bags.map(bag => (
           <Link key={bag.id} to={`/bag/${bag.id}`} style={{ textDecoration: 'none', color: 'inherit' }}>

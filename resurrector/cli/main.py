@@ -766,5 +766,63 @@ def dashboard(
     )
 
 
+@app.command()
+def doctor():
+    """Check that your environment is ready — shows what works with the current install."""
+    from resurrector.cli.doctor import run_all_checks, render
+    results = run_all_checks()
+    passed, warned, failed = render(results)
+    if failed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def demo(
+    output: Annotated[Optional[Path], typer.Option(
+        "--output", "-o", help="Where to write the sample bag",
+    )] = None,
+    run_full: Annotated[bool, typer.Option(
+        "--full", help="Also run scan + health + export on the sample",
+    )] = False,
+):
+    """Generate a synthetic sample bag and walk through the basic workflow.
+
+    Useful as a smoke test or to show what the tool can do without
+    needing your own data.
+    """
+    from tests.fixtures.generate_test_bags import generate_bag, BagConfig
+
+    output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
+    generate_bag(output, BagConfig(duration_sec=5.0))
+    console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
+
+    console.print("[cyan]Opening with BagFrame...[/cyan]")
+    from resurrector.core.bag_frame import BagFrame
+    bf = BagFrame(output)
+    bf.info()
+    console.print()
+
+    if run_full:
+        console.print("[cyan]Running health check...[/cyan]")
+        report = bf.health_report()
+        console.print(f"Health score: [bold]{report.score}/100[/bold]")
+        console.print(f"Warnings: {len(report.warnings)}\n")
+
+        export_dir = output.parent / "demo_export"
+        console.print(f"[cyan]Exporting /imu/data to Parquet at {export_dir}...[/cyan]")
+        bf.export(topics=["/imu/data"], format="parquet", output=str(export_dir))
+        console.print(f"[green][OK] Exported[/green]\n")
+
+    console.print(
+        "[dim]Next steps:[/dim]\n"
+        f"  [cyan]resurrector scan {output.parent}[/cyan]       # index the bag\n"
+        f"  [cyan]resurrector health {output}[/cyan]    # detailed health report\n"
+        f"  [cyan]resurrector dashboard[/cyan]                   # open the web UI\n"
+    )
+
+
 if __name__ == "__main__":
     app()

@@ -122,16 +122,48 @@ class TopicView:
             yield pl.DataFrame(buffer)
 
     def to_lazy_polars(self, chunk_size: int = 50_000) -> pl.LazyFrame:
-        """Return a Polars LazyFrame backed by streaming chunks.
+        """Return a Polars LazyFrame with real filter/projection pushdown.
 
-        Prefer this over to_polars() for large topics — filters and
-        projections push down into the scan instead of materializing
-        every row in memory first.
+        Streams chunks to a temp Arrow IPC file and returns
+        ``pl.scan_ipc(path)``. Filters and selects pushed onto the
+        LazyFrame are evaluated without materializing the full topic.
+
+        The temp file lives in the OS temp dir and is cleaned up when
+        the LazyFrame (and any DataFrames derived from it) are
+        collected and dropped.
         """
-        chunks = list(self.iter_chunks(chunk_size))
-        if not chunks:
+        import tempfile
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+
+        tmp = tempfile.NamedTemporaryFile(
+            prefix=f"resurrector_{self._topic_name.lstrip('/').replace('/', '_')}_",
+            suffix=".arrow",
+            delete=False,
+        )
+        tmp.close()
+        tmp_path = Path(tmp.name)
+
+        writer = None
+        wrote_any = False
+        try:
+            for chunk in self.iter_chunks(chunk_size):
+                if chunk.height == 0:
+                    continue
+                table = chunk.to_arrow()
+                if writer is None:
+                    writer = ipc.new_file(str(tmp_path), table.schema)
+                writer.write_table(table)
+                wrote_any = True
+        finally:
+            if writer is not None:
+                writer.close()
+
+        if not wrote_any:
+            tmp_path.unlink(missing_ok=True)
             return pl.LazyFrame({"timestamp_ns": []})
-        return pl.concat(chunks, how="diagonal_relaxed").lazy()
+
+        return pl.scan_ipc(str(tmp_path))
 
     def to_polars(self) -> pl.DataFrame:
         """Convert topic messages to a Polars DataFrame.

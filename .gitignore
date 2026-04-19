@@ -56,3 +56,4 @@ dist/obfuscated/
 dist/macos/
 dist/ubuntu/
 dist/build/
+.gstack/

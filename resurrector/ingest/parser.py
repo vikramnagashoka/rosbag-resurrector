@@ -522,26 +522,48 @@ def get_compressed_image_array(msg: Message) -> np.ndarray | None:
         return None
 
 
-def parse_bag(path: str | Path) -> MCAPParser:
+def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
     """Create a parser for the given bag file.
 
-    Currently supports MCAP format. Legacy ROS1 .bag support
-    requires the 'rosbags' optional dependency.
+    Natively supports MCAP. For legacy ``.bag`` (ROS 1) and ``.db3``
+    (ROS 2 SQLite) files we shell out to the official converters
+    (``mcap convert`` / ``ros2 bag convert``) and open the resulting
+    MCAP. The converted file is kept alongside the original so the cost
+    is paid once.
+
+    Args:
+        path: Path to the bag file.
+        auto_convert: If True (default), legacy formats are converted
+            automatically. Set False to force a ``NotImplementedError``
+            — useful when the caller wants to handle conversion itself.
     """
     path = Path(path)
     ext = path.suffix.lower()
 
     if ext == ".mcap":
         return MCAPParser(path)
-    elif ext == ".bag":
+
+    if ext in {".bag", ".db3"} and auto_convert:
+        from resurrector.ingest.convert import convert_to_mcap, ConversionError
+        converted = path.with_suffix(".mcap")
+        if not converted.exists():
+            try:
+                converted = convert_to_mcap(path)
+            except ConversionError as e:
+                raise NotImplementedError(
+                    f"Could not auto-convert {path.name}: {e}"
+                ) from e
+        return MCAPParser(converted)
+
+    if ext == ".bag":
         raise NotImplementedError(
-            "ROS1 .bag format support requires the 'rosbags' package. "
-            "Install with: pip install rosbag-resurrector[ros1]"
+            "ROS1 .bag format requires the mcap CLI for auto-convert "
+            "(https://mcap.dev/guides/cli) or the 'rosbags' package "
+            "(pip install rosbag-resurrector[ros1])."
         )
-    elif ext == ".db3":
+    if ext == ".db3":
         raise NotImplementedError(
-            "ROS2 .db3 (SQLite) format is not yet supported. "
-            "Convert to MCAP with: ros2 bag convert"
+            "ROS2 .db3 (SQLite) format requires the ros2 CLI for auto-convert "
+            "(provided by any ROS 2 install)."
         )
-    else:
-        raise ValueError(f"Unsupported file format: {ext}")
+    raise ValueError(f"Unsupported file format: {ext}")
