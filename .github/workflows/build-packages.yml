@@ -102,10 +102,42 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
-      - name: Create GitHub Release
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Grab everything between "## [$VERSION]" and the next "## [" header
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { in_section=1; next }
+            in_section && /^## \[/ { exit }
+            in_section { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "No matching section in CHANGELOG.md for v$VERSION — falling back to auto-generated notes"
+            echo "has_notes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+          fi
+          echo "--- release_notes.md preview ---"
+          head -20 release_notes.md
+
+      - name: Create GitHub Release (with CHANGELOG body)
+        if: steps.notes.outputs.has_notes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos-dmg/*.dmg
+            ubuntu-deb/*.deb
+          body_path: release_notes.md
+          draft: true
+
+      - name: Create GitHub Release (auto-generated fallback)
+        if: steps.notes.outputs.has_notes != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: |
