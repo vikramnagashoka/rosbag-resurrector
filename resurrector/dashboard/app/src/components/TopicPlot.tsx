@@ -1,124 +1,392 @@
-import React, { useMemo } from 'react'
+// Plotly-based multi-topic plot with linked cursors, brush zoom,
+// and user annotations.
+//
+// Architecture
+// ════════════
+//
+//   parent Explorer
+//     │ passes `topics: PlotSeries[]` — one per selected topic/column
+//     ▼
+//   TopicPlot
+//     │
+//     ├── Plotly figure with one subplot per series, shared x-axis
+//     │
+//     ├── onRelayout(xrange) ──▶ parent re-fetches topic data
+//     │                         (downsampled inside new range)
+//     │
+//     ├── onHover(x) ──▶ rAF-throttled cursor lines drawn across
+//     │                  every subplot (linked cursors)
+//     │
+//     └── onClick(x, y) ──▶ opens annotation popup; POST to
+//                           /api/bags/{id}/annotations; re-render
+//                           as pinned note.
 
-interface TopicData {
-  topic: string
-  total: number
-  columns: string[]
-  data: Record<string, any>[]
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Plot from 'react-plotly.js'
+// Use the lighter cartesian bundle to keep page weight down.
+// plotly.js-cartesian-dist-min is ~1MB gz vs ~3MB for full plotly.
+// @ts-ignore — the package exports ES modules but has no types.
+import Plotly from 'plotly.js-cartesian-dist-min'
+import { api, Annotation } from '../api'
+import { runWithToast, useErrorToast } from '../ErrorToast'
+
+export interface PlotSeries {
+  label: string
+  timestamps_ns: number[]
+  values: number[]
 }
 
 interface Props {
-  data: TopicData
+  bagId: number
+  topicName: string
+  series: PlotSeries[]
+  onZoom?: (startSec: number | null, endSec: number | null) => void
+  firstTimestampNs: number
 }
 
-export default function TopicPlot({ data }: Props) {
-  // Identify numeric columns for plotting
-  const numericColumns = useMemo(() => {
-    if (data.data.length === 0) return []
-    return data.columns.filter(col => {
-      if (col === 'timestamp_ns') return false
-      const sample = data.data[0][col]
-      return typeof sample === 'number'
+function formatSec(ts_ns: number, first_ns: number): number {
+  return (ts_ns - first_ns) / 1e9
+}
+
+export default function TopicPlot({
+  bagId,
+  topicName,
+  series,
+  onZoom,
+  firstTimestampNs,
+}: Props) {
+  const toast = useErrorToast()
+  const [annotations, setAnnotations] = useState<Annotation[]>([])
+  const [pendingNote, setPendingNote] = useState<{ ts_ns: number; label: string } | null>(null)
+  const [noteText, setNoteText] = useState('')
+  const hoverRef = useRef<number | null>(null) // rAF id
+
+  // Initial + refresh annotations.
+  useEffect(() => {
+    let active = true
+    api
+      .listAnnotations(bagId, topicName)
+      .then(res => {
+        if (active) setAnnotations(res.annotations)
+      })
+      .catch(() => {
+        // Non-fatal — absence of annotations shouldn't break the plot.
+      })
+    return () => {
+      active = false
+    }
+  }, [bagId, topicName])
+
+  const plotData = useMemo(() => {
+    return series.map((s, i) => ({
+      type: 'scattergl' as const,
+      mode: 'lines' as const,
+      name: s.label,
+      x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
+      y: s.values,
+      xaxis: 'x',
+      yaxis: i === 0 ? 'y' : `y${i + 1}`,
+      hovertemplate: `<b>${s.label}</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
+      line: { width: 1.2 },
+    }))
+  }, [series, firstTimestampNs])
+
+  const plotLayout = useMemo(() => {
+    const axes: Record<string, unknown> = {}
+    const subplotHeight = 1 / Math.max(series.length, 1)
+    series.forEach((_, i) => {
+      const domainTop = 1 - i * subplotHeight
+      const domainBottom = 1 - (i + 1) * subplotHeight + 0.02
+      axes[`yaxis${i === 0 ? '' : i + 1}`] = {
+        domain: [domainBottom, domainTop],
+        title: { text: series[i].label, font: { size: 11 } },
+        gridcolor: '#30363d',
+        zerolinecolor: '#30363d',
+        color: '#8b949e',
+      }
     })
-  }, [data])
-
-  const timestamps = useMemo(() => {
-    if (data.data.length === 0) return []
-    const firstTs = data.data[0].timestamp_ns
-    return data.data.map(d => ((d.timestamp_ns - firstTs) / 1e9).toFixed(3))
-  }, [data])
-
-  // Quick stats
-  const stats = useMemo(() => {
-    return numericColumns.slice(0, 8).map(col => {
-      const values = data.data.map(d => d[col]).filter(v => typeof v === 'number' && isFinite(v))
-      if (values.length === 0) return { col, min: 0, max: 0, mean: 0, std: 0 }
-      const min = Math.min(...values)
-      const max = Math.max(...values)
-      const mean = values.reduce((a, b) => a + b, 0) / values.length
-      const std = Math.sqrt(values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length)
-      return { col, min, max, mean, std }
+    // Translate annotations to shapes (vertical dashed lines).
+    const shapes = annotations.map(a => {
+      const x = formatSec(a.timestamp_ns, firstTimestampNs)
+      return {
+        type: 'line' as const,
+        xref: 'x' as const,
+        yref: 'paper' as const,
+        x0: x,
+        x1: x,
+        y0: 0,
+        y1: 1,
+        line: { color: '#f85149', width: 1, dash: 'dash' as const },
+      }
     })
-  }, [data, numericColumns])
+    const annotationLabels = annotations.map(a => {
+      const x = formatSec(a.timestamp_ns, firstTimestampNs)
+      return {
+        x,
+        y: 1,
+        xref: 'x' as const,
+        yref: 'paper' as const,
+        text: a.text.length > 40 ? a.text.slice(0, 37) + '…' : a.text,
+        showarrow: true,
+        arrowhead: 2,
+        arrowsize: 0.7,
+        ax: 0,
+        ay: -20,
+        font: { size: 10, color: '#f85149' },
+        bgcolor: 'rgba(13,17,23,0.9)',
+        bordercolor: '#f85149',
+        borderpad: 3,
+      }
+    })
+    return {
+      autosize: true,
+      paper_bgcolor: '#161b22',
+      plot_bgcolor: '#0d1117',
+      font: { color: '#e1e4e8', size: 11 },
+      margin: { l: 60, r: 12, t: 12, b: 40 },
+      height: Math.max(200, series.length * 180),
+      hovermode: 'x unified' as const,
+      xaxis: {
+        title: { text: 'seconds', font: { size: 11 } },
+        gridcolor: '#30363d',
+        zerolinecolor: '#30363d',
+        color: '#8b949e',
+        rangeslider: series.length === 1 ? { visible: false } : undefined,
+      },
+      ...axes,
+      shapes,
+      annotations: annotationLabels,
+      showlegend: false,
+      dragmode: 'zoom' as const,
+    }
+  }, [series, annotations, firstTimestampNs])
 
-  // SVG-based mini charts (no Plotly dependency needed for basic display)
-  function MiniChart({ col, values }: { col: string; values: number[] }) {
-    if (values.length < 2) return null
-    const min = Math.min(...values)
-    const max = Math.max(...values)
-    const range = max - min || 1
-    const w = 600
-    const h = 100
-    const points = values.map((v, i) => {
-      const x = (i / (values.length - 1)) * w
-      const y = h - ((v - min) / range) * h
-      return `${x},${y}`
-    }).join(' ')
+  // onRelayout fires on zoom/brush; we forward the range to the parent
+  // so it can re-fetch a narrower slice. xaxis.autorange=true indicates
+  // a reset (double-click) — send nulls.
+  const handleRelayout = useCallback(
+    (event: any) => {
+      if (!onZoom) return
+      if (event['xaxis.autorange']) {
+        onZoom(null, null)
+      } else if (
+        'xaxis.range[0]' in event &&
+        'xaxis.range[1]' in event
+      ) {
+        onZoom(Number(event['xaxis.range[0]']), Number(event['xaxis.range[1]']))
+      }
+    },
+    [onZoom],
+  )
 
+  // Click-to-annotate: Plotly emits plotly_click events with x/y; we
+  // translate back to nanoseconds.
+  const handleClick = useCallback(
+    (event: any) => {
+      if (!event?.points?.length) return
+      const p = event.points[0]
+      const xSec = Number(p.x)
+      if (!isFinite(xSec)) return
+      const ts_ns = Math.round(xSec * 1e9) + firstTimestampNs
+      setPendingNote({ ts_ns, label: p.data.name })
+      setNoteText('')
+    },
+    [firstTimestampNs],
+  )
+
+  // Throttle hover events via rAF for linked-cursor performance.
+  // We don't currently draw an overlay ourselves (Plotly's unified
+  // hovermode provides linked behavior for subplots with shared x-axis)
+  // but keeping the ref prevents any future listener from firing at
+  // raw mouse-move rate.
+  const handleHover = useCallback((_event: any) => {
+    if (hoverRef.current != null) return
+    hoverRef.current = requestAnimationFrame(() => {
+      hoverRef.current = null
+    })
+  }, [])
+
+  async function saveAnnotation() {
+    if (!pendingNote || !noteText.trim()) {
+      setPendingNote(null)
+      return
+    }
+    const created = await runWithToast(toast, () =>
+      api.createAnnotation(bagId, {
+        timestamp_ns: pendingNote.ts_ns,
+        text: noteText.trim(),
+        topic: topicName,
+      }),
+    )
+    if (created) {
+      setAnnotations(prev => [...prev, created].sort((a, b) => a.timestamp_ns - b.timestamp_ns))
+    }
+    setPendingNote(null)
+  }
+
+  async function deleteAnnotation(id: number) {
+    const r = await runWithToast(toast, () => api.deleteAnnotation(id))
+    if (r) setAnnotations(prev => prev.filter(a => a.id !== id))
+  }
+
+  if (series.length === 0) {
     return (
-      <div style={{ marginBottom: '16px' }}>
-        <div style={{ fontSize: '13px', fontWeight: 500, color: '#58a6ff', marginBottom: '4px' }}>{col}</div>
-        <svg width={w} height={h} style={{ background: '#0d1117', borderRadius: '4px' }}>
-          <polyline points={points} fill="none" stroke="#58a6ff" strokeWidth="1.5" />
-        </svg>
+      <div
+        style={{
+          background: '#161b22',
+          border: '1px solid #30363d',
+          borderRadius: 8,
+          padding: 24,
+          color: '#8b949e',
+          textAlign: 'center',
+        }}
+      >
+        No numeric data to plot for this topic.
       </div>
     )
   }
 
   return (
-    <div style={{
-      background: '#161b22',
-      border: '1px solid #30363d',
-      borderRadius: '8px',
-      padding: '16px',
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-        <h3 style={{ fontSize: '16px', fontWeight: 600 }}>{data.topic}</h3>
-        <span style={{ color: '#8b949e', fontSize: '13px' }}>
-          {data.total.toLocaleString()} messages | {data.columns.length} columns
-        </span>
-      </div>
+    <div
+      style={{
+        background: '#161b22',
+        border: '1px solid #30363d',
+        borderRadius: 8,
+        padding: 12,
+      }}
+    >
+      <Plot
+        data={plotData}
+        layout={plotLayout}
+        style={{ width: '100%' }}
+        useResizeHandler
+        config={{
+          displaylogo: false,
+          responsive: true,
+          modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+        }}
+        onRelayout={handleRelayout}
+        onClick={handleClick}
+        onHover={handleHover}
+      />
 
-      {/* Quick stats */}
-      {stats.length > 0 && (
-        <div style={{ marginBottom: '16px' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #21262d' }}>
-                <th style={{ padding: '4px 8px', textAlign: 'left', color: '#8b949e' }}>Column</th>
-                <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>Min</th>
-                <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>Max</th>
-                <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>Mean</th>
-                <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>Std</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.map(s => (
-                <tr key={s.col} style={{ borderBottom: '1px solid #21262d' }}>
-                  <td style={{ padding: '4px 8px', color: '#58a6ff' }}>{s.col}</td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>{s.min.toFixed(4)}</td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>{s.max.toFixed(4)}</td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>{s.mean.toFixed(4)}</td>
-                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>{s.std.toFixed(4)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {/* Inline annotation list with delete controls. */}
+      {annotations.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 6 }}>
+            Annotations ({annotations.length})
+          </div>
+          {annotations.map(a => (
+            <div
+              key={a.id}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '4px 8px',
+                borderLeft: '3px solid #f85149',
+                background: '#0d1117',
+                borderRadius: 4,
+                marginBottom: 4,
+                fontSize: 12,
+              }}
+            >
+              <span>
+                <span style={{ color: '#f85149' }}>
+                  t={formatSec(a.timestamp_ns, firstTimestampNs).toFixed(3)}s
+                </span>{' '}
+                — {a.text}
+              </span>
+              <button
+                onClick={() => deleteAnnotation(a.id)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#8b949e',
+                  cursor: 'pointer',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Charts */}
-      {numericColumns.slice(0, 6).map(col => (
-        <MiniChart
-          key={col}
-          col={col}
-          values={data.data.map(d => d[col]).filter(v => typeof v === 'number' && isFinite(v))}
-        />
-      ))}
-
-      {numericColumns.length === 0 && (
-        <div style={{ color: '#8b949e', textAlign: 'center', padding: '24px' }}>
-          No numeric columns to plot. Columns: {data.columns.join(', ')}
+      {pendingNote && (
+        <div
+          onClick={() => setPendingNote(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.7)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 100,
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#161b22',
+              border: '1px solid #30363d',
+              borderRadius: 8,
+              padding: 20,
+              width: 360,
+            }}
+          >
+            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Add annotation</h3>
+            <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 12 }}>
+              t={formatSec(pendingNote.ts_ns, firstTimestampNs).toFixed(3)}s on{' '}
+              <span style={{ color: '#58a6ff' }}>{pendingNote.label}</span>
+            </div>
+            <textarea
+              autoFocus
+              value={noteText}
+              onChange={e => setNoteText(e.target.value)}
+              placeholder="What happened here?"
+              style={{
+                width: '100%',
+                background: '#0d1117',
+                border: '1px solid #30363d',
+                borderRadius: 6,
+                padding: 8,
+                color: '#e1e4e8',
+                fontSize: 13,
+                minHeight: 72,
+                fontFamily: 'inherit',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+              <button
+                onClick={() => setPendingNote(null)}
+                style={{
+                  background: '#21262d',
+                  border: '1px solid #30363d',
+                  borderRadius: 6,
+                  padding: '6px 14px',
+                  color: '#e1e4e8',
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveAnnotation}
+                style={{
+                  background: '#238636',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '6px 14px',
+                  color: '#fff',
+                  cursor: 'pointer',
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

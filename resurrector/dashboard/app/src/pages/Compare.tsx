@@ -1,15 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import HealthBadge from '../components/HealthBadge'
+import { api, Bag } from '../api'
+import { runWithToast, useErrorToast } from '../ErrorToast'
 
-interface BagEntry {
-  id: number
-  path: string
-  duration_sec: number
-  size_bytes: number
-  message_count: number
-  health_score: number | null
-  topics: { name: string; message_type: string; message_count: number }[]
-}
+type BagEntry = Bag
 
 function basename(path: string): string {
   return path.split(/[/\\]/).pop() || path
@@ -31,19 +25,23 @@ export default function Compare() {
   const [bag2Id, setBag2Id] = useState<number | null>(null)
   const [bag1, setBag1] = useState<BagEntry | null>(null)
   const [bag2, setBag2] = useState<BagEntry | null>(null)
+  const toast = useErrorToast()
 
   useEffect(() => {
-    fetch('/api/bags').then(r => r.json()).then(setBags)
+    runWithToast(toast, () => api.listBags()).then(r => r && setBags(r))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    if (bag1Id) fetch(`/api/bags/${bag1Id}`).then(r => r.json()).then(setBag1)
-    else setBag1(null)
+    if (!bag1Id) return setBag1(null)
+    runWithToast(toast, () => api.getBag(bag1Id)).then(b => b && setBag1(b))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bag1Id])
 
   useEffect(() => {
-    if (bag2Id) fetch(`/api/bags/${bag2Id}`).then(r => r.json()).then(setBag2)
-    else setBag2(null)
+    if (!bag2Id) return setBag2(null)
+    runWithToast(toast, () => api.getBag(bag2Id)).then(b => b && setBag2(b))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bag2Id])
 
   const selectStyle: React.CSSProperties = {

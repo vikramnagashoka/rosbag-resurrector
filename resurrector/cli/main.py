@@ -746,6 +746,7 @@ def bridge_live(
     host: Annotated[str, typer.Option("--host", help="Bind host")] = "0.0.0.0",
     topics: Annotated[Optional[list[str]], typer.Option("--topic", "-t", help="Topics to subscribe")] = None,
     max_rate: Annotated[float, typer.Option("--max-rate", help="Max message rate (Hz)")] = 50.0,
+    no_browser: Annotated[bool, typer.Option("--no-browser", help="Accepted for API parity; live mode never opens a browser")] = False,
 ):
     """Relay live ROS2 topics over WebSocket (requires rclpy).
 

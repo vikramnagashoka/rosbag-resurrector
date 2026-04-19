@@ -1,4 +1,6 @@
 import React, { useState } from 'react'
+import { api } from '../api'
+import { runWithToast, useErrorToast } from '../ErrorToast'
 
 interface Props {
   bagId: number
@@ -10,27 +12,33 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   const [selectedTopics, setSelectedTopics] = useState<string[]>(availableTopics)
   const [format, setFormat] = useState('parquet')
   const [sync, setSync] = useState(false)
+  const [outputDir, setOutputDir] = useState('./export')
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
+  const toast = useErrorToast()
 
   function toggleTopic(topic: string) {
     setSelectedTopics(prev =>
-      prev.includes(topic) ? prev.filter(t => t !== topic) : [...prev, topic]
+      prev.includes(topic) ? prev.filter(t => t !== topic) : [...prev, topic],
     )
   }
 
   async function handleExport() {
     setExporting(true)
-    try {
-      const topics = selectedTopics.join(',')
-      const res = await fetch(
-        `/api/bags/${bagId}/export?topics=${encodeURIComponent(topics)}&format=${format}&sync=${sync}`,
-        { method: 'POST' }
-      )
-      const data = await res.json()
-      setResult(data.output_path || 'Export completed')
-    } catch (err) {
-      setResult('Export failed')
+    const r = await runWithToast(
+      toast,
+      () =>
+        api.exportBag(bagId, {
+          topics: selectedTopics,
+          format,
+          output_dir: outputDir,
+          sync,
+        }),
+      { errorPrefix: 'Export failed' },
+    )
+    if (r) {
+      setResult(r.output)
+      toast.push('info', `Exported to ${r.output}`)
     }
     setExporting(false)
   }
@@ -48,9 +56,9 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   const dialogStyle: React.CSSProperties = {
     background: '#161b22',
     border: '1px solid #30363d',
-    borderRadius: '12px',
-    padding: '24px',
-    width: '500px',
+    borderRadius: 12,
+    padding: 24,
+    width: 500,
     maxHeight: '80vh',
     overflow: 'auto',
   }
@@ -58,17 +66,19 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   return (
     <div style={overlayStyle} onClick={onClose}>
       <div style={dialogStyle} onClick={e => e.stopPropagation()}>
-        <h2 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '16px' }}>Export Data</h2>
+        <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>Export Data</h2>
 
-        <div style={{ marginBottom: '16px' }}>
-          <label style={{ fontSize: '13px', color: '#8b949e', display: 'block', marginBottom: '8px' }}>Format</label>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 13, color: '#8b949e', display: 'block', marginBottom: 8 }}>
+            Format
+          </label>
           <select
             value={format}
             onChange={e => setFormat(e.target.value)}
             style={{
               background: '#0d1117',
               border: '1px solid #30363d',
-              borderRadius: '6px',
+              borderRadius: 6,
               padding: '8px 12px',
               color: '#e1e4e8',
               width: '100%',
@@ -82,13 +92,42 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           </select>
         </div>
 
-        <div style={{ marginBottom: '16px' }}>
-          <label style={{ fontSize: '13px', color: '#8b949e', display: 'block', marginBottom: '8px' }}>Topics</label>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 13, color: '#8b949e', display: 'block', marginBottom: 8 }}>
+            Output directory
+          </label>
+          <input
+            type="text"
+            value={outputDir}
+            onChange={e => setOutputDir(e.target.value)}
+            style={{
+              background: '#0d1117',
+              border: '1px solid #30363d',
+              borderRadius: 6,
+              padding: '8px 12px',
+              color: '#e1e4e8',
+              width: '100%',
+              fontSize: 13,
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 13, color: '#8b949e', display: 'block', marginBottom: 8 }}>
+            Topics
+          </label>
           {availableTopics.map(topic => (
-            <label key={topic} style={{
-              display: 'flex', alignItems: 'center', gap: '6px',
-              fontSize: '13px', marginBottom: '4px', cursor: 'pointer',
-            }}>
+            <label
+              key={topic}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 13,
+                marginBottom: 4,
+                cursor: 'pointer',
+              }}
+            >
               <input
                 type="checkbox"
                 checked={selectedTopics.includes(topic)}
@@ -99,35 +138,43 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           ))}
         </div>
 
-        <label style={{
-          display: 'flex', alignItems: 'center', gap: '8px',
-          fontSize: '13px', marginBottom: '16px', cursor: 'pointer',
-        }}>
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 13,
+            marginBottom: 16,
+            cursor: 'pointer',
+          }}
+        >
           <input type="checkbox" checked={sync} onChange={e => setSync(e.target.checked)} />
           Synchronize topics before export
         </label>
 
         {result && (
-          <div style={{
-            background: '#0d2818',
-            border: '1px solid #238636',
-            borderRadius: '6px',
-            padding: '8px 12px',
-            color: '#3fb950',
-            fontSize: '13px',
-            marginBottom: '16px',
-          }}>
+          <div
+            style={{
+              background: '#0d2818',
+              border: '1px solid #238636',
+              borderRadius: 6,
+              padding: '8px 12px',
+              color: '#3fb950',
+              fontSize: 13,
+              marginBottom: 16,
+            }}
+          >
             {result}
           </div>
         )}
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <button
             onClick={onClose}
             style={{
               background: '#21262d',
               border: '1px solid #30363d',
-              borderRadius: '6px',
+              borderRadius: 6,
               padding: '8px 16px',
               color: '#e1e4e8',
               cursor: 'pointer',
@@ -139,12 +186,12 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
             onClick={handleExport}
             disabled={exporting || selectedTopics.length === 0}
             style={{
-              background: '#238636',
+              background: exporting || selectedTopics.length === 0 ? '#21262d' : '#238636',
               border: 'none',
-              borderRadius: '6px',
+              borderRadius: 6,
               padding: '8px 16px',
               color: '#fff',
-              cursor: 'pointer',
+              cursor: exporting || selectedTopics.length === 0 ? 'not-allowed' : 'pointer',
               fontWeight: 600,
             }}
           >
