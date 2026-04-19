@@ -13,7 +13,7 @@ All items must land before HN / Reddit / Twitter launch.
 - [x] **#2 — DRY'd export error collection + ExportError** — DONE as part of #3
 - [x] **#1 — CDR parser bounds checks + typed errors + tests** — DONE (12 new tests)
 - [ ] **#4 — RLDS + LeRobot export formats** (1-2 days)
-- [ ] **#5 — DuckDB thread safety** (2-3 hrs)
+- [x] **#5 — DuckDB thread safety** — DONE (4 new concurrency tests)
 - [ ] **#6 — Dashboard path validation default** (30 min)
 - [ ] **#7 — Hardening PR: SQL f-strings, WebSocket error swallow, ring buffer sizing** (3-4 hrs)
 
