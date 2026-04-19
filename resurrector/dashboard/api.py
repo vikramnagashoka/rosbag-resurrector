@@ -40,15 +40,15 @@ app.add_middleware(
 # directory rather than allowing any path on disk — the dashboard ships in
 # distribution packages and we never want a curl-able endpoint to expose
 # arbitrary paths like /etc/passwd.
+#
+# Read the env var on every call rather than at import time so tests (and
+# users) can override it after the module is loaded.
 def _resolve_allowed_roots() -> list[Path]:
     raw = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "")
     parts = [r for r in raw.split(os.pathsep) if r]
     if not parts:
         return [Path.home().resolve()]
     return [Path(r).resolve() for r in parts]
-
-
-_ALLOWED_ROOTS: list[Path] = _resolve_allowed_roots()
 
 
 def _validate_path(path_str: str) -> Path:
@@ -65,7 +65,8 @@ def _validate_path(path_str: str) -> Path:
     if ".." in Path(path_str).parts:
         raise HTTPException(400, "Path must not contain '..' components")
     resolved = Path(path_str).resolve()
-    if not any(_is_within(resolved, root) for root in _ALLOWED_ROOTS):
+    allowed_roots = _resolve_allowed_roots()
+    if not any(_is_within(resolved, root) for root in allowed_roots):
         raise HTTPException(
             403,
             f"Path '{resolved}' is outside allowed roots. "

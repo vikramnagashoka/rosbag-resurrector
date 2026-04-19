@@ -20,6 +20,17 @@ def tmp_dir():
         yield Path(d)
 
 
+@pytest.fixture(autouse=True)
+def _allow_tmp_paths(monkeypatch):
+    """Tests use system temp dirs which on Linux/macOS sit outside $HOME.
+    Allow them so the dashboard path-safety check doesn't reject test paths.
+    """
+    monkeypatch.setenv(
+        "RESURRECTOR_ALLOWED_ROOTS",
+        os.pathsep.join([tempfile.gettempdir(), str(Path.home())]),
+    )
+
+
 @pytest.fixture
 def indexed_bag(tmp_dir):
     """Create and index a bag file, returning (bag_path, db_path, bag_id)."""
