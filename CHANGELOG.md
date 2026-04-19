@@ -8,13 +8,57 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
-### Planned for 0.3.0 — "Unified dashboard"
+## [0.3.0] — 2026-04-19
 
-- Wire unfinished UI components (ExportDialog, SyncView, ImageViewer) into the main dashboard flow
-- Plotly-based Explorer with linked cursors, brushing, and annotations
-- Semantic frame search page in the dashboard
-- Datasets management page
-- Bridge control panel
+### What's new
+
+Unified dashboard release. Every advanced feature that used to be CLI-only now lives in the web UI: semantic search, datasets management, bridge control, and a Plotly-based Explorer with brush-to-zoom and click-to-annotate. Three previously-dormant components (ExportDialog, SyncView, ImageViewer) are wired up and functional.
+
+### Dashboard — new pages
+
+- **Search** — semantic frame search by natural language. Thumbnails link back to the Explorer at the matched frame. Supports clip mode (temporal groups) and actionable "no results" guidance when a bag isn't indexed.
+- **Datasets** — full CRUD management of versioned dataset collections. Create, inspect versions, delete, and export directly from the UI.
+- **Bridge** — start/stop the PlotJuggler-compatible WebSocket bridge as a subprocess. Dashboard polls bridge status every 3 seconds so unexpected subprocess death surfaces as a toast instead of a broken page.
+
+### Dashboard — rewritten Explorer
+
+- **Plotly subplots** with shared x-axis replace the old SVG mini-charts. Click-and-drag to zoom; server re-downsamples the narrower window via LTTB and returns ~2k points regardless of source density.
+- **Linked cursors** across multiple series via Plotly's unified hovermode.
+- **Click-to-annotate** — click any point, add a note, persists via new annotations API; renders as dashed lines with labels on subsequent visits.
+- **Tab UX** — Plot / Sync / Images. ExportDialog, SyncView, and ImageViewer are now mounted and functional. Images tab automatically opens when an image topic is selected.
+
+### Dashboard infrastructure
+
+- **`src/api.ts`** — typed client for every REST endpoint with a shared `ApiError` class.
+- **`<ErrorToast>`** at app root surfaces 4xx/5xx as dismissable banners. All pages (existing Library/Explorer/Health/Compare + new pages) retrofit to use it; no more silent fetch failures.
+- **Lazy-loaded Explorer** via `React.lazy()` so the Plotly bundle (~4.7MB) only loads when a user opens a bag; Library/Health/Compare/Search/Datasets/Bridge pages pay just 200KB.
+
+### Backend
+
+- **`GET /api/bags/{id}/topics/{t}?max_points=N`** — new query param triggers LTTB downsampling and caches results keyed on `(bag, topic, window, max_points, mtime)`. Panning or zooming the plot re-requests the narrower window; file edits auto-invalidate via mtime.
+- **Frame endpoint** (`/api/bags/{id}/topics/{t}/frame/{n}`) — now uses a DuckDB-cached `(frame_index -> timestamp_ns)` map for O(1) seek. Previously re-scanned the entire bag on every request. Cache is built per (bag, topic) during `resurrector scan` and lazily on demand under a per-(bag, topic) lock for older bags.
+- **`/api/bags/{id}/annotations`** + **`/api/annotations/{id}`** — CRUD for persistent plot annotations.
+- **`/api/datasets`** + `/versions` + `/export` — full CRUD for dataset management.
+- **`/api/bridge/start|stop|status|proxy/*`** — subprocess-managed bridge with cross-origin avoidance via proxy. FastAPI shutdown hook kills the subprocess cleanly.
+
+### Ingest
+
+- **Pre-built frame offset cache during `resurrector scan`** for image topics. Opt out with `--skip-frame-index`. Makes the first Explorer visit on a fresh bag instant instead of doing a cold scan per frame request.
+- New `frame_offsets` table in the DuckDB index.
+- New `annotations` table in the DuckDB index.
+
+### New tests
+
+- 13 for frame offsets + annotations (indexer CRUD)
+- 11 for frame_index pipeline (build, lookup, read)
+- 14 for LTTB downsampling
+- 23 for new API endpoints (annotations, datasets, frame, downsampled data)
+
+### Compatibility
+
+- Legacy bags scanned on older versions keep working — frame offsets are built lazily on first dashboard/search access if absent.
+
+---
 
 ## [0.2.2] — 2026-04-19
 
