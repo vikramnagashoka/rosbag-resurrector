@@ -300,6 +300,20 @@ class DatasetManager:
         self.conn.execute("DELETE FROM datasets WHERE id = ?", [ds["id"]])
         return True
 
+    def delete_version(self, name: str, version: str) -> bool:
+        """Delete a specific version of a dataset."""
+        ds = self._get_dataset_by_name(name)
+        if ds is None:
+            return False
+        v = self._get_version(ds["id"], version)
+        if v is None:
+            return False
+        self.conn.execute(
+            "DELETE FROM dataset_versions WHERE dataset_id = ? AND version = ?",
+            [ds["id"], version],
+        )
+        return True
+
     def _get_dataset_by_name(self, name: str) -> dict[str, Any] | None:
         row = self.conn.execute(
             "SELECT * FROM datasets WHERE name = ?", [name]
