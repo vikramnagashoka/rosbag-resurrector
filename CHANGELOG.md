@@ -8,7 +8,15 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-04-19
+### Planned for 0.3.0 — "Unified dashboard"
+
+- Wire unfinished UI components (ExportDialog, SyncView, ImageViewer) into the main dashboard flow
+- Plotly-based Explorer with linked cursors, brushing, and annotations
+- Semantic frame search page in the dashboard
+- Datasets management page
+- Bridge control panel
+
+## [0.2.2] — 2026-04-19
 
 ### What's new
 
