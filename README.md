@@ -14,26 +14,110 @@ A pandas-like data analysis tool for **ROS 2 (MCAP)** bag files — with automat
 >
 > — [The Rosbag Graveyard](https://discourse.ros.org/), a shared frustration across the robotics community
 
-## Quick Start
+## Install
 
 ```bash
 pip install rosbag-resurrector
 ```
 
+That's the whole install. No ROS required. Optional extras unlock specific features (vision/CLIP, live ROS 2 bridge, additional export formats) — see [Optional Extras](#optional-extras) below.
+
+## First 10 minutes
+
+Don't have a bag handy yet? You can explore the entire pipeline using a synthetic sample bag. Pick a path based on how you like to work.
+
+### Step 1 — Verify your install (10 seconds)
+
+```bash
+resurrector doctor
+```
+
+Prints a pass / warn / fail grid for Python version, the MCAP parser, the DuckDB index path, optional vision/bridge dependencies, and dashboard configuration. Tells you exactly which features are ready to use with your current install.
+
+### Step 2 — Generate a sample bag (5 seconds)
+
+```bash
+resurrector demo --full
+```
+
+Creates a 5-second synthetic MCAP at `~/.resurrector/demo_sample.mcap` with realistic IMU, joint-state, camera, and lidar data, then walks through scan → health → export so you can see end-to-end what the tool does.
+
+Now pick the surface you'd actually use day-to-day:
+
+### Path A — Web Dashboard (recommended for first-time)
+
+```bash
+resurrector dashboard
+```
+
+Open `http://localhost:8080` in your browser. You'll land on an empty Library page — paste the path from step 2 (`~/.resurrector/`) into the **Scan folder** input and click **Scan folder**. The demo bag appears with a health badge.
+
+Click into the bag. From the Explorer page you can:
+- **Plot tab** — pick a topic from the sidebar; the Plotly chart supports drag-to-zoom (server re-downsamples the narrower window) and click-to-annotate (notes persist across reloads)
+- **Sync tab** — pick 2+ topics, choose a sync method, see them aligned in a table
+- **Images tab** — automatically opens for image topics; scrub through frames with a slider
+- **Export button** — opens the dialog for Parquet / HDF5 / CSV / NumPy / Zarr export
+
+Other pages worth trying:
+- **Search** — semantic frame search across all your indexed bags ("robot dropping object" → matching clips with thumbnails). Requires `pip install rosbag-resurrector[vision]` for the local CLIP backend, OR `[vision-openai]` for the OpenAI API backend
+- **Datasets** — create versioned dataset collections for ML training pipelines
+- **Bridge** — start a PlotJuggler-compatible WebSocket bridge from any bag in one click
+- **Compare** — side-by-side topic / health comparison between two bags
+
+### Path B — CLI
+
+```bash
+# scan a folder (also pre-builds video frame index for fast image access)
+resurrector scan ~/.resurrector/
+
+# quick visual summary with sparklines and grouped topics
+resurrector quicklook ~/.resurrector/demo_sample.mcap
+
+# detailed health report
+resurrector health ~/.resurrector/demo_sample.mcap
+
+# semantic search (after you've indexed frames)
+resurrector index-frames ~/.resurrector/
+resurrector search-frames "robot arm reaching"
+
+# export to ML training format
+resurrector export ~/.resurrector/demo_sample.mcap \
+  --topics /imu/data /joint_states \
+  --format parquet \
+  --sync nearest \
+  --output ./training_data/
+```
+
+Run `resurrector --help` for the full command list — see [CLI Reference](#cli-reference) below for details on each.
+
+### Path C — Python / Jupyter
+
 ```python
 from resurrector import BagFrame
 
 # Load a bag (lazy — doesn't read all data into memory)
-bf = BagFrame("experiment.mcap")
+bf = BagFrame("~/.resurrector/demo_sample.mcap")
 
-# See what's inside
+# Quick overview
 bf.info()
 
-# Get IMU data as a Polars DataFrame
+# Get a topic as a Polars DataFrame
 imu_df = bf["/imu/data"].to_polars()
 
 # Or as Pandas
 imu_pd = bf["/imu/data"].to_pandas()
+
+# Stream large topics without OOM (chunked iterator)
+for chunk in bf["/camera/rgb"].iter_chunks(chunk_size=10_000):
+    process(chunk)
+
+# Lazy frame for filter/projection pushdown
+lazy = bf["/imu/data"].to_lazy_polars()
+filtered = lazy.filter(pl.col("linear_acceleration.x").abs() > 5.0).collect()
+
+# Health report
+report = bf.health_report()
+print(f"Score: {report.score}/100")
 
 # Synchronize multiple topics by timestamp
 synced = bf.sync(["/imu/data", "/joint_states", "/camera/rgb"],
@@ -43,6 +127,31 @@ synced = bf.sync(["/imu/data", "/joint_states", "/camera/rgb"],
 bf.export(topics=["/imu/data", "/joint_states"],
           format="parquet", output="training_data/", sync=True)
 ```
+
+In Jupyter, just display the `bf` object — it renders a rich HTML table with health badges and topic groups.
+
+### Common gotchas
+
+- **`mcap` module not found** — run `pip install -e ".[dev]"` if you cloned from source, or `pip install rosbag-resurrector` from PyPI
+- **Dashboard scan returns 403** — by default, `RESURRECTOR_ALLOWED_ROOTS` defaults to your home directory. Set it (`os.pathsep`-separated) to broaden the scope
+- **Semantic search returns nothing** — frames are only indexed for bags you ran `resurrector index-frames` on, OR if your bags were scanned with v0.2.2+ (which pre-builds the frame index during `scan`)
+- **`.bag` or `.db3` raises NotImplementedError** — make sure `mcap` (for ROS 1) or `ros2` (for ROS 2 SQLite) is on your PATH; we shell out to them for auto-conversion
+
+### Optional Extras
+
+Install only what you need:
+
+```bash
+pip install rosbag-resurrector[vision]        # local CLIP semantic search (~2GB model)
+pip install rosbag-resurrector[vision-openai] # OpenAI-backed semantic search (lighter)
+pip install rosbag-resurrector[vision-lite]   # image/video parsing, no ML
+pip install rosbag-resurrector[bridge-live]   # live ROS 2 topic bridge (requires rclpy)
+pip install rosbag-resurrector[watch]         # auto-index new bags as they appear
+pip install rosbag-resurrector[all-exports]   # Zarr, additional export formats
+pip install rosbag-resurrector[ros1]          # ROS 1 .bag support via rosbags
+```
+
+Run `resurrector doctor` any time to see which extras are active.
 
 ## Features
 
@@ -342,10 +451,13 @@ df_10hz = downsample_temporal(df, target_hz=10)
 resurrector dashboard --port 8080
 ```
 
-- **Library** — Browse, search, and filter all indexed bags
-- **Explorer** — Deep-dive into topics with interactive plots
-- **Health** — Visual quality reports with recommendations
-- **Compare** — Side-by-side bag comparison
+- **Library** — Browse, search, and filter all indexed bags. Empty state offers a one-click scan-folder input.
+- **Explorer** — Plotly-based topic plots with brush-to-zoom, linked cursors, and click-to-annotate. Tabbed UX for plotting, multi-stream sync, and image/video scrubbing.
+- **Health** — Visual quality reports with recommendations and per-topic scores.
+- **Search** — Semantic frame search by natural language; thumbnails link back to the matched frame in Explorer.
+- **Datasets** — Full CRUD on versioned dataset collections with one-click export.
+- **Compare** — Side-by-side topic / health comparison between two bags.
+- **Bridge** — Start a PlotJuggler-compatible WebSocket bridge from any bag in one click; live status polling.
 
 The scan endpoint supports **Server-Sent Events** for real-time progress streaming:
 
@@ -492,7 +604,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (164+ tests)
+# Run tests (278 tests, ~25 seconds)
 pytest tests/ -v
 
 # Build dashboard frontend
