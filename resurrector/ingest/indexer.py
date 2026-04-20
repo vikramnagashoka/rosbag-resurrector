@@ -104,6 +104,36 @@ class BagIndex:
             CREATE SEQUENCE IF NOT EXISTS frame_embedding_id_seq START 1
         """)
 
+        # Frame offset cache — enables O(1) seek to any image frame.
+        # Built during `resurrector scan` for image topics, and lazily on
+        # first dashboard/search access for bags scanned on older versions.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS frame_offsets (
+                bag_id INTEGER NOT NULL,
+                topic VARCHAR NOT NULL,
+                frame_index INTEGER NOT NULL,
+                timestamp_ns BIGINT NOT NULL,
+                PRIMARY KEY (bag_id, topic, frame_index)
+            )
+        """)
+
+        # Persistent annotations on timestamps in topic data.
+        # Rendered in the dashboard Plotly explorer as pinned notes.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS annotations (
+                id INTEGER PRIMARY KEY,
+                bag_id INTEGER NOT NULL,
+                topic VARCHAR,
+                timestamp_ns BIGINT NOT NULL,
+                text VARCHAR NOT NULL,
+                created_at TIMESTAMP DEFAULT current_timestamp,
+                updated_at TIMESTAMP DEFAULT current_timestamp
+            )
+        """)
+        self.conn.execute("""
+            CREATE SEQUENCE IF NOT EXISTS annotation_id_seq START 1
+        """)
+
     def upsert_bag(self, scanned: ScannedFile, metadata: BagMetadata) -> int:
         """Insert or update a bag in the index. Returns the bag ID."""
         with self._lock:
@@ -497,6 +527,139 @@ class BagIndex:
                 self.conn.execute(
                     "DELETE FROM frame_embeddings WHERE bag_id = ?", [bag_id]
                 )
+
+    # ----- Frame offset cache (for fast image seek) -----
+
+    def has_frame_offsets(self, bag_id: int, topic: str) -> bool:
+        """True if frame offsets are already cached for this (bag, topic)."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM frame_offsets WHERE bag_id = ? AND topic = ?",
+                [bag_id, topic],
+            ).fetchone()
+            return row[0] > 0
+
+    def insert_frame_offsets(
+        self, bag_id: int, topic: str, offsets: list[tuple[int, int]],
+    ) -> None:
+        """Bulk-insert (frame_index, timestamp_ns) pairs for a topic.
+
+        Idempotent — existing rows are left untouched.
+        """
+        if not offsets:
+            return
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO frame_offsets "
+                "(bag_id, topic, frame_index, timestamp_ns) VALUES (?, ?, ?, ?)",
+                [(bag_id, topic, idx, ts) for (idx, ts) in offsets],
+            )
+
+    def get_frame_timestamp(
+        self, bag_id: int, topic: str, frame_index: int,
+    ) -> int | None:
+        """Return the timestamp_ns for a specific frame, or None if not cached."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT timestamp_ns FROM frame_offsets "
+                "WHERE bag_id = ? AND topic = ? AND frame_index = ?",
+                [bag_id, topic, frame_index],
+            ).fetchone()
+            return row[0] if row else None
+
+    def count_frames(self, bag_id: int, topic: str) -> int:
+        """Return how many frames are cached for this (bag, topic)."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM frame_offsets WHERE bag_id = ? AND topic = ?",
+                [bag_id, topic],
+            ).fetchone()
+            return row[0] if row else 0
+
+    def clear_frame_offsets(self, bag_id: int, topic: str | None = None) -> None:
+        """Drop cached frame offsets for a bag (optionally scoped to one topic)."""
+        with self._lock:
+            if topic:
+                self.conn.execute(
+                    "DELETE FROM frame_offsets WHERE bag_id = ? AND topic = ?",
+                    [bag_id, topic],
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM frame_offsets WHERE bag_id = ?", [bag_id],
+                )
+
+    # ----- Annotations (persistent user notes on plot timestamps) -----
+
+    def add_annotation(
+        self, bag_id: int, timestamp_ns: int, text: str, topic: str | None = None,
+    ) -> int:
+        """Create an annotation. Returns the new annotation id."""
+        with self._lock:
+            aid = self.conn.execute(
+                "SELECT nextval('annotation_id_seq')"
+            ).fetchone()[0]
+            self.conn.execute(
+                "INSERT INTO annotations (id, bag_id, topic, timestamp_ns, text) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [aid, bag_id, topic, timestamp_ns, text],
+            )
+            return aid
+
+    def list_annotations(
+        self, bag_id: int, topic: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return annotations for a bag, optionally filtered by topic."""
+        with self._lock:
+            if topic is None:
+                rows = self.conn.execute(
+                    "SELECT id, bag_id, topic, timestamp_ns, text, "
+                    "created_at, updated_at FROM annotations "
+                    "WHERE bag_id = ? ORDER BY timestamp_ns",
+                    [bag_id],
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, bag_id, topic, timestamp_ns, text, "
+                    "created_at, updated_at FROM annotations "
+                    "WHERE bag_id = ? AND (topic = ? OR topic IS NULL) "
+                    "ORDER BY timestamp_ns",
+                    [bag_id, topic],
+                ).fetchall()
+            return [
+                {
+                    "id": r[0], "bag_id": r[1], "topic": r[2],
+                    "timestamp_ns": r[3], "text": r[4],
+                    "created_at": str(r[5]) if r[5] else None,
+                    "updated_at": str(r[6]) if r[6] else None,
+                }
+                for r in rows
+            ]
+
+    def update_annotation(self, annotation_id: int, text: str) -> bool:
+        """Update an annotation's text. Returns True if it existed."""
+        with self._lock:
+            result = self.conn.execute(
+                "UPDATE annotations SET text = ?, updated_at = current_timestamp "
+                "WHERE id = ?",
+                [text, annotation_id],
+            )
+            # duckdb returns a cursor; check affected rows via subsequent SELECT
+            exists = self.conn.execute(
+                "SELECT 1 FROM annotations WHERE id = ?", [annotation_id],
+            ).fetchone()
+            return exists is not None
+
+    def delete_annotation(self, annotation_id: int) -> bool:
+        """Delete an annotation. Returns True if it existed before deletion."""
+        with self._lock:
+            existed = self.conn.execute(
+                "SELECT 1 FROM annotations WHERE id = ?", [annotation_id],
+            ).fetchone()
+            self.conn.execute(
+                "DELETE FROM annotations WHERE id = ?", [annotation_id],
+            )
+            return existed is not None
 
     def close(self):
         """Close the database connection."""

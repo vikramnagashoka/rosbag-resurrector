@@ -33,12 +33,23 @@ def scan(
     db: Annotated[Optional[Path], typer.Option("--db", help="Path to index database")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
     log_file: Annotated[Optional[str], typer.Option("--log-file", help="Write logs to file")] = None,
+    skip_frame_index: Annotated[bool, typer.Option(
+        "--skip-frame-index",
+        help="Skip pre-building the frame-offset cache for image topics. "
+             "Dashboard/search will build it lazily on first access.",
+    )] = False,
 ):
-    """Scan a directory for bag files and index them."""
+    """Scan a directory for bag files and index them.
+
+    Pre-builds the frame-offset cache for image topics during indexing,
+    so the dashboard's ImageViewer and semantic search thumbnails are
+    fast on the first access. Use --skip-frame-index to defer that work.
+    """
     _setup_logging(verbose, log_file)
     from resurrector.ingest.scanner import scan_path
     from resurrector.ingest.parser import parse_bag
     from resurrector.ingest.indexer import BagIndex
+    from resurrector.ingest.frame_index import build_frame_offsets, image_topics
     from resurrector.cli.formatters import create_progress, console as fmt_console
 
     files = scan_path(path)
@@ -64,6 +75,23 @@ def scan(
                 index.update_health_score(bag_id, report.score)
                 for topic_name, th in report.topic_scores.items():
                     index.update_topic_health(bag_id, topic_name, th.score)
+
+                # Pre-build frame offsets for image topics unless asked
+                # to skip. This is cheap because we already have the
+                # parser warm; amortizes the thundering-herd cost when
+                # semantic search returns N thumbnails for the bag.
+                if not skip_frame_index:
+                    img_topics = [
+                        t.name for t in metadata.topics
+                        if t.message_type in {
+                            "sensor_msgs/msg/Image",
+                            "sensor_msgs/msg/CompressedImage",
+                        }
+                    ]
+                    if img_topics:
+                        build_frame_offsets(
+                            index, bag_id, scanned_file.path, topics=img_topics,
+                        )
 
                 progress.advance(task)
             except Exception as e:
@@ -718,6 +746,7 @@ def bridge_live(
     host: Annotated[str, typer.Option("--host", help="Bind host")] = "0.0.0.0",
     topics: Annotated[Optional[list[str]], typer.Option("--topic", "-t", help="Topics to subscribe")] = None,
     max_rate: Annotated[float, typer.Option("--max-rate", help="Max message rate (Hz)")] = 50.0,
+    no_browser: Annotated[bool, typer.Option("--no-browser", help="Accepted for API parity; live mode never opens a browser")] = False,
 ):
     """Relay live ROS2 topics over WebSocket (requires rclpy).
 

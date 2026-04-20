@@ -1,21 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import HealthBadge from '../components/HealthBadge'
-
-interface HealthReport {
-  score: number
-  issues: {
-    check: string
-    severity: string
-    message: string
-    topic: string | null
-    start_time: number | null
-    end_time: number | null
-    details: Record<string, any>
-  }[]
-  recommendations: string[]
-  topic_scores: Record<string, { score: number; issue_count: number }>
-}
+import { api, HealthReport } from '../api'
+import { runWithToast, useErrorToast } from '../ErrorToast'
 
 const severityColors: Record<string, string> = {
   info: '#8b949e',
@@ -28,12 +15,14 @@ export default function Health() {
   const { id } = useParams<{ id: string }>()
   const [report, setReport] = useState<HealthReport | null>(null)
   const [loading, setLoading] = useState(true)
+  const toast = useErrorToast()
 
   useEffect(() => {
-    fetch(`/api/bags/${id}/health`)
-      .then(r => r.json())
-      .then(setReport)
-      .finally(() => setLoading(false))
+    runWithToast(toast, () => api.getBagHealth(Number(id))).then(r => {
+      if (r) setReport(r)
+      setLoading(false)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
   if (loading || !report) return <p style={{ color: '#8b949e' }}>Loading health report...</p>

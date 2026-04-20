@@ -169,6 +169,10 @@ async def get_bag_health(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+_FRAME_SUBROUTE = __import__("re").compile(r"^(?P<topic>.+)/frame/(?P<idx>\d+)$")
+_THUMB_SUBROUTE = "/thumbnail"
+
+
 @app.get("/api/bags/{bag_id}/topics/{topic_name:path}")
 async def get_topic_data(
     bag_id: int,
@@ -177,8 +181,48 @@ async def get_topic_data(
     end_sec: float | None = None,
     limit: int = Query(default=1000, le=10000),
     offset: int = Query(default=0, ge=0),
-) -> dict[str, Any]:
-    """Get topic data as JSON (paginated)."""
+    max_points: int | None = Query(
+        default=None, ge=3, le=10000,
+        description="If set, downsample to ~this many points via LTTB. "
+                    "Overrides pagination — returns the full time range "
+                    "visually summarized for plotting.",
+    ),
+    width: int | None = Query(default=None, description="Image resize width (sub-routes only)"),
+) -> Any:
+    """Get topic data as JSON.
+
+    Two modes:
+      1. Paginated (default): returns up to ``limit`` raw rows starting
+         at ``offset``. For table views and exact inspection.
+      2. Downsampled (``max_points`` set): returns ~``max_points`` rows
+         LTTB-downsampled across the full [start_sec, end_sec] window.
+         For plotting. Cached in memory keyed on (bag, topic, window,
+         max_points, bag mtime) so panning the plot hits RAM.
+
+    The ``{topic_name:path}`` wildcard is greedy, so it also matches
+    sub-routes like ``.../frame/N`` and ``.../thumbnail``. We dispatch
+    those inline here so FastAPI doesn't need two separate handlers to
+    disambiguate.
+    """
+    # Dispatch sub-routes before running the full topic-data query.
+    m = _FRAME_SUBROUTE.match(topic_name)
+    if m:
+        return await get_frame_image(
+            bag_id=bag_id,
+            topic_name=m.group("topic"),
+            frame_index=int(m.group("idx")),
+            width=width,
+        )
+    if topic_name.endswith(_THUMB_SUBROUTE):
+        return await get_topic_thumbnail(
+            bag_id=bag_id,
+            topic_name=topic_name.removesuffix(_THUMB_SUBROUTE),
+        )
+
+    from resurrector.dashboard.cache import (
+        get_topic_cache, set_topic_cache, topic_cache_key,
+    )
+
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -187,6 +231,15 @@ async def get_topic_data(
 
         from resurrector.core.bag_frame import BagFrame
         topic_name = "/" + topic_name if not topic_name.startswith("/") else topic_name
+
+        # Downsampled path: consult cache first.
+        if max_points is not None:
+            cache_key = topic_cache_key(
+                bag_id, topic_name, start_sec, end_sec, max_points, bag["path"],
+            )
+            cached = get_topic_cache(cache_key)
+            if cached is not None:
+                return cached
 
         bf = BagFrame(bag["path"])
         try:
@@ -198,19 +251,32 @@ async def get_topic_data(
             raise HTTPException(404, f"Topic '{topic_name}' not found")
 
         df = view.to_polars()
-
-        # Apply pagination
         total = df.height
-        df = df.slice(offset, limit)
 
-        return {
-            "topic": topic_name,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "columns": df.columns,
-            "data": df.to_dicts(),
-        }
+        if max_points is not None:
+            from resurrector.core.downsample import downsample_dataframe
+            df = downsample_dataframe(df, max_points=max_points)
+            response = {
+                "topic": topic_name,
+                "total": total,
+                "downsampled": True,
+                "max_points": max_points,
+                "columns": df.columns,
+                "data": df.to_dicts(),
+            }
+            set_topic_cache(cache_key, response)
+            return response
+        else:
+            df = df.slice(offset, limit)
+            return {
+                "topic": topic_name,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "downsampled": False,
+                "columns": df.columns,
+                "data": df.to_dicts(),
+            }
     finally:
         index.close()
 
@@ -426,39 +492,70 @@ async def get_frame_image(
     frame_index: int,
     width: int | None = Query(default=None, description="Resize width"),
 ) -> Any:
-    """Serve a single frame as JPEG."""
+    """Serve a single frame as JPEG.
+
+    Uses a DuckDB-cached (frame_index -> timestamp_ns) lookup so the
+    second request for the same bag/topic is O(1) instead of
+    re-scanning the MCAP. Build is serialized per (bag, topic) to avoid
+    thundering-herd on semantic-search thumbnail bursts.
+    """
+    from resurrector.dashboard.cache import get_frame_build_lock
+    from resurrector.ingest.frame_index import (
+        get_frame_timestamp, read_single_frame,
+    )
+
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
         if bag is None:
             raise HTTPException(404, "Bag not found")
 
-        from resurrector.core.bag_frame import BagFrame
         topic_name = "/" + topic_name if not topic_name.startswith("/") else topic_name
-        bf = BagFrame(bag["path"])
-        try:
-            view = bf[topic_name]
-        except KeyError:
+
+        # Confirm topic exists and is image-typed before we try to build offsets.
+        topic_info = next(
+            (t for t in bag.get("topics", []) if t["name"] == topic_name),
+            None,
+        )
+        if topic_info is None:
             raise HTTPException(404, f"Topic '{topic_name}' not found")
+        from resurrector.ingest.frame_index import IMAGE_TOPIC_TYPES
+        if topic_info["message_type"] not in IMAGE_TOPIC_TYPES:
+            raise HTTPException(
+                400, f"Topic '{topic_name}' is not an image topic "
+                     f"(type: {topic_info['message_type']})",
+            )
 
-        if not view.is_image_topic:
-            raise HTTPException(400, f"Topic '{topic_name}' is not an image topic")
+        # Build offsets under a per-(bag, topic) lock so concurrent
+        # requests for the same topic deduplicate the scan cost.
+        lock = get_frame_build_lock(bag_id, topic_name)
+        async with lock:
+            ts = get_frame_timestamp(
+                index, bag_id, bag["path"], topic_name, frame_index,
+            )
+        if ts is None:
+            raise HTTPException(
+                404,
+                f"Frame {frame_index} not found on '{topic_name}' "
+                f"(bag has {index.count_frames(bag_id, topic_name)} frames)",
+            )
 
-        # Seek to the frame
-        for i, (ts, arr) in enumerate(view.iter_images()):
-            if i == frame_index:
-                from PIL import Image as PILImage
-                import io
-                img = PILImage.fromarray(arr)
-                if width:
-                    ratio = width / img.width
-                    img = img.resize((width, int(img.height * ratio)))
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=85)
-                from starlette.responses import Response
-                return Response(content=buf.getvalue(), media_type="image/jpeg")
+        arr, _ = read_single_frame(bag["path"], topic_name, ts)
+        if arr is None:
+            raise HTTPException(
+                500, f"Could not decode frame {frame_index} on '{topic_name}'",
+            )
 
-        raise HTTPException(404, f"Frame {frame_index} not found")
+        from PIL import Image as PILImage
+        import io
+        img = PILImage.fromarray(arr)
+        if width:
+            ratio = width / img.width
+            img = img.resize((width, int(img.height * ratio)))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        from starlette.responses import Response
+        return Response(content=buf.getvalue(), media_type="image/jpeg")
     finally:
         index.close()
 
@@ -556,6 +653,464 @@ async def get_frame_index_status(bag_id: int) -> dict[str, Any]:
         }
     finally:
         index.close()
+
+
+# ============================================================================
+# Annotations — persistent user notes on plot timestamps (v0.3.0)
+# ============================================================================
+
+
+@app.get("/api/bags/{bag_id}/annotations")
+async def list_annotations_api(
+    bag_id: int,
+    topic: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """List annotations for a bag, optionally scoped to a topic.
+
+    Topic-scoped queries include bag-global annotations (topic IS NULL)
+    so users see their general notes alongside per-topic notes.
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        return {"annotations": index.list_annotations(bag_id, topic=topic)}
+    finally:
+        index.close()
+
+
+@app.post("/api/bags/{bag_id}/annotations")
+async def create_annotation_api(
+    bag_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Create an annotation. Body: {timestamp_ns, text, topic?}"""
+    if "timestamp_ns" not in payload or "text" not in payload:
+        raise HTTPException(400, "Body must include 'timestamp_ns' and 'text'")
+    text = str(payload["text"]).strip()
+    if not text:
+        raise HTTPException(400, "Annotation text cannot be empty")
+    try:
+        ts = int(payload["timestamp_ns"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'timestamp_ns' must be an integer")
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        aid = index.add_annotation(
+            bag_id, ts, text, topic=payload.get("topic"),
+        )
+        return {"id": aid, "bag_id": bag_id, "timestamp_ns": ts, "text": text,
+                "topic": payload.get("topic")}
+    finally:
+        index.close()
+
+
+@app.patch("/api/annotations/{annotation_id}")
+async def update_annotation_api(
+    annotation_id: int, payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Update an annotation's text."""
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise HTTPException(400, "Annotation text cannot be empty")
+    index = _get_index()
+    try:
+        if not index.update_annotation(annotation_id, text):
+            raise HTTPException(404, "Annotation not found")
+        return {"id": annotation_id, "text": text}
+    finally:
+        index.close()
+
+
+@app.delete("/api/annotations/{annotation_id}")
+async def delete_annotation_api(annotation_id: int) -> dict[str, Any]:
+    """Delete an annotation."""
+    index = _get_index()
+    try:
+        if not index.delete_annotation(annotation_id):
+            raise HTTPException(404, "Annotation not found")
+        return {"deleted": annotation_id}
+    finally:
+        index.close()
+
+
+# ============================================================================
+# Datasets — full CRUD for versioned dataset collections (v0.3.0)
+# ============================================================================
+
+
+def _get_dataset_manager():
+    from resurrector.core.dataset import DatasetManager
+    db_path = os.environ.get("RESURRECTOR_DB_PATH")
+    return DatasetManager(db_path=Path(db_path)) if db_path else DatasetManager()
+
+
+@app.get("/api/datasets")
+async def list_datasets_api() -> dict[str, Any]:
+    """List every dataset with its version count."""
+    mgr = _get_dataset_manager()
+    try:
+        items = mgr.list_datasets()
+        return {"datasets": items}
+    finally:
+        mgr.close()
+
+
+@app.post("/api/datasets")
+async def create_dataset_api(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a dataset. Body: {name, description?}"""
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "'name' is required")
+    mgr = _get_dataset_manager()
+    try:
+        # duckdb raises ConstraintException on unique-name collision; any
+        # integrity / constraint error here is a 409 to the caller.
+        try:
+            ds_id = mgr.create(name, description=payload.get("description", ""))
+        except Exception as e:
+            msg = str(e)
+            if "Constraint" in msg or "UNIQUE" in msg or "duplicate" in msg.lower():
+                raise HTTPException(409, f"Dataset '{name}' already exists")
+            raise
+        return {"name": name, "description": payload.get("description", ""), "id": ds_id}
+    finally:
+        mgr.close()
+
+
+@app.get("/api/datasets/{name}")
+async def get_dataset_api(name: str) -> dict[str, Any]:
+    """Get a dataset plus its versions."""
+    mgr = _get_dataset_manager()
+    try:
+        ds = mgr.get_dataset(name)
+        if ds is None:
+            raise HTTPException(404, f"Dataset '{name}' not found")
+        return ds
+    finally:
+        mgr.close()
+
+
+@app.delete("/api/datasets/{name}")
+async def delete_dataset_api(name: str) -> dict[str, Any]:
+    """Delete a dataset and all its versions."""
+    mgr = _get_dataset_manager()
+    try:
+        if not mgr.delete_dataset(name):
+            raise HTTPException(404, f"Dataset '{name}' not found")
+        return {"deleted": name}
+    finally:
+        mgr.close()
+
+
+@app.post("/api/datasets/{name}/versions")
+async def create_dataset_version_api(
+    name: str, payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a version of a dataset.
+
+    Body:
+      {
+        "version": "1.0",
+        "bag_refs": [{"path": "...", "topics": [...], "start_time": "...", "end_time": "..."}, ...],
+        "sync_config": {"method": "nearest", "tolerance_ms": 25},
+        "export_format": "parquet",
+        "downsample_hz": 50,
+        "metadata": {"description": "...", "license": "MIT", ...}
+      }
+    """
+    from resurrector.core.dataset import BagRef, SyncConfig, DatasetMetadata
+
+    version = str(payload.get("version", "")).strip()
+    if not version:
+        raise HTTPException(400, "'version' is required")
+    if "bag_refs" not in payload:
+        raise HTTPException(400, "'bag_refs' is required")
+
+    try:
+        bag_refs = [BagRef(**b) for b in payload["bag_refs"]]
+    except TypeError as e:
+        raise HTTPException(400, f"Invalid bag_refs: {e}")
+
+    sync_cfg = None
+    if payload.get("sync_config"):
+        sync_cfg = SyncConfig(**payload["sync_config"])
+    metadata = DatasetMetadata(**(payload.get("metadata") or {}))
+
+    mgr = _get_dataset_manager()
+    try:
+        try:
+            mgr.create_version(
+                dataset_name=name,
+                version=version,
+                bag_refs=bag_refs,
+                sync_config=sync_cfg,
+                export_format=payload.get("export_format", "parquet"),
+                downsample_hz=payload.get("downsample_hz"),
+                metadata=metadata,
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        return {"name": name, "version": version}
+    finally:
+        mgr.close()
+
+
+@app.post("/api/datasets/{name}/versions/{version}/export")
+async def export_dataset_version_api(
+    name: str, version: str, payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Export a dataset version to disk. Body: {"output_dir": "..."}"""
+    payload = payload or {}
+    output_dir = payload.get("output_dir", "./datasets")
+    # Validate the output path against allowed roots.
+    validated = _validate_path(str(Path(output_dir).resolve().parent))  # dir may not exist yet
+    mgr = _get_dataset_manager()
+    try:
+        try:
+            path = mgr.export_version(name, version, output_dir=output_dir)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        except Exception as e:
+            # Transactional cleanup: user sees the error; partial files may exist
+            # but live under a dataset-named subdir that we don't remove to avoid
+            # clobbering unrelated data.
+            raise HTTPException(
+                500, f"Export failed: {e}. Partial output may exist at {output_dir}.",
+            )
+        return {"name": name, "version": version, "output": str(path)}
+    finally:
+        mgr.close()
+
+
+@app.delete("/api/datasets/{name}/versions/{version}")
+async def delete_dataset_version_api(
+    name: str, version: str,
+) -> dict[str, Any]:
+    """Delete a specific version of a dataset."""
+    mgr = _get_dataset_manager()
+    try:
+        if not mgr.delete_version(name, version):
+            raise HTTPException(404, f"Dataset '{name}' version '{version}' not found")
+        return {"deleted": {"name": name, "version": version}}
+    finally:
+        mgr.close()
+
+
+# ============================================================================
+# Bridge subprocess lifecycle (v0.3.0) — spawn, proxy, stop.
+# ============================================================================
+
+
+_BRIDGE_DEFAULT_PORT = 9090
+
+
+def _get_bridge_state():
+    """Singleton dict tracking the bridge subprocess."""
+    if not hasattr(app.state, "bridge"):
+        app.state.bridge = {"process": None, "port": None, "mode": None}
+    return app.state.bridge
+
+
+@app.post("/api/bridge/start")
+async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Start a bridge subprocess.
+
+    Body:
+      {
+        "mode": "playback" | "live",
+        "bag_path": "..."          # required for playback
+        "topics": ["/imu/data"]    # required for live
+        "speed": 1.0               # optional for playback
+        "port": 9090               # optional
+      }
+    """
+    import subprocess
+    import socket
+    payload = payload or {}
+    mode = payload.get("mode")
+    if mode not in {"playback", "live"}:
+        raise HTTPException(400, "mode must be 'playback' or 'live'")
+
+    port = int(payload.get("port", _BRIDGE_DEFAULT_PORT))
+
+    state = _get_bridge_state()
+    if state["process"] and state["process"].poll() is None:
+        raise HTTPException(
+            409,
+            f"Bridge already running in mode '{state['mode']}' on port {state['port']}. "
+            f"Stop it first.",
+        )
+
+    # Pre-flight: is the port already bound by something else?
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError as e:
+            raise HTTPException(
+                409, f"Port {port} is already in use: {e}",
+            )
+
+    import sys
+    cmd = [sys.executable, "-m", "resurrector.cli.main", "bridge", mode]
+    if mode == "playback":
+        bag_path = payload.get("bag_path")
+        if not bag_path:
+            raise HTTPException(400, "'bag_path' is required for playback mode")
+        _validate_path(bag_path)
+        cmd.append(str(bag_path))
+        if "speed" in payload:
+            cmd.extend(["--speed", str(payload["speed"])])
+    else:
+        topics = payload.get("topics") or []
+        if not topics:
+            raise HTTPException(400, "'topics' is required for live mode")
+        for t in topics:
+            cmd.extend(["--topic", str(t)])
+
+    cmd.extend(["--port", str(port)])
+    cmd.append("--no-browser")  # don't open a viewer; the dashboard IS the viewer
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as e:
+        raise HTTPException(500, f"Failed to start bridge: {e}")
+
+    # Wait briefly for the port to accept connections.
+    import time
+    deadline = time.time() + 10
+    ready = False
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            stderr = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace")
+            raise HTTPException(
+                500, f"Bridge exited during startup: {stderr[:500]}",
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                ready = True
+                break
+        except OSError:
+            await asyncio.sleep(0.2)
+
+    if not ready:
+        proc.terminate()
+        raise HTTPException(504, f"Bridge did not start listening on port {port} within 10s")
+
+    state["process"] = proc
+    state["port"] = port
+    state["mode"] = mode
+    return {"mode": mode, "port": port, "pid": proc.pid}
+
+
+@app.post("/api/bridge/stop")
+async def stop_bridge_api() -> dict[str, Any]:
+    """Stop the running bridge subprocess, if any."""
+    state = _get_bridge_state()
+    proc = state["process"]
+    if proc is None or proc.poll() is not None:
+        state["process"] = None
+        return {"stopped": False, "reason": "no running bridge"}
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        proc.kill()
+        proc.wait(timeout=5)
+    state["process"] = None
+    state["port"] = None
+    state["mode"] = None
+    return {"stopped": True}
+
+
+@app.get("/api/bridge/status")
+async def bridge_status_api() -> dict[str, Any]:
+    """Report bridge subprocess state. Polled by the Bridge page."""
+    state = _get_bridge_state()
+    proc = state["process"]
+    if proc is None:
+        return {"running": False}
+    rc = proc.poll()
+    if rc is not None:
+        # Process died; clean up state so future polls don't report a ghost.
+        state["process"] = None
+        state["port"] = None
+        state["mode"] = None
+        return {"running": False, "exited": True, "return_code": rc}
+    return {
+        "running": True, "mode": state["mode"], "port": state["port"], "pid": proc.pid,
+    }
+
+
+@app.api_route(
+    "/api/bridge/proxy/{rest_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+)
+async def bridge_proxy(rest_path: str, request: Any) -> Any:
+    """Forward requests to the running bridge's REST API.
+
+    Frontend calls `POST /api/bridge/proxy/api/playback/play` and we
+    relay it to `http://127.0.0.1:9090/api/playback/play` so the user
+    never needs to know about the bridge's real port.
+    """
+    import httpx
+    from starlette.responses import Response
+
+    state = _get_bridge_state()
+    proc = state["process"]
+    if proc is None or proc.poll() is not None:
+        raise HTTPException(503, "Bridge not running — start it first.")
+
+    port = state["port"]
+    url = f"http://127.0.0.1:{port}/{rest_path}"
+    method = request.method
+    body = await request.body()
+    params = dict(request.query_params)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.request(
+                method, url, content=body, params=params,
+                headers={"Accept": "application/json"},
+            )
+        except httpx.ConnectError as e:
+            raise HTTPException(502, f"Cannot reach bridge at {url}: {e}")
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type"),
+    )
+
+
+@app.on_event("shutdown")
+async def _cleanup_bridge_on_shutdown() -> None:
+    """Kill the bridge subprocess when the dashboard shuts down.
+
+    Without this, Ctrl+C on the dashboard leaves the bridge orphaned
+    on port 9090 and a subsequent dashboard restart can't reclaim it.
+    """
+    state = _get_bridge_state()
+    proc = state["process"]
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
+        proc.wait(timeout=3)
 
 
 # Serve static frontend files
