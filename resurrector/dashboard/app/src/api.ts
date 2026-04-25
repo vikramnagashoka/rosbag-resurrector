@@ -256,4 +256,101 @@ export const api = {
   bridgeStatus: () => request<BridgeStatus>('GET', `/api/bridge/status`),
   bridgeProxy: <T>(method: string, path: string, body?: unknown) =>
     request<T>(method, `/api/bridge/proxy/${path.startsWith('/') ? path.slice(1) : path}`, { body }),
+
+  // ---------- v0.3.1: power features ----------
+
+  // Per-topic message density histograms for the timeline ribbon.
+  getDensity: (bagId: number, opts?: { bins?: number; topic?: string }) =>
+    request<DensityResponse>('GET', `/api/bags/${bagId}/density`, {
+      query: { bins: opts?.bins, topic: opts?.topic },
+    }),
+
+  // Trim a time-range to a chosen export format.
+  trimRange: (
+    bagId: number,
+    body: {
+      start_sec: number
+      end_sec: number
+      topics: string[]
+      format: 'mcap' | 'parquet' | 'csv' | 'hdf5' | 'numpy' | 'zarr' | 'mp4'
+      output_path: string
+    },
+  ) => request<TrimResponse>('POST', `/api/bags/${bagId}/trim`, { body }),
+
+  // Apply a transform (menu op or expression) and get downsampled preview.
+  previewTransform: (body: TransformPreviewRequest) =>
+    request<TransformPreviewResponse>('POST', `/api/transforms/preview`, { body }),
+
+  // Cross-bag overlay of one topic.
+  compareTopics: (body: CompareTopicsRequest) =>
+    request<CompareTopicsResponse>('POST', `/api/compare/topics`, { body }),
+}
+
+// ---------- v0.3.1 types ----------
+
+export interface DensityBucket {
+  bins: number[]
+  start_time_ns: number
+  end_time_ns: number
+  total: number
+  bin_width_ns: number
+}
+
+export interface DensityResponse {
+  bag_id: number
+  bins: number
+  density: Record<string, DensityBucket>
+}
+
+export interface TrimResponse {
+  bag_id: number
+  format: string
+  start_sec: number
+  end_sec: number
+  output: string
+}
+
+export type TransformOp =
+  | 'derivative'
+  | 'integral'
+  | 'moving_average'
+  | 'low_pass'
+  | 'scale'
+  | 'abs'
+  | 'shift'
+
+export interface TransformPreviewRequest {
+  bag_id: number
+  topic: string
+  max_points?: number
+  // Menu mode:
+  op?: TransformOp
+  column?: string
+  params?: Record<string, number | string | boolean>
+  // Expression mode:
+  expression?: string
+}
+
+export interface TransformPreviewResponse {
+  topic: string
+  label: string
+  total: number
+  downsampled: boolean
+  data: Array<Record<string, unknown>>
+}
+
+export interface CompareTopicsRequest {
+  bag_ids: number[]
+  topic: string
+  offsets_sec?: number[]
+  labels?: string[]
+  max_points_per_bag?: number
+}
+
+export interface CompareTopicsResponse {
+  topic: string
+  bag_ids: number[]
+  labels: string[]
+  columns: string[]
+  data: Array<Record<string, unknown>>
 }

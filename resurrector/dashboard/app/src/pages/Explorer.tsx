@@ -6,6 +6,11 @@ import HealthBadge from '../components/HealthBadge'
 import ExportDialog from '../components/ExportDialog'
 import SyncView from '../components/SyncView'
 import ImageViewer from '../components/ImageViewer'
+import BookmarksPanel from '../components/BookmarksPanel'
+import DensityRibbon from '../components/DensityRibbon'
+import TransformEditor from '../components/TransformEditor'
+import TrimExportPopover from '../components/TrimExportPopover'
+import JupyterButton from '../components/JupyterButton'
 import { api, Bag, TopicDataResponse } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
@@ -31,21 +36,25 @@ function basename(path: string): string {
 function timestampsAndSeries(topicData: TopicDataResponse): {
   ts_ns: number[]
   series: PlotSeries[]
+  numericColumns: string[]
 } {
-  if (!topicData.data.length) return { ts_ns: [], series: [] }
+  if (!topicData.data.length)
+    return { ts_ns: [], series: [], numericColumns: [] }
   const ts_ns: number[] = topicData.data.map(r => Number(r.timestamp_ns))
   const series: PlotSeries[] = []
+  const numericColumns: string[] = []
   for (const col of topicData.columns) {
     if (col === 'timestamp_ns') continue
     const sampleValue = topicData.data[0][col]
     if (typeof sampleValue !== 'number') continue
+    numericColumns.push(col)
     const values = topicData.data.map(r => {
       const v = r[col]
       return typeof v === 'number' ? v : NaN
     })
     series.push({ label: col, timestamps_ns: ts_ns, values })
   }
-  return { ts_ns, series }
+  return { ts_ns, series, numericColumns }
 }
 
 type Tab = 'plot' | 'sync' | 'images'
@@ -62,6 +71,11 @@ export default function Explorer() {
   const [showExport, setShowExport] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('plot')
   const [xRangeSec, setXRangeSec] = useState<{ start: number; end: number } | null>(null)
+
+  // v0.3.1 state
+  const [showTransformEditor, setShowTransformEditor] = useState(false)
+  const [derivedSeries, setDerivedSeries] = useState<PlotSeries[]>([])
+  const [trimRange, setTrimRange] = useState<{ start: number; end: number } | null>(null)
 
   useEffect(() => {
     setLoading(true)
@@ -93,7 +107,13 @@ export default function Explorer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bagId, selectedTopic, xRangeSec])
 
-  // Derived plot state.
+  // When the user picks a different topic, drop derived series — they're
+  // computed against the previous topic's columns and would be confusing
+  // to keep.
+  useEffect(() => {
+    setDerivedSeries([])
+  }, [selectedTopic])
+
   const selectedTopicInfo = useMemo(
     () => bag?.topics.find(t => t.name === selectedTopic) || null,
     [bag, selectedTopic],
@@ -101,11 +121,26 @@ export default function Explorer() {
   const isImageTopic =
     selectedTopicInfo && IMAGE_TYPES.has(selectedTopicInfo.message_type)
 
-  const { ts_ns, series } = useMemo(
-    () => (topicData ? timestampsAndSeries(topicData) : { ts_ns: [], series: [] }),
+  const { ts_ns, series, numericColumns } = useMemo(
+    () =>
+      topicData
+        ? timestampsAndSeries(topicData)
+        : { ts_ns: [], series: [], numericColumns: [] },
     [topicData],
   )
   const firstTs = ts_ns[0] ?? 0
+
+  // First-message timestamp from the bag (used by BookmarksPanel +
+  // DensityRibbon time alignment). Falls back to firstTs from current
+  // topic data when bag-wide info isn't available.
+  const bagFirstTs = useMemo(() => {
+    // The /api/bags response doesn't currently include start_time_ns;
+    // density and bookmark APIs return absolute timestamps that we
+    // align against firstTs from the current topic. Good enough for
+    // ribbon shading; bookmarks display relative t which is what users
+    // care about visually.
+    return firstTs
+  }, [firstTs])
 
   // When the user picks an image topic, switch to the images tab.
   useEffect(() => {
@@ -113,6 +148,28 @@ export default function Explorer() {
     else if (activeTab === 'images') setActiveTab('plot')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isImageTopic])
+
+  function handleJumpToTimestamp(relativeSec: number) {
+    // Set a small window centered on the bookmark / ribbon click so the
+    // user sees what's around the point. ~1 second window by default.
+    const half = 0.5
+    setXRangeSec({
+      start: Math.max(0, relativeSec - half),
+      end: relativeSec + half,
+    })
+    if (!selectedTopic && bag?.topics.length) {
+      // Need a topic selected to render anything; pick the first
+      // numeric-looking topic.
+      const first = bag.topics.find(t => !IMAGE_TYPES.has(t.message_type))
+      if (first) setSelectedTopic(first.name)
+    }
+  }
+
+  function handleAddDerivedSeries(label: string, points: Array<{ t_ns: number; v: number }>) {
+    const ts = points.map(p => p.t_ns)
+    const vs = points.map(p => p.v)
+    setDerivedSeries(prev => [...prev, { label, timestamps_ns: ts, values: vs }])
+  }
 
   if (loading || !bag) {
     return <p style={{ color: '#8b949e' }}>Loading...</p>
@@ -136,6 +193,32 @@ export default function Explorer() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          <button
+            onClick={() => setShowTransformEditor(true)}
+            disabled={!selectedTopic || numericColumns.length === 0}
+            style={{
+              background: '#21262d',
+              border: '1px solid #30363d',
+              borderRadius: 6,
+              padding: '6px 12px',
+              color: !selectedTopic || numericColumns.length === 0 ? '#484f58' : '#e1e4e8',
+              cursor:
+                !selectedTopic || numericColumns.length === 0
+                  ? 'not-allowed'
+                  : 'pointer',
+              fontSize: 13,
+            }}
+          >
+            Transform…
+          </button>
+          {selectedTopic && (
+            <JupyterButton
+              bagId={bagId}
+              startSec={xRangeSec?.start}
+              endSec={xRangeSec?.end}
+              topics={[selectedTopic]}
+            />
+          )}
           <button
             onClick={() => setShowExport(true)}
             style={{
@@ -177,7 +260,7 @@ export default function Explorer() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '300px 1fr',
+          gridTemplateColumns: '300px 1fr 260px',
           gap: '24px',
           marginTop: '24px',
         }}
@@ -189,6 +272,9 @@ export default function Explorer() {
             border: '1px solid #30363d',
             borderRadius: '8px',
             padding: '12px',
+            height: 'fit-content',
+            position: 'sticky',
+            top: 12,
           }}
         >
           <h3
@@ -236,7 +322,7 @@ export default function Explorer() {
           ))}
         </div>
 
-        {/* Tabbed data view */}
+        {/* Center: tabbed data view */}
         <div>
           {!selectedTopic ? (
             <div
@@ -249,7 +335,8 @@ export default function Explorer() {
                 color: '#8b949e',
               }}
             >
-              Select a topic to view its data
+              Select a topic to view its data. The density ribbon and bookmarks
+              panel work without a topic selected.
             </div>
           ) : (
             <>
@@ -279,31 +366,51 @@ export default function Explorer() {
                 })}
               </div>
 
-              {activeTab === 'plot' && topicData && (
+              {activeTab === 'plot' && (
                 <>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: '#8b949e',
-                      marginBottom: 8,
-                    }}
-                  >
-                    {topicData.total.toLocaleString()} messages
-                    {topicData.downsampled &&
-                      ` · downsampled to ${topicData.data.length}`}
-                    {xRangeSec &&
-                      ` · zoomed to ${xRangeSec.start.toFixed(2)}-${xRangeSec.end.toFixed(2)}s`}
-                  </div>
-                  <TopicPlot
+                  {/* Density ribbon spans the full bag duration so the
+                      user sees the global picture even when zoomed in. */}
+                  <DensityRibbon
                     bagId={bagId}
-                    topicName={selectedTopic}
-                    series={series}
-                    firstTimestampNs={firstTs}
-                    onZoom={(s, e) => {
-                      if (s === null || e === null) setXRangeSec(null)
-                      else setXRangeSec({ start: s, end: e })
-                    }}
+                    highlightTopic={selectedTopic}
+                    zoomRangeSec={xRangeSec}
+                    onJumpToTimestampSec={handleJumpToTimestamp}
                   />
+
+                  {topicData && (
+                    <>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: '#8b949e',
+                          marginBottom: 8,
+                        }}
+                      >
+                        {topicData.total.toLocaleString()} messages
+                        {topicData.downsampled &&
+                          ` · downsampled to ${topicData.data.length}`}
+                        {xRangeSec &&
+                          ` · zoomed to ${xRangeSec.start.toFixed(2)}-${xRangeSec.end.toFixed(2)}s`}
+                        {derivedSeries.length > 0 &&
+                          ` · ${derivedSeries.length} derived series`}
+                        <span style={{ float: 'right', color: '#484f58' }}>
+                          tip: shift+drag to select a range for trim/export
+                        </span>
+                      </div>
+                      <TopicPlot
+                        bagId={bagId}
+                        topicName={selectedTopic}
+                        series={series}
+                        derivedSeries={derivedSeries}
+                        firstTimestampNs={firstTs}
+                        onZoom={(s, e) => {
+                          if (s === null || e === null) setXRangeSec(null)
+                          else setXRangeSec({ start: s, end: e })
+                        }}
+                        onRangeSelected={(s, e) => setTrimRange({ start: s, end: e })}
+                      />
+                    </>
+                  )}
                 </>
               )}
 
@@ -324,6 +431,13 @@ export default function Explorer() {
             </>
           )}
         </div>
+
+        {/* Right rail: bookmarks */}
+        <BookmarksPanel
+          bagId={bagId}
+          firstTimestampNs={bagFirstTs}
+          onJumpToTimestampSec={handleJumpToTimestamp}
+        />
       </div>
 
       {showExport && (
@@ -331,6 +445,27 @@ export default function Explorer() {
           bagId={bagId}
           availableTopics={bag.topics.map(t => t.name)}
           onClose={() => setShowExport(false)}
+        />
+      )}
+
+      {showTransformEditor && selectedTopic && (
+        <TransformEditor
+          bagId={bagId}
+          topic={selectedTopic}
+          numericColumns={numericColumns}
+          onSave={handleAddDerivedSeries}
+          onClose={() => setShowTransformEditor(false)}
+        />
+      )}
+
+      {trimRange && (
+        <TrimExportPopover
+          bagId={bagId}
+          startSec={trimRange.start}
+          endSec={trimRange.end}
+          availableTopics={bag.topics.map(t => t.name)}
+          defaultTopics={selectedTopic ? [selectedTopic] : []}
+          onClose={() => setTrimRange(null)}
         />
       )}
     </div>

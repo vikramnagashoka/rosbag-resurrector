@@ -40,7 +40,14 @@ interface Props {
   bagId: number
   topicName: string
   series: PlotSeries[]
+  // Optional derived series (from the TransformEditor). They render as
+  // an extra subplot at the bottom, dashed line so the user can tell
+  // which is the original.
+  derivedSeries?: PlotSeries[]
   onZoom?: (startSec: number | null, endSec: number | null) => void
+  // Shift-drag range selection (separate from zoom). The parent uses
+  // this to drive the trim-export popover.
+  onRangeSelected?: (startSec: number, endSec: number) => void
   firstTimestampNs: number
 }
 
@@ -52,7 +59,9 @@ export default function TopicPlot({
   bagId,
   topicName,
   series,
+  derivedSeries,
   onZoom,
+  onRangeSelected,
   firstTimestampNs,
 }: Props) {
   const toast = useErrorToast()
@@ -78,22 +87,39 @@ export default function TopicPlot({
   }, [bagId, topicName])
 
   const plotData = useMemo(() => {
-    return series.map((s, i) => ({
-      type: 'scattergl' as const,
-      mode: 'lines' as const,
-      name: s.label,
-      x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
-      y: s.values,
-      xaxis: 'x',
-      yaxis: i === 0 ? 'y' : `y${i + 1}`,
-      hovertemplate: `<b>${s.label}</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
-      line: { width: 1.2 },
-    }))
-  }, [series, firstTimestampNs])
+    const all = [
+      ...series.map((s, i) => ({
+        type: 'scattergl' as const,
+        mode: 'lines' as const,
+        name: s.label,
+        x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
+        y: s.values,
+        xaxis: 'x',
+        yaxis: i === 0 ? 'y' : `y${i + 1}`,
+        hovertemplate: `<b>${s.label}</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
+        line: { width: 1.2 },
+      })),
+      // Derived series live in their own subplot at the bottom so they
+      // don't visually compete with the primary series.
+      ...(derivedSeries ?? []).map((s, i) => ({
+        type: 'scattergl' as const,
+        mode: 'lines' as const,
+        name: s.label,
+        x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
+        y: s.values,
+        xaxis: 'x',
+        yaxis: `y${series.length + i + 1}`,
+        hovertemplate: `<b>${s.label} (derived)</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
+        line: { width: 1.2, dash: 'dot' as const },
+      })),
+    ]
+    return all
+  }, [series, derivedSeries, firstTimestampNs])
 
   const plotLayout = useMemo(() => {
+    const totalRows = series.length + (derivedSeries?.length ?? 0)
     const axes: Record<string, unknown> = {}
-    const subplotHeight = 1 / Math.max(series.length, 1)
+    const subplotHeight = 1 / Math.max(totalRows, 1)
     series.forEach((_, i) => {
       const domainTop = 1 - i * subplotHeight
       const domainBottom = 1 - (i + 1) * subplotHeight + 0.02
@@ -103,6 +129,19 @@ export default function TopicPlot({
         gridcolor: '#30363d',
         zerolinecolor: '#30363d',
         color: '#8b949e',
+      }
+    })
+    // Derived series occupy the bottom slots.
+    ;(derivedSeries ?? []).forEach((s, i) => {
+      const slot = series.length + i
+      const domainTop = 1 - slot * subplotHeight
+      const domainBottom = 1 - (slot + 1) * subplotHeight + 0.02
+      axes[`yaxis${slot + 1}`] = {
+        domain: [domainBottom, domainTop],
+        title: { text: s.label, font: { size: 11, color: '#a371f7' } },
+        gridcolor: '#30363d',
+        zerolinecolor: '#30363d',
+        color: '#a371f7',
       }
     })
     // Translate annotations to shapes (vertical dashed lines).
@@ -144,22 +183,26 @@ export default function TopicPlot({
       plot_bgcolor: '#0d1117',
       font: { color: '#e1e4e8', size: 11 },
       margin: { l: 60, r: 12, t: 12, b: 40 },
-      height: Math.max(200, series.length * 180),
+      height: Math.max(200, totalRows * 180),
       hovermode: 'x unified' as const,
       xaxis: {
         title: { text: 'seconds', font: { size: 11 } },
         gridcolor: '#30363d',
         zerolinecolor: '#30363d',
         color: '#8b949e',
-        rangeslider: series.length === 1 ? { visible: false } : undefined,
+        rangeslider: totalRows === 1 ? { visible: false } : undefined,
       },
       ...axes,
       shapes,
       annotations: annotationLabels,
       showlegend: false,
+      // Mouse drag = zoom, shift+drag = box-select for trim. Plotly's
+      // selectdirection 'h' constrains the brush to the time axis so
+      // y-coords don't matter.
       dragmode: 'zoom' as const,
+      selectdirection: 'h' as const,
     }
-  }, [series, annotations, firstTimestampNs])
+  }, [series, derivedSeries, annotations, firstTimestampNs])
 
   // onRelayout fires on zoom/brush; we forward the range to the parent
   // so it can re-fetch a narrower slice. xaxis.autorange=true indicates
@@ -205,6 +248,24 @@ export default function TopicPlot({
       hoverRef.current = null
     })
   }, [])
+
+  // Box-selection (shift-drag): forward the time range to the parent
+  // for trim-export. Plotly returns null on deselect; we ignore that.
+  const handleSelected = useCallback(
+    (event: any) => {
+      if (!onRangeSelected) return
+      const xRange = event?.range?.x
+      if (!Array.isArray(xRange) || xRange.length < 2) return
+      const a = Number(xRange[0])
+      const b = Number(xRange[1])
+      if (!isFinite(a) || !isFinite(b)) return
+      const start = Math.min(a, b)
+      const end = Math.max(a, b)
+      if (end - start < 1e-6) return
+      onRangeSelected(start, end)
+    },
+    [onRangeSelected],
+  )
 
   async function saveAnnotation() {
     if (!pendingNote || !noteText.trim()) {
@@ -268,6 +329,7 @@ export default function TopicPlot({
         onRelayout={handleRelayout}
         onClick={handleClick}
         onHover={handleHover}
+        onSelected={handleSelected}
       />
 
       {/* Inline annotation list with delete controls. */}
