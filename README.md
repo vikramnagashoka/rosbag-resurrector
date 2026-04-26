@@ -31,16 +31,21 @@ Pre-built single-file binaries are attached to every [GitHub release](https://gi
 **Ubuntu / Debian (`.deb`):**
 
 ```bash
-curl -LO https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest/download/rosbag-resurrector_0.3.2_amd64.deb
-sudo dpkg -i rosbag-resurrector_0.3.2_amd64.deb
+curl -LO https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest/download/rosbag-resurrector_amd64_latest.deb
+sudo dpkg -i rosbag-resurrector_amd64_latest.deb
 sudo apt-get install -f   # resolve any missing system libraries
 ```
 
-> **Note:** the `.deb` filename includes the version. Check the [latest release page](https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest) for the current filename if the URL above 404s after a new release.
+The `_latest` filename always points to the newest release. For a specific version, browse the [releases page](https://github.com/vikramnagashoka/rosbag-resurrector/releases) and download the version-tagged `rosbag-resurrector_X.Y.Z_amd64.deb`.
 
 **macOS (`.dmg`):**
 
-Download `RosBag-Resurrector-vX.Y.Z-macos.dmg` from the [latest release](https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest), open it, drag the app to Applications.
+```bash
+curl -LO https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest/download/RosBag-Resurrector-macos-latest.dmg
+open RosBag-Resurrector-macos-latest.dmg
+```
+
+Drag the app to Applications. Same `_latest` filename pattern — the version-tagged `RosBag-Resurrector-vX.Y.Z-macos.dmg` is also attached to each release if you need to pin to a specific version.
 
 > **Note:** the macOS binary isn't notarized yet, so on first launch you'll need to right-click → Open and confirm.
 

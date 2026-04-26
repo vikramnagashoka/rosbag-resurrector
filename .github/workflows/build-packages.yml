@@ -131,6 +131,29 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
+      - name: Create version-agnostic copies
+        # GitHub's /releases/latest/download/<file> URL resolves to the
+        # most recent release's asset with that exact filename. Keeping
+        # the versioned files AND uploading a copy with a stable name
+        # gives users:
+        #   - browsable older releases keep their versioned filenames
+        #   - the README install command works forever without edits
+        # Files used by the README:
+        #   rosbag-resurrector_amd64_latest.deb
+        #   RosBag-Resurrector-macos-latest.dmg
+        run: |
+          set -e
+          mkdir -p release-assets
+          # Copy versioned originals into one upload directory
+          cp ubuntu-deb/*.deb release-assets/
+          cp macos-dmg/*.dmg release-assets/
+          # Add stable-name duplicates pointing at the same content
+          DEB=$(ls ubuntu-deb/*.deb | head -1)
+          DMG=$(ls macos-dmg/*.dmg | head -1)
+          cp "$DEB" release-assets/rosbag-resurrector_amd64_latest.deb
+          cp "$DMG" release-assets/RosBag-Resurrector-macos-latest.dmg
+          ls -lh release-assets/
+
       - name: Extract release notes from CHANGELOG.md
         id: notes
         run: |
@@ -155,8 +178,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            macos-dmg/*.dmg
-            ubuntu-deb/*.deb
+            release-assets/*
           body_path: release_notes.md
           draft: true
 
@@ -165,7 +187,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            macos-dmg/*.dmg
-            ubuntu-deb/*.deb
+            release-assets/*
           generate_release_notes: true
           draft: true
