@@ -220,11 +220,25 @@ export default function TopicPlot({
     }
   }, [series, derivedSeries, annotations, firstTimestampNs, selectMode])
 
-  // onRelayout fires on zoom/brush; we forward the range to the parent
-  // so it can re-fetch a narrower slice. xaxis.autorange=true indicates
-  // a reset (double-click) — send nulls.
+  // onRelayout fires on zoom/brush AND on box-select (Plotly 2.x emits
+  // a `selections` array on relayout for the new persistent selections).
+  // We forward both: zoom -> onZoom, select -> onRangeSelected.
   const handleRelayout = useCallback(
     (event: any) => {
+      // Selection path: when dragmode='select', completing a drag emits
+      // event.selections = [{x0, x1, y0, y1, ...}]. Empty array on
+      // deselect.
+      const sel = event?.selections
+      if (Array.isArray(sel) && sel.length > 0 && onRangeSelected) {
+        const last = sel[sel.length - 1]
+        const a = Number(last.x0)
+        const b = Number(last.x1)
+        if (isFinite(a) && isFinite(b) && Math.abs(b - a) > 1e-6) {
+          onRangeSelected(Math.min(a, b), Math.max(a, b))
+          return
+        }
+      }
+      // Zoom path.
       if (!onZoom) return
       if (event['xaxis.autorange']) {
         onZoom(null, null)
@@ -235,7 +249,7 @@ export default function TopicPlot({
         onZoom(Number(event['xaxis.range[0]']), Number(event['xaxis.range[1]']))
       }
     },
-    [onZoom],
+    [onZoom, onRangeSelected],
   )
 
   // Click-to-annotate: Plotly emits plotly_click events with x/y; we

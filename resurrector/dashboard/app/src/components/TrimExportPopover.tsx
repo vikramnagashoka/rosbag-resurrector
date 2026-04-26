@@ -43,7 +43,26 @@ export default function TrimExportPopover({
 }: Props) {
   const toast = useErrorToast()
   const [format, setFormat] = useState<FormatStr>('mcap')
-  const [outputPath, setOutputPath] = useState('./trimmed.mcap')
+  // Output directory persists across sessions via localStorage so users
+  // who always export to the same place don't have to re-type it.
+  // Filename is per-export based on the format.
+  const SAVED_DIR_KEY = 'resurrector.exportDir'
+  const REMEMBER_KEY = 'resurrector.exportDirRemember'
+  const [savedDir, setSavedDir] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SAVED_DIR_KEY) || './'
+    } catch {
+      return './'
+    }
+  })
+  const [rememberDir, setRememberDir] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(REMEMBER_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  const [outputPath, setOutputPath] = useState(`${savedDir.replace(/\/$/, '')}/trimmed.mcap`)
   const [topics, setTopics] = useState<string[]>(
     defaultTopics ?? availableTopics,
   )
@@ -100,6 +119,19 @@ export default function TrimExportPopover({
     if (r) {
       setResult(r)
       toast.push('info', `Exported to ${r.output}`)
+      // Persist the directory portion of the path the user actually
+      // succeeded with — that's a strong signal of where they want
+      // future exports to go.
+      if (rememberDir) {
+        const dir = outputPath.replace(/[\/\\][^\/\\]*$/, '') || '.'
+        try {
+          localStorage.setItem(SAVED_DIR_KEY, dir)
+          localStorage.setItem(REMEMBER_KEY, '1')
+        } catch {
+          // localStorage disabled; non-fatal.
+        }
+        setSavedDir(dir)
+      }
     }
     setBusy(false)
   }
@@ -184,15 +216,48 @@ export default function TrimExportPopover({
           </select>
         </label>
 
-        <label style={{ display: 'block', marginBottom: 12 }}>
+        <label style={{ display: 'block', marginBottom: 8 }}>
           <span style={{ fontSize: 13, color: '#8b949e' }}>Output path</span>
           <input
             type="text"
             value={outputPath}
             onChange={e => setOutputPath(e.target.value)}
+            placeholder="./trimmed.mcap"
             style={{ ...inputStyle, width: '100%', marginTop: 4 }}
           />
         </label>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 12,
+            fontSize: 11,
+            color: '#8b949e',
+          }}
+        >
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={rememberDir}
+              onChange={e => {
+                setRememberDir(e.target.checked)
+                if (!e.target.checked) {
+                  try {
+                    localStorage.removeItem(SAVED_DIR_KEY)
+                    localStorage.removeItem(REMEMBER_KEY)
+                  } catch {
+                    // ignore
+                  }
+                }
+              }}
+            />
+            Remember this directory
+          </label>
+          <span title="Backend allows writes under your home dir, the OS temp dir, and the dashboard's working directory. Set RESURRECTOR_ALLOWED_ROOTS to broaden.">
+            allowed: $HOME, $TMP, dashboard cwd
+          </span>
+        </div>
 
         <div style={{ marginBottom: 16 }}>
           <span style={{ fontSize: 13, color: '#8b949e', display: 'block', marginBottom: 6 }}>

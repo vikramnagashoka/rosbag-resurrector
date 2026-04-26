@@ -36,19 +36,30 @@ app.add_middleware(
 
 
 # Configurable allowed roots for path operations (scan, export). When the
-# RESURRECTOR_ALLOWED_ROOTS env var is unset we default to the user's home
-# directory rather than allowing any path on disk — the dashboard ships in
-# distribution packages and we never want a curl-able endpoint to expose
-# arbitrary paths like /etc/passwd.
+# RESURRECTOR_ALLOWED_ROOTS env var is unset we default to a SAFE set: the
+# user's home directory, the OS temp dir, AND the cwd of the dashboard
+# process. The cwd is included because if the user launched
+# `resurrector dashboard` from inside their data folder (e.g. on WSL where
+# bags often live under /mnt/c/...), they clearly trust that location and
+# refusing to write there is just user-hostile.
+#
+# We never want a curl-able endpoint to expose arbitrary paths like
+# /etc/passwd, so unset never means "allow everything."
 #
 # Read the env var on every call rather than at import time so tests (and
 # users) can override it after the module is loaded.
 def _resolve_allowed_roots() -> list[Path]:
     raw = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "")
     parts = [r for r in raw.split(os.pathsep) if r]
-    if not parts:
-        return [Path.home().resolve()]
-    return [Path(r).resolve() for r in parts]
+    if parts:
+        return [Path(r).resolve() for r in parts]
+    import tempfile
+    defaults = {
+        Path.home().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+        Path.cwd().resolve(),
+    }
+    return list(defaults)
 
 
 def _validate_path(path_str: str) -> Path:
