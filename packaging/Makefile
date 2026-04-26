@@ -99,8 +99,8 @@ macos-release:
 		--name resurrector \
 		--distpath $(DIST)/macos \
 		--workpath $(DIST)/build \
-		--specpath $(DIST) \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
+		--add-data "resurrector/dashboard/static:resurrector/dashboard/static" \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \
 		--hidden-import uvicorn.protocols.http.auto \
@@ -126,8 +126,8 @@ ubuntu-release:
 		--name resurrector \
 		--distpath $(DIST)/ubuntu \
 		--workpath $(DIST)/build \
-		--specpath $(DIST) \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
+		--add-data "resurrector/dashboard/static:resurrector/dashboard/static" \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \
 		--hidden-import uvicorn.protocols.http.auto \

@@ -22,10 +22,23 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies
         run: |
           pip install -e ".[dev]"
           pip install pyinstaller
+
+      - name: Build dashboard frontend
+        # PyInstaller bundles resurrector/dashboard/static at packaging
+        # time; the React app is built fresh from source on every release.
+        working-directory: resurrector/dashboard/app
+        run: |
+          npm ci
+          npm run build
 
       - name: Install create-dmg
         run: brew install create-dmg
@@ -42,7 +55,7 @@ jobs:
       - name: Run tests
         run: pytest tests/ --ignore=tests/test_vision.py -q
 
-      - name: Build obfuscated macOS package
+      - name: Build macOS package
         working-directory: packaging
         run: make macos-release VERSION=${{ steps.version.outputs.version }}
 
@@ -62,10 +75,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies
         run: |
           pip install -e ".[dev]"
           pip install pyinstaller
+
+      - name: Build dashboard frontend
+        working-directory: resurrector/dashboard/app
+        run: |
+          npm ci
+          npm run build
 
       - name: Install fpm
         run: |
@@ -85,7 +109,7 @@ jobs:
       - name: Run tests
         run: pytest tests/ --ignore=tests/test_vision.py -q
 
-      - name: Build obfuscated Ubuntu package
+      - name: Build Ubuntu package
         working-directory: packaging
         run: make ubuntu-release VERSION=${{ steps.version.outputs.version }}
 
