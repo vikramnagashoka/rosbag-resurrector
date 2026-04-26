@@ -57,3 +57,9 @@ dist/macos/
 dist/ubuntu/
 dist/build/
 .gstack/
+
+# Local-only planning docs (kept on the maintainer's disk; not for git)
+PLAN.md
+TODOS.md
+LAUNCH_BLOCKERS.md
+FUTURE_FEATURES.md
