@@ -284,6 +284,10 @@ export const api = {
   // Cross-bag overlay of one topic.
   compareTopics: (body: CompareTopicsRequest) =>
     request<CompareTopicsResponse>('POST', `/api/compare/topics`, { body }),
+
+  // Server-side absolute paths the browser can safely include in
+  // output_path values (avoids the "browser can't expand ~" trap).
+  getSystemPaths: () => request<SystemPaths>('GET', `/api/system/paths`),
 }
 
 // ---------- v0.3.1 types ----------
@@ -353,4 +357,12 @@ export interface CompareTopicsResponse {
   labels: string[]
   columns: string[]
   data: Array<Record<string, unknown>>
+}
+
+export interface SystemPaths {
+  home: string
+  tmp: string
+  cwd: string
+  resurrector_cache: string
+  allowed_roots: string[]
 }

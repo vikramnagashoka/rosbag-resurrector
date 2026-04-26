@@ -62,6 +62,24 @@ def _resolve_allowed_roots() -> list[Path]:
     return list(defaults)
 
 
+def _resolved_export_paths() -> dict[str, str]:
+    """Concrete absolute paths the dashboard can write to.
+
+    Used by the frontend to construct outputs without hardcoding
+    things like ``~/.resurrector`` (which the browser can't expand
+    and the path validator then rejects).
+    """
+    import tempfile
+    home = Path.home().resolve()
+    return {
+        "home": str(home),
+        "tmp": str(Path(tempfile.gettempdir()).resolve()),
+        "cwd": str(Path.cwd().resolve()),
+        "resurrector_cache": str((home / ".resurrector").resolve()),
+        "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
+    }
+
+
 def _validate_path(path_str: str) -> Path:
     """Validate a path is safe to operate on.
 
@@ -106,6 +124,17 @@ def _get_index():
 
 
 # --- API Routes ---
+
+
+@app.get("/api/system/paths")
+async def get_system_paths() -> dict[str, Any]:
+    """Return absolute paths the frontend can use to construct outputs.
+
+    Lets the browser ask the server "where can I write?" instead of
+    guessing with ``~/...`` strings the browser can't expand.
+    """
+    return _resolved_export_paths()
+
 
 @app.get("/api/bags")
 async def list_bags(
