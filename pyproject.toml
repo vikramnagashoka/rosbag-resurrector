@@ -83,3 +83,7 @@ include = ["resurrector*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "smoke: end-to-end smoke tests intended for the wheel-install CI job",
+    "slow: opt-in slow tests (memory regression, large synthetic bags); run with `pytest -m slow`",
+]
