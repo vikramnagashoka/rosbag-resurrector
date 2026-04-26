@@ -174,9 +174,42 @@ export default function CompareRuns() {
           <div style={{ color: '#8b949e', fontSize: 13 }}>Loading...</div>
         ) : allBags.length === 0 ? (
           <div style={{ color: '#8b949e', fontSize: 13 }}>
-            No bags indexed. Run a scan first.
+            No bags indexed. Open the Library page and use the "+ Scan folder"
+            button to index a folder of bags.
           </div>
-        ) : (
+        ) : allBags.length === 1 ? (
+          <div
+            style={{
+              background: '#1c1c0e',
+              border: '1px solid #d29922',
+              borderRadius: 8,
+              padding: 12,
+              color: '#d29922',
+              fontSize: 13,
+              marginBottom: 8,
+            }}
+          >
+            <strong>Only 1 bag indexed</strong> — Compare runs needs at least 2.
+            Quick way to add another for testing:
+            <pre
+              style={{
+                background: '#0d1117',
+                padding: 8,
+                borderRadius: 4,
+                marginTop: 8,
+                color: '#e1e4e8',
+                overflow: 'auto',
+              }}
+            >
+              {`# In a terminal:\nresurrector demo --output ~/.resurrector/explore_sample_2.mcap\n# Then back in the Library page, click "+ Scan folder" and enter:\n~/.resurrector/`}
+            </pre>
+            <div style={{ marginTop: 8 }}>
+              You can still pick the one indexed bag below — the page will
+              prompt you again once you have a second.
+            </div>
+          </div>
+        ) : null}
+        {!loadingBags && allBags.length >= 1 && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {allBags.map(b => {
               const selected = selectedBagIds.includes(b.id)

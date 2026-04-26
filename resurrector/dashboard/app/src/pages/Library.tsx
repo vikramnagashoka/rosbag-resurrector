@@ -41,6 +41,10 @@ export default function Library() {
   const [loading, setLoading] = useState(true)
   const [scanPath, setScanPath] = useState('')
   const [scanning, setScanning] = useState(false)
+  // Header scan form is collapsed by default once any bags exist —
+  // it'd be loud to show a permanent input above the list. The
+  // empty state already exposes the same form prominently.
+  const [showHeaderScan, setShowHeaderScan] = useState(false)
   const toast = useErrorToast()
 
   useEffect(() => {
@@ -89,38 +93,123 @@ export default function Library() {
         }}
       >
         <h1 style={{ fontSize: '24px', fontWeight: 600 }}>Bag Library</h1>
-        <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px' }}>
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="topic:/camera/rgb health:>80 after:2025-01"
-            style={{
-              background: '#0d1117',
-              border: '1px solid #30363d',
-              borderRadius: '6px',
-              padding: '8px 12px',
-              color: '#e1e4e8',
-              width: '400px',
-              fontSize: '14px',
-            }}
-          />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button
-            type="submit"
+            onClick={() => setShowHeaderScan(prev => !prev)}
+            title="Scan a folder for bag files and add them to the index"
             style={{
-              background: '#238636',
+              background: showHeaderScan ? '#1f6feb' : '#21262d',
               color: '#fff',
-              border: 'none',
-              borderRadius: '6px',
-              padding: '8px 16px',
+              border: showHeaderScan ? '1px solid #1f6feb' : '1px solid #30363d',
+              borderRadius: 6,
+              padding: '8px 14px',
               cursor: 'pointer',
-              fontSize: '14px',
+              fontSize: 14,
             }}
           >
-            Search
+            {showHeaderScan ? '✕ Close scan' : '+ Scan folder'}
           </button>
-        </form>
+          <form onSubmit={handleSearch} style={{ display: 'flex', gap: '8px' }}>
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="topic:/camera/rgb health:>80 after:2025-01"
+              style={{
+                background: '#0d1117',
+                border: '1px solid #30363d',
+                borderRadius: '6px',
+                padding: '8px 12px',
+                color: '#e1e4e8',
+                width: '400px',
+                fontSize: '14px',
+              }}
+            />
+            <button
+              type="submit"
+              style={{
+                background: '#238636',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '6px',
+                padding: '8px 16px',
+                cursor: 'pointer',
+                fontSize: '14px',
+              }}
+            >
+              Search
+            </button>
+          </form>
+        </div>
       </div>
+
+      {/* Collapsible header-level scan input. Shown via the
+          "+ Scan folder" toggle so users can index more bags without
+          having to clear the library first. */}
+      {showHeaderScan && (
+        <div
+          style={{
+            background: '#161b22',
+            border: '1px solid #1f6feb',
+            borderRadius: 8,
+            padding: 16,
+            marginBottom: 16,
+          }}
+        >
+          <form
+            onSubmit={async e => {
+              await handleScan(e)
+              if (!scanning) setShowHeaderScan(false)
+            }}
+            style={{ display: 'flex', gap: 8, alignItems: 'center' }}
+          >
+            <input
+              type="text"
+              value={scanPath}
+              onChange={e => setScanPath(e.target.value)}
+              placeholder="/path/to/bags  (or a single .mcap file)"
+              autoFocus
+              style={{
+                flex: 1,
+                background: '#0d1117',
+                border: '1px solid #30363d',
+                borderRadius: 6,
+                padding: '8px 12px',
+                color: '#e1e4e8',
+                fontSize: 14,
+              }}
+            />
+            <button
+              type="submit"
+              disabled={scanning || !scanPath.trim()}
+              style={{
+                background: scanning || !scanPath.trim() ? '#21262d' : '#238636',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 6,
+                padding: '8px 16px',
+                cursor: scanning || !scanPath.trim() ? 'not-allowed' : 'pointer',
+                fontSize: 14,
+              }}
+            >
+              {scanning ? 'Scanning...' : 'Scan'}
+            </button>
+          </form>
+          <p style={{ color: '#8b949e', fontSize: 12, marginTop: 8 }}>
+            Tip: to test Compare runs, run{' '}
+            <code
+              style={{
+                background: '#0d1117',
+                padding: '2px 6px',
+                borderRadius: 4,
+              }}
+            >
+              resurrector demo --output ~/.resurrector/explore_sample_2.mcap
+            </code>{' '}
+            in a terminal, then point this scan at <code>~/.resurrector/</code>.
+          </p>
+        </div>
+      )}
 
       {loading ? (
         <p style={{ color: '#8b949e' }}>Loading...</p>
