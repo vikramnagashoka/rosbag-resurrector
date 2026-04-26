@@ -11,7 +11,7 @@ import DensityRibbon from '../components/DensityRibbon'
 import TransformEditor from '../components/TransformEditor'
 import TrimExportPopover from '../components/TrimExportPopover'
 import JupyterButton from '../components/JupyterButton'
-import { api, Bag, TopicDataResponse } from '../api'
+import { api, Annotation, Bag, TopicDataResponse } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
 const IMAGE_TYPES = new Set([
@@ -77,6 +77,13 @@ export default function Explorer() {
   const [derivedSeries, setDerivedSeries] = useState<PlotSeries[]>([])
   const [trimRange, setTrimRange] = useState<{ start: number; end: number } | null>(null)
 
+  // Lifted annotations state — owned here so TopicPlot and BookmarksPanel
+  // share one source of truth. Without this, the panel's internal cache
+  // diverged from TopicPlot's after a click-to-add and the panel kept
+  // showing "0 bookmarks" while the chart drew them just fine.
+  const [annotations, setAnnotations] = useState<Annotation[]>([])
+  const [annotationsLoading, setAnnotationsLoading] = useState(true)
+
   useEffect(() => {
     setLoading(true)
     runWithToast(toast, () => api.getBag(bagId)).then(b => {
@@ -113,6 +120,17 @@ export default function Explorer() {
   useEffect(() => {
     setDerivedSeries([])
   }, [selectedTopic])
+
+  // Load annotations once per bag. Both TopicPlot and BookmarksPanel
+  // consume this state via props.
+  useEffect(() => {
+    setAnnotationsLoading(true)
+    runWithToast(toast, () => api.listAnnotations(bagId)).then(r => {
+      if (r) setAnnotations(r.annotations)
+      setAnnotationsLoading(false)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bagId])
 
   const selectedTopicInfo = useMemo(
     () => bag?.topics.find(t => t.name === selectedTopic) || null,
@@ -408,6 +426,8 @@ export default function Explorer() {
                           else setXRangeSec({ start: s, end: e })
                         }}
                         onRangeSelected={(s, e) => setTrimRange({ start: s, end: e })}
+                        annotations={annotations}
+                        onAnnotationsChanged={setAnnotations}
                       />
                     </>
                   )}
@@ -437,6 +457,9 @@ export default function Explorer() {
           bagId={bagId}
           firstTimestampNs={bagFirstTs}
           onJumpToTimestampSec={handleJumpToTimestamp}
+          annotations={annotations}
+          loading={annotationsLoading}
+          onAnnotationsChanged={setAnnotations}
         />
       </div>
 

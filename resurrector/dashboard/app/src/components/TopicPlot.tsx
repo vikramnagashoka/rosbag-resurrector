@@ -49,6 +49,12 @@ interface Props {
   // this to drive the trim-export popover.
   onRangeSelected?: (startSec: number, endSec: number) => void
   firstTimestampNs: number
+  // Lifted annotations state — managed by the parent (Explorer) so
+  // TopicPlot and BookmarksPanel see the same source of truth. When
+  // either component mutates, the parent updates these and both
+  // re-render together.
+  annotations: Annotation[]
+  onAnnotationsChanged: (next: Annotation[]) => void
 }
 
 function formatSec(ts_ns: number, first_ns: number): number {
@@ -63,28 +69,13 @@ export default function TopicPlot({
   onZoom,
   onRangeSelected,
   firstTimestampNs,
+  annotations,
+  onAnnotationsChanged,
 }: Props) {
   const toast = useErrorToast()
-  const [annotations, setAnnotations] = useState<Annotation[]>([])
   const [pendingNote, setPendingNote] = useState<{ ts_ns: number; label: string } | null>(null)
   const [noteText, setNoteText] = useState('')
   const hoverRef = useRef<number | null>(null) // rAF id
-
-  // Initial + refresh annotations.
-  useEffect(() => {
-    let active = true
-    api
-      .listAnnotations(bagId, topicName)
-      .then(res => {
-        if (active) setAnnotations(res.annotations)
-      })
-      .catch(() => {
-        // Non-fatal — absence of annotations shouldn't break the plot.
-      })
-    return () => {
-      active = false
-    }
-  }, [bagId, topicName])
 
   const plotData = useMemo(() => {
     const all = [
@@ -280,14 +271,17 @@ export default function TopicPlot({
       }),
     )
     if (created) {
-      setAnnotations(prev => [...prev, created].sort((a, b) => a.timestamp_ns - b.timestamp_ns))
+      const next = [...annotations, created].sort(
+        (a, b) => a.timestamp_ns - b.timestamp_ns,
+      )
+      onAnnotationsChanged(next)
     }
     setPendingNote(null)
   }
 
   async function deleteAnnotation(id: number) {
     const r = await runWithToast(toast, () => api.deleteAnnotation(id))
-    if (r) setAnnotations(prev => prev.filter(a => a.id !== id))
+    if (r) onAnnotationsChanged(annotations.filter(a => a.id !== id))
   }
 
   if (series.length === 0) {

@@ -7,7 +7,7 @@
 // Persistence is via the existing annotations API (built in v0.3.0); this
 // component is purely a view + delete affordance.
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { api, Annotation } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
@@ -19,28 +19,24 @@ interface Props {
   // Callback when a user clicks a bookmark to jump to its location.
   // The parent decides how wide a window to render around the click.
   onJumpToTimestampSec?: (relativeSec: number) => void
+  // Lifted state — the parent (Explorer) owns the annotations list
+  // so this panel and TopicPlot show the same data without
+  // independent fetches that diverge after a create/delete.
+  annotations: Annotation[]
+  loading?: boolean
+  onAnnotationsChanged: (next: Annotation[]) => void
 }
 
 export default function BookmarksPanel({
   bagId,
   firstTimestampNs,
   onJumpToTimestampSec,
+  annotations,
+  loading = false,
+  onAnnotationsChanged,
 }: Props) {
   const toast = useErrorToast()
-  const [annotations, setAnnotations] = useState<Annotation[]>([])
   const [search, setSearch] = useState('')
-  const [loading, setLoading] = useState(true)
-
-  async function refresh() {
-    const r = await runWithToast(toast, () => api.listAnnotations(bagId))
-    if (r) setAnnotations(r.annotations)
-    setLoading(false)
-  }
-
-  useEffect(() => {
-    refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bagId])
 
   const filtered = useMemo(() => {
     if (!search.trim()) return annotations
@@ -56,7 +52,7 @@ export default function BookmarksPanel({
     e.stopPropagation()
     const r = await runWithToast(toast, () => api.deleteAnnotation(id))
     if (r) {
-      setAnnotations(prev => prev.filter(a => a.id !== id))
+      onAnnotationsChanged(annotations.filter(a => a.id !== id))
       toast.push('info', 'Bookmark deleted')
     }
   }
