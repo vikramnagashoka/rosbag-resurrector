@@ -2,7 +2,7 @@
 
 These verify that:
 1. TopicView.iter_chunks respects chunk_size bounds.
-2. TopicView.to_lazy_polars returns a LazyFrame.
+2. TopicView.materialize_ipc_cache returns a usable IpcCache.
 3. All export formats stream (memory stays bounded) and produce correct output.
 4. ExportError is raised when columns fail to serialize.
 """
@@ -72,11 +72,12 @@ class TestIterChunks:
                 assert "timestamp_ns" in c.columns
 
 
-class TestLazyPolars:
-    def test_returns_lazy_frame(self, sample_bag):
+class TestIpcCache:
+    def test_scan_returns_lazy_frame(self, sample_bag):
         bf = BagFrame(sample_bag)
-        lf = bf["/imu/data"].to_lazy_polars()
-        assert isinstance(lf, pl.LazyFrame)
+        with bf["/imu/data"].materialize_ipc_cache() as cache:
+            lf = cache.scan()
+            assert isinstance(lf, pl.LazyFrame)
 
     def test_collect_matches_eager(self, sample_bag):
         bf = BagFrame(sample_bag)
@@ -84,7 +85,8 @@ class TestLazyPolars:
         eager = view.to_polars()
         # Use a fresh view because to_polars caches
         view2 = bf["/imu/data"]
-        lazy = view2.to_lazy_polars().collect()
+        with view2.materialize_ipc_cache() as cache:
+            lazy = cache.scan().collect()
         assert eager.height == lazy.height
         assert set(eager.columns) == set(lazy.columns)
 

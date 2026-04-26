@@ -146,9 +146,14 @@ imu_pd = bf["/imu/data"].to_pandas()
 for chunk in bf["/camera/rgb"].iter_chunks(chunk_size=10_000):
     process(chunk)
 
-# Lazy frame for filter/projection pushdown
-lazy = bf["/imu/data"].to_lazy_polars()
-filtered = lazy.filter(pl.col("linear_acceleration.x").abs() > 5.0).collect()
+# Lazy frame for filter/projection pushdown — lifecycle is explicit
+# (use as a context manager so the temp cache file is cleaned up).
+with bf["/imu/data"].materialize_ipc_cache() as cache:
+    filtered = (
+        cache.scan()
+        .filter(pl.col("linear_acceleration.x").abs() > 5.0)
+        .collect()
+    )
 
 # Health report
 report = bf.health_report()

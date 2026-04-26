@@ -1,10 +1,11 @@
 """Lazy Polars on a topic — filter pushdown without OOM.
 
-Demonstrates: ``BagFrame[topic].to_lazy_polars()`` (v0.2.2 streaming
-work) plus how it composes with the v0.3.1 transforms.
+Demonstrates: ``BagFrame[topic].materialize_ipc_cache()`` (v0.4.0
+explicit-lifecycle replacement for the old ``to_lazy_polars()``) plus
+how it composes with the v0.3.1 transforms.
 
 Run:
-    python examples/08_polars_lazy_filter.py
+    python examples/18_polars_lazy_filter.py
 
 What you'll see: peak memory footprint of a lazy filter+collect on the
 demo IMU topic, compared to materializing the full DataFrame eagerly.
@@ -59,12 +60,13 @@ def main() -> None:
     bf2 = BagFrame(bag_path)
     rss_before = proc_rss_mb()
     t0 = time.perf_counter()
-    lazy = bf2[topic].to_lazy_polars()
-    lazy_filtered = (
-        lazy.filter(pl.col("linear_acceleration.x").abs() > 0.1)
-        .head(10)
-        .collect()
-    )
+    with bf2[topic].materialize_ipc_cache() as cache:
+        lazy_filtered = (
+            cache.scan()
+            .filter(pl.col("linear_acceleration.x").abs() > 0.1)
+            .head(10)
+            .collect()
+        )
     t1 = time.perf_counter()
     rss_after = proc_rss_mb()
     print(f"  filtered rows:     {lazy_filtered.height}")
@@ -74,13 +76,13 @@ def main() -> None:
 
     section("Lazy filter columns selected for free")
     bf3 = BagFrame(bag_path)
-    proj = (
-        bf3[topic]
-        .to_lazy_polars()
-        .select([pl.col("timestamp_ns"), pl.col("linear_acceleration.x")])
-        .head(5)
-        .collect()
-    )
+    with bf3[topic].materialize_ipc_cache() as cache:
+        proj = (
+            cache.scan()
+            .select([pl.col("timestamp_ns"), pl.col("linear_acceleration.x")])
+            .head(5)
+            .collect()
+        )
     print(f"  projection sample (5 rows, 2 cols):")
     print(f"\n{proj}\n")
 

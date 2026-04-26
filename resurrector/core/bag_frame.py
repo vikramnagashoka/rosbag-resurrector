@@ -25,6 +25,81 @@ _IMAGE_TYPES = {
 }
 
 
+class IpcCache:
+    """Handle to a streamed Arrow IPC cache of a single topic.
+
+    Returned by ``TopicView.materialize_ipc_cache()``. The cache file
+    lives on disk under the OS temp dir; ``scan()`` returns a
+    ``pl.LazyFrame`` backed by it for filter/projection pushdown.
+
+    Lifecycle is explicit. Use as a context manager, or call
+    ``close()`` yourself, or both. ``__del__`` is a best-effort
+    backstop only — do not rely on it (interpreter-shutdown ordering
+    is not guaranteed, and on Windows an open mmap can prevent unlink).
+    """
+
+    def __init__(self, path: Path | None, _empty: bool = False):
+        self._path = path
+        self._empty = _empty
+        self._closed = _empty  # an empty cache has nothing to close
+        self._warned_unclosed = False
+
+    @property
+    def path(self) -> Path | None:
+        """The on-disk Arrow IPC file, or None for an empty cache."""
+        return self._path
+
+    def scan(self) -> pl.LazyFrame:
+        """Return a Polars LazyFrame over the cached topic data.
+
+        Calling scan() after close() raises a clear error so notebook
+        users get a real exception instead of silent corruption.
+        """
+        if self._closed and not self._empty:
+            raise RuntimeError(
+                "IpcCache.scan() called after close() — the cache file "
+                "has been deleted. Re-create the cache via "
+                "TopicView.materialize_ipc_cache()."
+            )
+        if self._empty or self._path is None:
+            return pl.LazyFrame({"timestamp_ns": []})
+        return pl.scan_ipc(str(self._path))
+
+    def close(self) -> None:
+        """Delete the temp file. Idempotent — safe to call multiple times."""
+        if self._closed:
+            return
+        if self._path is not None:
+            self._path.unlink(missing_ok=True)
+        self._closed = True
+
+    def __enter__(self) -> "IpcCache":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Best-effort backstop. Notebook users who forget to close get
+        # a warning so the leak is visible rather than silent.
+        if not self._closed and self._path is not None:
+            try:
+                import warnings
+                if not self._warned_unclosed:
+                    warnings.warn(
+                        f"IpcCache for {self._path.name} was not closed; "
+                        f"deleting via __del__. Use a context manager or "
+                        f"call close() explicitly.",
+                        ResourceWarning,
+                        stacklevel=2,
+                    )
+                self._path.unlink(missing_ok=True)
+            except Exception:
+                # GC during interpreter shutdown can fail in many ways
+                # (modules torn down, etc.); never propagate from __del__.
+                pass
+
+
 class TopicView:
     """Lazy view of a single topic in a bag file.
 
@@ -121,19 +196,36 @@ class TopicView:
         if buffer:
             yield pl.DataFrame(buffer)
 
-    def to_lazy_polars(self, chunk_size: int = 50_000) -> pl.LazyFrame:
-        """Return a Polars LazyFrame with real filter/projection pushdown.
+    def materialize_ipc_cache(self, chunk_size: int = 50_000) -> "IpcCache":
+        """Stream the topic to a temporary Arrow IPC file and return a handle.
 
-        Streams chunks to a temp Arrow IPC file and returns
-        ``pl.scan_ipc(path)``. Filters and selects pushed onto the
-        LazyFrame are evaluated without materializing the full topic.
+        Returns an ``IpcCache`` whose ``.scan()`` produces a
+        ``pl.LazyFrame`` with real filter/projection pushdown. Memory
+        usage is bounded by ``chunk_size`` regardless of topic size.
 
-        The temp file lives in the OS temp dir and is cleaned up when
-        the LazyFrame (and any DataFrames derived from it) are
-        collected and dropped.
+        Lifecycle is **explicit** — the temp file is owned by the
+        returned cache and is deleted only when ``.close()`` is called
+        (or when the cache is used as a context manager). This
+        replaces the v0.3.x ``to_lazy_polars()`` method, which leaked
+        the temp file.
+
+        Examples
+        --------
+        Context-manager usage (preferred — file is cleaned up
+        deterministically when the block exits)::
+
+            with bf["/imu/data"].materialize_ipc_cache() as cache:
+                df = cache.scan().filter(pl.col("x") > 0).collect()
+
+        Explicit usage::
+
+            cache = bf["/imu/data"].materialize_ipc_cache()
+            try:
+                df = cache.scan().filter(pl.col("x") > 0).collect()
+            finally:
+                cache.close()
         """
         import tempfile
-        import pyarrow as pa
         import pyarrow.ipc as ipc
 
         tmp = tempfile.NamedTemporaryFile(
@@ -160,10 +252,12 @@ class TopicView:
                 writer.close()
 
         if not wrote_any:
+            # Empty topic — delete the placeholder file immediately and
+            # return a cache that scans to an empty LazyFrame.
             tmp_path.unlink(missing_ok=True)
-            return pl.LazyFrame({"timestamp_ns": []})
+            return IpcCache(path=None, _empty=True)
 
-        return pl.scan_ipc(str(tmp_path))
+        return IpcCache(path=tmp_path)
 
     def to_polars(self) -> pl.DataFrame:
         """Convert topic messages to a Polars DataFrame.
@@ -172,8 +266,8 @@ class TopicView:
         e.g., linear_acceleration.x, orientation.w
 
         For topics with more than ~100k messages, this materializes the
-        entire topic in memory. Use iter_chunks() or to_lazy_polars()
-        instead for large topics.
+        entire topic in memory. Use iter_chunks() or
+        materialize_ipc_cache() instead for large topics.
         """
         if self._cached_df is not None:
             return self._cached_df
@@ -182,7 +276,7 @@ class TopicView:
             import logging
             logging.getLogger("resurrector.core.bag_frame").warning(
                 "Materializing %d messages for '%s' — consider iter_chunks() "
-                "or to_lazy_polars() to avoid OOM",
+                "or materialize_ipc_cache() to avoid OOM",
                 self._topic_info.message_count, self._topic_name,
             )
 
