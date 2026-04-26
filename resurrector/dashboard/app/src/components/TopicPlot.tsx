@@ -110,29 +110,42 @@ export default function TopicPlot({
   const plotLayout = useMemo(() => {
     const totalRows = series.length + (derivedSeries?.length ?? 0)
     const axes: Record<string, unknown> = {}
+    // Each subplot needs enough vertical space for at least the y-axis
+    // title text. With many rows (e.g. /imu/data has ~13 numeric columns
+    // plus a derived series) the per-row domain shrinks below the label
+    // height and the label collides with the next subplot's plot area.
+    // Cap title font + tick font sizes proportionally.
+    const tightStack = totalRows >= 8
+    const titleFontSize = tightStack ? 9 : 11
+    const tickFontSize = tightStack ? 9 : 10
+    const verticalGap = totalRows >= 6 ? 0.04 : 0.02
     const subplotHeight = 1 / Math.max(totalRows, 1)
     series.forEach((_, i) => {
       const domainTop = 1 - i * subplotHeight
-      const domainBottom = 1 - (i + 1) * subplotHeight + 0.02
+      const domainBottom = 1 - (i + 1) * subplotHeight + verticalGap
       axes[`yaxis${i === 0 ? '' : i + 1}`] = {
         domain: [domainBottom, domainTop],
-        title: { text: series[i].label, font: { size: 11 } },
+        title: { text: series[i].label, font: { size: titleFontSize } },
+        tickfont: { size: tickFontSize },
         gridcolor: '#30363d',
         zerolinecolor: '#30363d',
         color: '#8b949e',
+        automargin: true,
       }
     })
     // Derived series occupy the bottom slots.
     ;(derivedSeries ?? []).forEach((s, i) => {
       const slot = series.length + i
       const domainTop = 1 - slot * subplotHeight
-      const domainBottom = 1 - (slot + 1) * subplotHeight + 0.02
+      const domainBottom = 1 - (slot + 1) * subplotHeight + verticalGap
       axes[`yaxis${slot + 1}`] = {
         domain: [domainBottom, domainTop],
-        title: { text: s.label, font: { size: 11, color: '#a371f7' } },
+        title: { text: s.label, font: { size: titleFontSize, color: '#a371f7' } },
+        tickfont: { size: tickFontSize },
         gridcolor: '#30363d',
         zerolinecolor: '#30363d',
         color: '#a371f7',
+        automargin: true,
       }
     })
     // Translate annotations to shapes (vertical dashed lines).
@@ -168,13 +181,18 @@ export default function TopicPlot({
         borderpad: 3,
       }
     })
+    // Per-subplot floor of 140px so even tight stacks stay legible. The
+    // left margin widens with row count because tighter rows need more
+    // automargin headroom for the y-axis labels.
+    const perRowHeight = totalRows >= 8 ? 140 : 180
+    const leftMargin = totalRows >= 8 ? 110 : 80
     return {
       autosize: true,
       paper_bgcolor: '#161b22',
       plot_bgcolor: '#0d1117',
       font: { color: '#e1e4e8', size: 11 },
-      margin: { l: 60, r: 12, t: 12, b: 40 },
-      height: Math.max(200, totalRows * 180),
+      margin: { l: leftMargin, r: 12, t: 12, b: 40 },
+      height: Math.max(200, totalRows * perRowHeight),
       hovermode: 'x unified' as const,
       xaxis: {
         title: { text: 'seconds', font: { size: 11 } },
@@ -279,10 +297,7 @@ export default function TopicPlot({
     setPendingNote(null)
   }
 
-  async function deleteAnnotation(id: number) {
-    const r = await runWithToast(toast, () => api.deleteAnnotation(id))
-    if (r) onAnnotationsChanged(annotations.filter(a => a.id !== id))
-  }
+  // (Annotation deletion lives in BookmarksPanel; TopicPlot only adds.)
 
   if (series.length === 0) {
     return (
@@ -326,48 +341,8 @@ export default function TopicPlot({
         onSelected={handleSelected}
       />
 
-      {/* Inline annotation list with delete controls. */}
-      {annotations.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 6 }}>
-            Annotations ({annotations.length})
-          </div>
-          {annotations.map(a => (
-            <div
-              key={a.id}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '4px 8px',
-                borderLeft: '3px solid #f85149',
-                background: '#0d1117',
-                borderRadius: 4,
-                marginBottom: 4,
-                fontSize: 12,
-              }}
-            >
-              <span>
-                <span style={{ color: '#f85149' }}>
-                  t={formatSec(a.timestamp_ns, firstTimestampNs).toFixed(3)}s
-                </span>{' '}
-                — {a.text}
-              </span>
-              <button
-                onClick={() => deleteAnnotation(a.id)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#8b949e',
-                  cursor: 'pointer',
-                }}
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Annotation list lives in the right-rail BookmarksPanel now —
+          duplicate would show the same data twice. */}
 
       {pendingNote && (
         <div
