@@ -62,26 +62,56 @@ def main() -> None:
     env["RESURRECTOR_ALLOWED_ROOTS"] = os.pathsep.join(
         [tempfile.gettempdir(), str(Path.home())]
     )
+    # Capture stderr so we can quote it back to the user if the
+    # subprocess dies during startup (e.g. SyntaxError on older Python
+    # versions). Without piping, the traceback would still print to the
+    # terminal but the script would oblivously claim "server up" later.
     proc = subprocess.Popen(
         [sys.executable, "-m", "resurrector.cli.main", "dashboard", "--port", "8080"],
         env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
     )
-    print(f"  ✓ Dashboard PID {proc.pid}\n")
+    print(f"  [OK] Dashboard PID {proc.pid}\n")
 
-    # Wait for the server to come up.
+    # Wait for the server to come up. We poll BOTH the subprocess
+    # liveness (proc.poll() returning non-None means it crashed during
+    # startup and we should surface stderr) and the port. Without the
+    # liveness check the script used to lie "server up" when the subprocess
+    # had actually exited with a SyntaxError.
     print(f"  Waiting for the server to listen...")
     import socket
     deadline = time.time() + 10
+    server_up = False
     while time.time() < deadline:
+        if proc.poll() is not None:
+            # Subprocess exited during startup. Capture stderr and abort.
+            try:
+                _, stderr_bytes = proc.communicate(timeout=2)
+                stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
+            except Exception:
+                stderr = "(could not read subprocess stderr)"
+            print(f"\n  [FATAL] Dashboard subprocess exited (code {proc.returncode}).")
+            print(f"  ──── subprocess stderr ────")
+            for line in stderr.splitlines()[-30:]:
+                print(f"  {line}")
+            print(f"  ──────────────────────────\n")
+            sys.exit(1)
         try:
             with socket.create_connection(("127.0.0.1", 8080), timeout=0.2):
+                server_up = True
                 break
         except OSError:
             time.sleep(0.2)
 
+    if not server_up:
+        print(f"\n  [FATAL] Server did not start listening within 10 seconds.")
+        proc.terminate()
+        sys.exit(1)
+
     explorer_url = f"http://localhost:8080/bag/{bag_id}"
     compare_url = f"http://localhost:8080/compare-runs"
-    print(f"  ✓ Server up at http://localhost:8080\n")
+    print(f"  [OK] Server up at http://localhost:8080\n")
     print(f"  Opening {explorer_url}...\n")
     webbrowser.open(explorer_url)
 
