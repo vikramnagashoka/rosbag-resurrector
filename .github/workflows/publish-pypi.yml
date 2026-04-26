@@ -1,0 +1,66 @@
+name: Publish to PyPI
+
+# Triggers on tag pushes (any v*) and on workflow_dispatch for manual reruns.
+# Uses PyPI Trusted Publishing (OIDC) — no API token needed in repo secrets.
+# The PyPI project page must list this exact workflow under "Trusted publishers."
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    # The "pypi" environment is what we registered with PyPI Trusted
+    # Publishing. Adds an extra confirmation step on protected
+    # environments and gives us per-env secrets later if needed.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rosbag-resurrector
+
+    permissions:
+      # OIDC: required for Trusted Publishing to mint a short-lived
+      # token that PyPI accepts in lieu of an API token.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python build deps
+        run: pip install --upgrade build twine
+
+      - name: Build dashboard frontend
+        # The wheel needs to ship the built React bundle in
+        # resurrector/dashboard/static/. Without this step the
+        # installed package's dashboard would 404 on /.
+        working-directory: resurrector/dashboard/app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Confirm artifacts
+        run: |
+          ls -lh dist/
+          python -m twine check dist/*
+
+      - name: Publish to PyPI via Trusted Publishing
+        # No `password:` field — PyPI verifies the OIDC token
+        # automatically. The "pypi" environment + the publishing
+        # config on PyPI's side must match this workflow's identity.
+        uses: pypa/gh-action-pypi-publish@release/v1

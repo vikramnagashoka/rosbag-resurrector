@@ -5,24 +5,34 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rosbag-resurrector"
 version = "0.3.1"
-description = "Stop letting your rosbag data rot. A pandas-like analysis tool for robotics bag files."
+description = "Stop letting your rosbag data rot. A pandas-like analysis tool for robotics bag files — no ROS install required."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "RosBag Resurrector Contributors"},
 ]
-keywords = ["ros", "rosbag", "mcap", "robotics", "data-analysis"]
+keywords = [
+    "ros", "ros2", "rosbag", "mcap", "robotics", "data-analysis",
+    "polars", "pandas", "plotjuggler", "machine-learning", "rlds", "lerobot",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
+
 dependencies = [
     "mcap>=1.1.0",
     "mcap-ros2-support>=0.5.0",
@@ -38,6 +48,13 @@ dependencies = [
     "h5py>=3.10.0",
     "pyarrow>=15.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vikramnagashoka/rosbag-resurrector"
+Documentation = "https://github.com/vikramnagashoka/rosbag-resurrector#readme"
+Repository = "https://github.com/vikramnagashoka/rosbag-resurrector"
+Issues = "https://github.com/vikramnagashoka/rosbag-resurrector/issues"
+Changelog = "https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 ros1 = ["rosbags>=0.9.0"]
@@ -55,6 +72,13 @@ resurrector = "resurrector.cli.main:app"
 
 [tool.setuptools.packages.find]
 include = ["resurrector*"]
+
+# Ship non-Python assets in the wheel: the React dashboard bundle and
+# the bridge's standalone HTML/JS viewer. Without this glob the wheel
+# installs the Python source but loading the dashboard 404s on `/`.
+[tool.setuptools.package-data]
+"resurrector.dashboard.static" = ["**/*"]
+"resurrector.bridge.web" = ["**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

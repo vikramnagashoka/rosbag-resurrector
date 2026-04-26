@@ -1,0 +1,22 @@
+# Files to include in the source distribution (sdist) beyond what
+# setuptools auto-detects. The wheel uses tool.setuptools.package-data
+# in pyproject.toml; sdist needs MANIFEST.in.
+
+include README.md
+include CHANGELOG.md
+include LICENSE
+include pyproject.toml
+
+# Built React dashboard — required for the dashboard to render at
+# runtime. Built by `npm run build` in the publish workflow.
+recursive-include resurrector/dashboard/static *
+
+# Standalone bridge viewer (HTML/JS).
+recursive-include resurrector/bridge/web *
+
+# Don't ship build/dev artifacts.
+prune resurrector/dashboard/app/node_modules
+prune resurrector/dashboard/app/dist
+prune __pycache__
+global-exclude *.pyc
+global-exclude .DS_Store
