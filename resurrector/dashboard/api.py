@@ -69,8 +69,8 @@ def _validate_path(path_str: str) -> Path:
       - paths containing ``..`` traversal components, and
       - paths that resolve outside the configured allowed roots.
 
-    Allowed roots default to the user's home directory; override via
-    the ``RESURRECTOR_ALLOWED_ROOTS`` environment variable
+    Allowed roots default to {home, OS temp, dashboard cwd}; override
+    via the ``RESURRECTOR_ALLOWED_ROOTS`` environment variable
     (os.pathsep-separated).
     """
     if ".." in Path(path_str).parts:
@@ -78,10 +78,14 @@ def _validate_path(path_str: str) -> Path:
     resolved = Path(path_str).resolve()
     allowed_roots = _resolve_allowed_roots()
     if not any(_is_within(resolved, root) for root in allowed_roots):
+        # Echo the allowed roots in the error message so users don't have
+        # to reverse-engineer them from the env var name.
+        roots_str = ", ".join(str(r) for r in allowed_roots)
         raise HTTPException(
             403,
-            f"Path '{resolved}' is outside allowed roots. "
-            f"Set RESURRECTOR_ALLOWED_ROOTS to allow more directories.",
+            f"Path '{resolved}' is outside the allowed roots. "
+            f"Currently allowed: {roots_str}. "
+            f"Set RESURRECTOR_ALLOWED_ROOTS (os.pathsep-separated) to broaden.",
         )
     return resolved
 
