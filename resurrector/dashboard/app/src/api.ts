@@ -288,6 +288,13 @@ export const api = {
   // Server-side absolute paths the browser can safely include in
   // output_path values (avoids the "browser can't expand ~" trap).
   getSystemPaths: () => request<SystemPaths>('GET', `/api/system/paths`),
+
+  // Generate a synthetic demo bag and index it. Lets users create
+  // sample data without a working `resurrector` CLI on PATH.
+  generateDemoBag: (body?: { name?: string; duration_sec?: number }) =>
+    request<{ bag_id: number; path: string; duration_sec: number }>(
+      'POST', `/api/system/generate-demo-bag`, { body: body ?? {} },
+    ),
 }
 
 // ---------- v0.3.1 types ----------

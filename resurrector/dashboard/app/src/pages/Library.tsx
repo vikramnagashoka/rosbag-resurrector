@@ -82,6 +82,24 @@ export default function Library() {
     setScanning(false)
   }
 
+  async function handleGenerateDemo() {
+    setScanning(true)
+    const r = await runWithToast(
+      toast,
+      () =>
+        api.generateDemoBag({
+          name: `demo_${Date.now()}`,
+          duration_sec: 5,
+        }),
+      { errorPrefix: 'Generate demo' },
+    )
+    if (r) {
+      toast.push('info', `Generated demo bag at ${r.path}`)
+      await fetchBags()
+    }
+    setScanning(false)
+  }
+
   return (
     <div>
       <div
@@ -195,19 +213,36 @@ export default function Library() {
               {scanning ? 'Scanning...' : 'Scan'}
             </button>
           </form>
-          <p style={{ color: '#8b949e', fontSize: 12, marginTop: 8 }}>
-            Tip: to test Compare runs, run{' '}
-            <code
+          <div
+            style={{
+              marginTop: 10,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 12,
+              color: '#8b949e',
+            }}
+          >
+            No data handy?
+            <button
+              onClick={handleGenerateDemo}
+              disabled={scanning}
               style={{
-                background: '#0d1117',
-                padding: '2px 6px',
+                background: scanning ? '#21262d' : '#21262d',
+                color: scanning ? '#484f58' : '#58a6ff',
+                border: '1px solid #30363d',
                 borderRadius: 4,
+                padding: '3px 10px',
+                cursor: scanning ? 'not-allowed' : 'pointer',
+                fontSize: 12,
               }}
             >
-              resurrector demo --output ~/.resurrector/explore_sample_2.mcap
-            </code>{' '}
-            in a terminal, then point this scan at <code>~/.resurrector/</code>.
-          </p>
+              {scanning ? 'Working...' : 'Generate demo bag'}
+            </button>
+            <span style={{ color: '#484f58' }}>
+              · creates ~/.resurrector/demo_TIMESTAMP.mcap and indexes it
+            </span>
+          </div>
         </div>
       )}
 
@@ -269,19 +304,26 @@ export default function Library() {
               {scanning ? 'Scanning...' : 'Scan folder'}
             </button>
           </form>
-          <p style={{ color: '#8b949e', fontSize: '13px', marginTop: '16px' }}>
-            No data handy? Run{' '}
-            <code
+          <div style={{ marginTop: 16 }}>
+            <p style={{ color: '#8b949e', fontSize: 13, marginBottom: 8 }}>
+              No data handy? Generate a synthetic bag right here:
+            </p>
+            <button
+              onClick={handleGenerateDemo}
+              disabled={scanning}
               style={{
-                background: '#0d1117',
-                padding: '2px 6px',
-                borderRadius: '4px',
+                background: scanning ? '#21262d' : '#1f6feb',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 6,
+                padding: '8px 18px',
+                cursor: scanning ? 'not-allowed' : 'pointer',
+                fontSize: 14,
               }}
             >
-              resurrector demo
-            </code>{' '}
-            in a terminal to generate a sample bag.
-          </p>
+              {scanning ? 'Working...' : 'Generate demo bag'}
+            </button>
+          </div>
         </div>
       ) : (
         bags.map(bag => (

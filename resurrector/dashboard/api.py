@@ -136,6 +136,81 @@ async def get_system_paths() -> dict[str, Any]:
     return _resolved_export_paths()
 
 
+@app.post("/api/system/generate-demo-bag")
+async def generate_demo_bag_api(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Generate a synthetic demo bag and index it.
+
+    Mirrors the ``resurrector demo`` CLI but works for users running
+    from source who don't have the ``resurrector`` shell command on
+    PATH. Particularly useful from the Library and CompareRuns pages
+    where users hit the "I have one bag, can't compare" wall.
+
+    Body (all optional):
+      {"name": "demo_2", "duration_sec": 5.0}
+
+    Returns the indexed bag's id + path.
+    """
+    payload = payload or {}
+    name = str(payload.get("name", f"demo_{int(__import__('time').time())}")).strip()
+    duration_sec = float(payload.get("duration_sec", 5.0))
+    if duration_sec < 0.5 or duration_sec > 60:
+        raise HTTPException(400, "duration_sec must be between 0.5 and 60")
+    if not name or any(c in name for c in r'\/:*?"<>|'):
+        raise HTTPException(400, "name must be a simple filename without separators")
+
+    output = (Path.home() / ".resurrector" / f"{name}.mcap").resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # Inline-import the test fixture generator so we don't pull it
+    # eagerly when nobody calls this endpoint.
+    try:
+        from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+    except ImportError as e:
+        raise HTTPException(
+            500,
+            "Demo bag generator not available — make sure the project is "
+            f"installed with `pip install -e \".[dev]\"`. ({e})",
+        )
+
+    try:
+        generate_bag(output, BagConfig(duration_sec=duration_sec))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to generate demo bag: {e}")
+
+    # Index the new bag so it shows up in the Library + CompareRuns
+    # without requiring a separate scan.
+    from resurrector.ingest.scanner import scan_path
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.ingest.frame_index import build_frame_offsets, image_topics
+
+    index = _get_index()
+    try:
+        scanned_files = scan_path(output)
+        if not scanned_files:
+            raise HTTPException(500, "Generated bag was not scannable")
+        scanned = scanned_files[0]
+        parser = parse_bag(output)
+        metadata = parser.get_metadata()
+        bag_id = index.upsert_bag(scanned, metadata)
+        bf = BagFrame(output)
+        index.update_health_score(bag_id, bf.health_report().score)
+
+        # Pre-build frame offsets so the dashboard's image viewer + frame
+        # endpoint are O(1) when the user explores this bag.
+        img_topics = image_topics(output)
+        if img_topics:
+            build_frame_offsets(index, bag_id, output, topics=img_topics)
+    finally:
+        index.close()
+
+    return {
+        "bag_id": bag_id,
+        "path": str(output),
+        "duration_sec": duration_sec,
+    }
+
+
 @app.get("/api/bags")
 async def list_bags(
     search: str | None = None,

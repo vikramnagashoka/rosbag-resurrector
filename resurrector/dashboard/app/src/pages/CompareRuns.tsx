@@ -190,22 +190,48 @@ export default function CompareRuns() {
             }}
           >
             <strong>Only 1 bag indexed</strong> — Compare runs needs at least 2.
-            Quick way to add another for testing:
-            <pre
+            <div
               style={{
-                background: '#0d1117',
-                padding: 8,
-                borderRadius: 4,
-                marginTop: 8,
-                color: '#e1e4e8',
-                overflow: 'auto',
+                marginTop: 10,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
               }}
             >
-              {`# In a terminal:\nresurrector demo --output ~/.resurrector/explore_sample_2.mcap\n# Then back in the Library page, click "+ Scan folder" and enter:\n~/.resurrector/`}
-            </pre>
-            <div style={{ marginTop: 8 }}>
-              You can still pick the one indexed bag below — the page will
-              prompt you again once you have a second.
+              <button
+                onClick={async () => {
+                  const r = await runWithToast(
+                    toast,
+                    () =>
+                      api.generateDemoBag({
+                        name: `compare_demo_${Date.now()}`,
+                        duration_sec: 5,
+                      }),
+                    { errorPrefix: 'Generate demo' },
+                  )
+                  if (r) {
+                    toast.push('info', `Generated ${r.path}`)
+                    // Refresh the bag list so the new bag appears.
+                    const updated = await runWithToast(toast, () => api.listBags())
+                    if (updated) setAllBags(updated)
+                  }
+                }}
+                style={{
+                  background: '#1f6feb',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '6px 14px',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                Generate a demo bag now
+              </button>
+              <span style={{ color: '#8b949e', fontSize: 12 }}>
+                creates ~/.resurrector/compare_demo_TIMESTAMP.mcap, indexes it,
+                and refreshes this list
+              </span>
             </div>
           </div>
         ) : null}
