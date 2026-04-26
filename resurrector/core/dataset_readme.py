@@ -180,7 +180,10 @@ def generate_dataset_readme(
     ])
 
     readme_path = output_path / "README.md"
-    readme_path.write_text("\n".join(lines))
+    # Force UTF-8 — the README contains arrows / em-dashes that the
+    # Windows cp1252 default encoding can't represent, which made
+    # dataset export crash hard on Windows.
+    readme_path.write_text("\n".join(lines), encoding="utf-8")
     return readme_path
 
 

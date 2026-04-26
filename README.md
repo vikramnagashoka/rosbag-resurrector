@@ -153,6 +153,32 @@ pip install rosbag-resurrector[ros1]          # ROS 1 .bag support via rosbags
 
 Run `resurrector doctor` any time to see which extras are active.
 
+## Try every feature in 30 seconds
+
+The repo ships with **17 standalone exploration scripts** under [examples/](examples/) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
+
+```bash
+python examples/01_bag_frame_basics.py        # the pandas-like API
+python examples/02_health_checks.py           # 0-100 quality score per bag
+python examples/03_multi_stream_sync.py       # align topics with mismatched rates
+python examples/04_image_video_export.py      # iterate frames, export MP4
+python examples/05_ml_export_formats.py       # Parquet/HDF5/NumPy/LeRobot/RLDS
+python examples/06_index_search_query_dsl.py  # DuckDB index + query DSL
+python examples/07_semantic_frame_search.py   # CLIP semantic search
+python examples/08_datasets_versioning.py     # versioned dataset collections
+python examples/09_plotjuggler_bridge.py      # WebSocket bridge for live viz
+```
+
+Plus the v0.3.1 power features (`11_density_ribbon.py` through `18_polars_lazy_filter.py`) — bookmarks, math/transform editor, brush-to-trim export, cross-bag overlay, "Open in Jupyter", lazy Polars filter pushdown.
+
+Each script:
+- Runs in **under 10 seconds** end-to-end
+- Auto-generates the demo bag on first run
+- Auto-skips with install instructions when an optional extra (CLIP, OpenCV, etc.) isn't installed
+- Has a one-line "what this is and why" header so you can decide whether to keep reading
+
+Full index in [examples/README.md](examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 17 pass on a fresh install, the toolkit is healthy.
+
 ## Features
 
 ### Automatic Health Checks
@@ -451,13 +477,24 @@ df_10hz = downsample_temporal(df, target_hz=10)
 resurrector dashboard --port 8080
 ```
 
-- **Library** — Browse, search, and filter all indexed bags. Empty state offers a one-click scan-folder input.
-- **Explorer** — Plotly-based topic plots with brush-to-zoom, linked cursors, and click-to-annotate. Tabbed UX for plotting, multi-stream sync, and image/video scrubbing.
-- **Health** — Visual quality reports with recommendations and per-topic scores.
-- **Search** — Semantic frame search by natural language; thumbnails link back to the matched frame in Explorer.
+Pages:
+
+- **Library** — Browse, search, and filter all indexed bags. Header has a one-click "+ Scan folder" button + "Generate demo bag" so you can index data without leaving the page.
+- **Explorer** — Plotly-based topic plots with brush-to-zoom, linked cursors, click-to-annotate. Tabs for plotting / multi-stream sync / image-video scrubbing. Side rails: bookmarks panel (right), topic list with density ribbon above the chart.
+- **Search** — Semantic frame search by natural language ("robot drops object"); thumbnails link back to the matched frame in Explorer.
 - **Datasets** — Full CRUD on versioned dataset collections with one-click export.
 - **Compare** — Side-by-side topic / health comparison between two bags.
+- **Compare runs** *(v0.3.1)* — Cross-bag overlay: pick 2+ bags + a topic, see them aligned on one chart with per-bag offset sliders, optional diff trace (B − A), and per-bag summary stats.
 - **Bridge** — Start a PlotJuggler-compatible WebSocket bridge from any bag in one click; live status polling.
+- **Health** — Visual quality reports with recommendations and per-topic scores.
+
+Power features inside Explorer *(v0.3.1)*:
+
+- **Bookmarks panel** — searchable annotations with click-to-jump, timeline-anchored, persists across sessions
+- **Density ribbon** — heatmap above the chart showing per-topic message density across the full bag duration; click a column to jump there
+- **Transform editor** — modal with a Common menu (derivative, integral, moving-average, low-pass, scale, abs, shift) plus a Polars expression escape hatch with sandboxed evaluation; preview live and "Add to plot" appends a new derived series
+- **Trim & export** — three entry points (Select range button, current-zoom, manual sliders) → popover with format dropdown (MCAP / Parquet / CSV / HDF5 / NumPy / Zarr / MP4) and persistent output directory
+- **Open in Jupyter** — exports the selected window as Parquet, copies a Polars `read_parquet(...)` snippet to your clipboard, opens `localhost:8888` if a Jupyter server is running
 
 The scan endpoint supports **Server-Sent Events** for real-time progress streaming:
 
@@ -604,7 +641,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (278 tests, ~25 seconds)
+# Run tests (348 tests, ~30 seconds)
 pytest tests/ -v
 
 # Build dashboard frontend
