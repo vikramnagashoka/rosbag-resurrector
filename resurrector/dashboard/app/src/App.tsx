@@ -8,9 +8,10 @@ import Datasets from './pages/Datasets'
 import Bridge from './pages/Bridge'
 import { ErrorToastProvider } from './ErrorToast'
 
-// Lazy-load Explorer — it pulls in plotly.js-cartesian (~1MB) which
-// we don't want charging every Library/Health visit.
+// Lazy-load Plotly-heavy pages — they pull in plotly.js-cartesian
+// (~1MB gz) which we don't want charging every Library/Health visit.
 const Explorer = React.lazy(() => import('./pages/Explorer'))
+const CompareRuns = React.lazy(() => import('./pages/CompareRuns'))
 
 const navStyle: React.CSSProperties = {
   display: 'flex',
@@ -59,6 +60,9 @@ export default function App() {
           <Link to="/compare" style={linkStyle}>
             Compare
           </Link>
+          <Link to="/compare-runs" style={linkStyle}>
+            Compare runs
+          </Link>
           <Link to="/bridge" style={linkStyle}>
             Bridge
           </Link>
@@ -70,6 +74,7 @@ export default function App() {
               <Route path="/bag/:id" element={<Explorer />} />
               <Route path="/bag/:id/health" element={<Health />} />
               <Route path="/compare" element={<Compare />} />
+              <Route path="/compare-runs" element={<CompareRuns />} />
               <Route path="/search" element={<Search />} />
               <Route path="/datasets" element={<Datasets />} />
               <Route path="/bridge" element={<Bridge />} />

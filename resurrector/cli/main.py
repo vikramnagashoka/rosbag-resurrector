@@ -268,7 +268,10 @@ def tag(
     bag = index.get_bag(bag_id)
     tags = bag.get("tags", [])
     if tags:
-        console.print(f"Current tags: {', '.join(f'{t['key']}:{t['value']}' for t in tags)}")
+        # Pre-format outside the f-string so older Pythons (PEP 701 < 3.12)
+        # don't choke on nested same-style quotes.
+        tag_pairs = ", ".join("{}:{}".format(t["key"], t["value"]) for t in tags)
+        console.print(f"Current tags: {tag_pairs}")
     else:
         console.print("[dim]No tags.[/dim]")
 

@@ -36,19 +36,48 @@ app.add_middleware(
 
 
 # Configurable allowed roots for path operations (scan, export). When the
-# RESURRECTOR_ALLOWED_ROOTS env var is unset we default to the user's home
-# directory rather than allowing any path on disk — the dashboard ships in
-# distribution packages and we never want a curl-able endpoint to expose
-# arbitrary paths like /etc/passwd.
+# RESURRECTOR_ALLOWED_ROOTS env var is unset we default to a SAFE set: the
+# user's home directory, the OS temp dir, AND the cwd of the dashboard
+# process. The cwd is included because if the user launched
+# `resurrector dashboard` from inside their data folder (e.g. on WSL where
+# bags often live under /mnt/c/...), they clearly trust that location and
+# refusing to write there is just user-hostile.
+#
+# We never want a curl-able endpoint to expose arbitrary paths like
+# /etc/passwd, so unset never means "allow everything."
 #
 # Read the env var on every call rather than at import time so tests (and
 # users) can override it after the module is loaded.
 def _resolve_allowed_roots() -> list[Path]:
     raw = os.environ.get("RESURRECTOR_ALLOWED_ROOTS", "")
     parts = [r for r in raw.split(os.pathsep) if r]
-    if not parts:
-        return [Path.home().resolve()]
-    return [Path(r).resolve() for r in parts]
+    if parts:
+        return [Path(r).resolve() for r in parts]
+    import tempfile
+    defaults = {
+        Path.home().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+        Path.cwd().resolve(),
+    }
+    return list(defaults)
+
+
+def _resolved_export_paths() -> dict[str, str]:
+    """Concrete absolute paths the dashboard can write to.
+
+    Used by the frontend to construct outputs without hardcoding
+    things like ``~/.resurrector`` (which the browser can't expand
+    and the path validator then rejects).
+    """
+    import tempfile
+    home = Path.home().resolve()
+    return {
+        "home": str(home),
+        "tmp": str(Path(tempfile.gettempdir()).resolve()),
+        "cwd": str(Path.cwd().resolve()),
+        "resurrector_cache": str((home / ".resurrector").resolve()),
+        "allowed_roots": [str(r) for r in _resolve_allowed_roots()],
+    }
 
 
 def _validate_path(path_str: str) -> Path:
@@ -58,8 +87,8 @@ def _validate_path(path_str: str) -> Path:
       - paths containing ``..`` traversal components, and
       - paths that resolve outside the configured allowed roots.
 
-    Allowed roots default to the user's home directory; override via
-    the ``RESURRECTOR_ALLOWED_ROOTS`` environment variable
+    Allowed roots default to {home, OS temp, dashboard cwd}; override
+    via the ``RESURRECTOR_ALLOWED_ROOTS`` environment variable
     (os.pathsep-separated).
     """
     if ".." in Path(path_str).parts:
@@ -67,10 +96,14 @@ def _validate_path(path_str: str) -> Path:
     resolved = Path(path_str).resolve()
     allowed_roots = _resolve_allowed_roots()
     if not any(_is_within(resolved, root) for root in allowed_roots):
+        # Echo the allowed roots in the error message so users don't have
+        # to reverse-engineer them from the env var name.
+        roots_str = ", ".join(str(r) for r in allowed_roots)
         raise HTTPException(
             403,
-            f"Path '{resolved}' is outside allowed roots. "
-            f"Set RESURRECTOR_ALLOWED_ROOTS to allow more directories.",
+            f"Path '{resolved}' is outside the allowed roots. "
+            f"Currently allowed: {roots_str}. "
+            f"Set RESURRECTOR_ALLOWED_ROOTS (os.pathsep-separated) to broaden.",
         )
     return resolved
 
@@ -91,6 +124,92 @@ def _get_index():
 
 
 # --- API Routes ---
+
+
+@app.get("/api/system/paths")
+async def get_system_paths() -> dict[str, Any]:
+    """Return absolute paths the frontend can use to construct outputs.
+
+    Lets the browser ask the server "where can I write?" instead of
+    guessing with ``~/...`` strings the browser can't expand.
+    """
+    return _resolved_export_paths()
+
+
+@app.post("/api/system/generate-demo-bag")
+async def generate_demo_bag_api(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Generate a synthetic demo bag and index it.
+
+    Mirrors the ``resurrector demo`` CLI but works for users running
+    from source who don't have the ``resurrector`` shell command on
+    PATH. Particularly useful from the Library and CompareRuns pages
+    where users hit the "I have one bag, can't compare" wall.
+
+    Body (all optional):
+      {"name": "demo_2", "duration_sec": 5.0}
+
+    Returns the indexed bag's id + path.
+    """
+    payload = payload or {}
+    name = str(payload.get("name", f"demo_{int(__import__('time').time())}")).strip()
+    duration_sec = float(payload.get("duration_sec", 5.0))
+    if duration_sec < 0.5 or duration_sec > 60:
+        raise HTTPException(400, "duration_sec must be between 0.5 and 60")
+    if not name or any(c in name for c in r'\/:*?"<>|'):
+        raise HTTPException(400, "name must be a simple filename without separators")
+
+    output = (Path.home() / ".resurrector" / f"{name}.mcap").resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # Inline-import the test fixture generator so we don't pull it
+    # eagerly when nobody calls this endpoint.
+    try:
+        from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+    except ImportError as e:
+        raise HTTPException(
+            500,
+            "Demo bag generator not available — make sure the project is "
+            f"installed with `pip install -e \".[dev]\"`. ({e})",
+        )
+
+    try:
+        generate_bag(output, BagConfig(duration_sec=duration_sec))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to generate demo bag: {e}")
+
+    # Index the new bag so it shows up in the Library + CompareRuns
+    # without requiring a separate scan.
+    from resurrector.ingest.scanner import scan_path
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.ingest.frame_index import build_frame_offsets, image_topics
+
+    index = _get_index()
+    try:
+        scanned_files = scan_path(output)
+        if not scanned_files:
+            raise HTTPException(500, "Generated bag was not scannable")
+        scanned = scanned_files[0]
+        parser = parse_bag(output)
+        metadata = parser.get_metadata()
+        bag_id = index.upsert_bag(scanned, metadata)
+        bf = BagFrame(output)
+        index.update_health_score(bag_id, bf.health_report().score)
+
+        # Pre-build frame offsets so the dashboard's image viewer + frame
+        # endpoint are O(1) when the user explores this bag.
+        img_topics = image_topics(output)
+        if img_topics:
+            build_frame_offsets(index, bag_id, output, topics=img_topics)
+    finally:
+        index.close()
+
+    return {
+        "bag_id": bag_id,
+        "path": str(output),
+        "duration_sec": duration_sec,
+    }
+
 
 @app.get("/api/bags")
 async def list_bags(
@@ -1111,6 +1230,291 @@ async def _cleanup_bridge_on_shutdown() -> None:
     except Exception:
         proc.kill()
         proc.wait(timeout=3)
+
+
+# ============================================================================
+# v0.4.0 power features — density, trim, transform preview, cross-bag overlay
+# ============================================================================
+
+
+# Density results are cached per (bag_id, mtime) since they're computed
+# from a full bag scan. Reuses the same in-memory LRU as topic data.
+_DENSITY_CACHE: dict[tuple, dict[str, Any]] = {}
+_DENSITY_ORDER: list[tuple] = []
+_DENSITY_MAX = 32
+
+
+def _density_cache_get(key: tuple) -> dict[str, Any] | None:
+    v = _DENSITY_CACHE.get(key)
+    if v is not None:
+        try:
+            _DENSITY_ORDER.remove(key)
+        except ValueError:
+            pass
+        _DENSITY_ORDER.append(key)
+    return v
+
+
+def _density_cache_set(key: tuple, value: dict[str, Any]) -> None:
+    _DENSITY_CACHE[key] = value
+    try:
+        _DENSITY_ORDER.remove(key)
+    except ValueError:
+        pass
+    _DENSITY_ORDER.append(key)
+    while len(_DENSITY_ORDER) > _DENSITY_MAX:
+        evict = _DENSITY_ORDER.pop(0)
+        _DENSITY_CACHE.pop(evict, None)
+
+
+@app.get("/api/bags/{bag_id}/density")
+async def get_bag_density_api(
+    bag_id: int,
+    bins: int = Query(default=200, ge=10, le=1000),
+    topic: str | None = Query(default=None, description="Single topic; defaults to all"),
+) -> dict[str, Any]:
+    """Per-topic message-count histograms for the timeline ribbon.
+
+    Cached per (bag_id, bins, topic, bag mtime) so repeated dashboard
+    visits hit RAM. Bag-file edits invalidate via the mtime component.
+    """
+    from resurrector.ingest.density import compute_density
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+
+        try:
+            mtime_ns = Path(bag["path"]).stat().st_mtime_ns
+        except OSError:
+            mtime_ns = -1
+        cache_key = (bag_id, bins, topic, mtime_ns)
+        cached = _density_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        topics = [topic] if topic else None
+        try:
+            result = compute_density(bag["path"], topics=topics, bins=bins)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        response = {"bag_id": bag_id, "bins": bins, "density": result}
+        _density_cache_set(cache_key, response)
+        return response
+    finally:
+        index.close()
+
+
+@app.post("/api/bags/{bag_id}/trim")
+async def trim_bag_api(bag_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    """Trim a time range from a bag and export to MCAP / Parquet / CSV / etc.
+
+    Body:
+      {
+        "start_sec": 1.0,
+        "end_sec": 3.0,
+        "topics": ["/imu/data", "/joint_states"],
+        "format": "mcap" | "parquet" | "csv" | "hdf5" | "numpy" | "zarr" | "mp4",
+        "output_path": "/path/to/output"
+      }
+    """
+    from resurrector.core.trim import trim_to_format
+
+    required = {"start_sec", "end_sec", "topics", "format", "output_path"}
+    missing = required - set(payload)
+    if missing:
+        raise HTTPException(400, f"Missing required fields: {sorted(missing)}")
+
+    try:
+        start_sec = float(payload["start_sec"])
+        end_sec = float(payload["end_sec"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "start_sec and end_sec must be numbers")
+
+    topics_in = payload["topics"]
+    if not isinstance(topics_in, list) or not all(isinstance(t, str) for t in topics_in):
+        raise HTTPException(400, "'topics' must be a list of strings")
+    if not topics_in:
+        raise HTTPException(400, "'topics' must contain at least one topic")
+
+    format_str = str(payload["format"])
+    output_path = Path(str(payload["output_path"])).resolve()
+
+    # Validate output directory is within allowed roots so dashboard
+    # users can't write to /etc.
+    _validate_path(str(output_path.parent if output_path.suffix else output_path))
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+
+        try:
+            result_path = trim_to_format(
+                source_path=bag["path"],
+                output_path=output_path,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                topics=topics_in,
+                format=format_str,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+        return {
+            "bag_id": bag_id,
+            "format": format_str,
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "output": str(result_path),
+        }
+    finally:
+        index.close()
+
+
+@app.post("/api/transforms/preview")
+async def preview_transform_api(payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply a transform to one topic column and return downsampled values.
+
+    Body shape — two modes:
+
+      Common menu:
+      {"bag_id": 1, "topic": "/imu/data", "column": "linear_acceleration.x",
+       "op": "derivative", "params": {}, "max_points": 1000}
+
+      Expression:
+      {"bag_id": 1, "topic": "/imu/data", "expression": "pl.col(\\"x\\")*2",
+       "max_points": 1000}
+    """
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.core.downsample import downsample_dataframe
+    from resurrector.core.transforms import (
+        apply_polars_expression,
+        apply_transform,
+    )
+    import polars as pl
+
+    bag_id = payload.get("bag_id")
+    topic = payload.get("topic")
+    if bag_id is None or not topic:
+        raise HTTPException(400, "'bag_id' and 'topic' are required")
+    max_points = int(payload.get("max_points", 1000))
+    if max_points < 3:
+        raise HTTPException(400, "max_points must be >= 3")
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        bf = BagFrame(bag["path"])
+        try:
+            view = bf[str(topic)]
+        except KeyError:
+            raise HTTPException(404, f"Topic '{topic}' not found in bag")
+        df = view.to_polars()
+
+        # Mode 1: common menu op.
+        if "op" in payload:
+            op = str(payload["op"])
+            column = payload.get("column")
+            if not column:
+                raise HTTPException(400, "'column' is required for menu transforms")
+            params = payload.get("params") or {}
+            try:
+                series = apply_transform(df, str(column), op, **params)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            result_df = pl.DataFrame({"timestamp_ns": df["timestamp_ns"], series.name: series})
+        elif "expression" in payload:
+            expr = str(payload["expression"])
+            try:
+                series = apply_polars_expression(df, expr, alias="result")
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            result_df = pl.DataFrame({"timestamp_ns": df["timestamp_ns"], "result": series})
+        else:
+            raise HTTPException(400, "Provide either 'op' (menu) or 'expression'")
+
+        if result_df.height > max_points:
+            result_df = downsample_dataframe(result_df, max_points=max_points)
+
+        return {
+            "topic": topic,
+            "label": result_df.columns[1],
+            "total": df.height,
+            "downsampled": True if df.height > max_points else False,
+            "data": result_df.to_dicts(),
+        }
+    finally:
+        index.close()
+
+
+@app.post("/api/compare/topics")
+async def compare_topics_api(payload: dict[str, Any]) -> dict[str, Any]:
+    """Cross-bag overlay: same topic on N bags, aligned by relative time.
+
+    Body:
+      {
+        "bag_ids": [1, 2, 3],
+        "topic": "/imu/data",
+        "offsets_sec": [0.0, 1.5, 0.0],   // optional, defaults to zeros
+        "labels": ["a", "b", "c"],         // optional, defaults to bag stem
+        "max_points_per_bag": 2000          // optional
+      }
+
+    Returns rows in long format with bag_label + relative_t_sec columns,
+    ready for one Plotly trace per bag.
+    """
+    from resurrector.core.cross_bag import align_bags_by_offset
+
+    bag_ids = payload.get("bag_ids")
+    topic = payload.get("topic")
+    if not isinstance(bag_ids, list) or not bag_ids:
+        raise HTTPException(400, "'bag_ids' must be a non-empty list of bag IDs")
+    if not topic:
+        raise HTTPException(400, "'topic' is required")
+    offsets_sec = payload.get("offsets_sec")
+    labels = payload.get("labels")
+    max_points_per_bag = int(payload.get("max_points_per_bag", 2000))
+
+    index = _get_index()
+    try:
+        paths: list[str] = []
+        resolved_labels: list[str] = []
+        for bid in bag_ids:
+            bag = index.get_bag(int(bid))
+            if bag is None:
+                raise HTTPException(404, f"Bag {bid} not found")
+            paths.append(bag["path"])
+            resolved_labels.append(Path(bag["path"]).stem)
+        if labels:
+            resolved_labels = list(labels)
+
+        try:
+            df = align_bags_by_offset(
+                paths,
+                topic=str(topic),
+                offsets_sec=offsets_sec,
+                labels=resolved_labels,
+                max_points_per_bag=max_points_per_bag,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        return {
+            "topic": topic,
+            "bag_ids": bag_ids,
+            "labels": resolved_labels,
+            "columns": df.columns,
+            "data": df.to_dicts(),
+        }
+    finally:
+        index.close()
 
 
 # Serve static frontend files

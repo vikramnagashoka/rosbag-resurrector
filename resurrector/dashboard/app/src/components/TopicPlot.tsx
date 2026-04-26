@@ -40,8 +40,25 @@ interface Props {
   bagId: number
   topicName: string
   series: PlotSeries[]
+  // Optional derived series (from the TransformEditor). They render as
+  // an extra subplot at the bottom, dashed line so the user can tell
+  // which is the original.
+  derivedSeries?: PlotSeries[]
   onZoom?: (startSec: number | null, endSec: number | null) => void
+  // Shift-drag range selection (separate from zoom). The parent uses
+  // this to drive the trim-export popover.
+  onRangeSelected?: (startSec: number, endSec: number) => void
   firstTimestampNs: number
+  // Lifted annotations state — managed by the parent (Explorer) so
+  // TopicPlot and BookmarksPanel see the same source of truth. When
+  // either component mutates, the parent updates these and both
+  // re-render together.
+  annotations: Annotation[]
+  onAnnotationsChanged: (next: Annotation[]) => void
+  // When true, switch the chart drag mode from zoom to box-select so
+  // the next horizontal drag fires onRangeSelected. Toggled by the
+  // "Select range" button in the parent toolbar.
+  selectMode?: boolean
 }
 
 function formatSec(ts_ns: number, first_ns: number): number {
@@ -52,57 +69,88 @@ export default function TopicPlot({
   bagId,
   topicName,
   series,
+  derivedSeries,
   onZoom,
+  onRangeSelected,
   firstTimestampNs,
+  annotations,
+  onAnnotationsChanged,
+  selectMode = false,
 }: Props) {
   const toast = useErrorToast()
-  const [annotations, setAnnotations] = useState<Annotation[]>([])
   const [pendingNote, setPendingNote] = useState<{ ts_ns: number; label: string } | null>(null)
   const [noteText, setNoteText] = useState('')
   const hoverRef = useRef<number | null>(null) // rAF id
 
-  // Initial + refresh annotations.
-  useEffect(() => {
-    let active = true
-    api
-      .listAnnotations(bagId, topicName)
-      .then(res => {
-        if (active) setAnnotations(res.annotations)
-      })
-      .catch(() => {
-        // Non-fatal — absence of annotations shouldn't break the plot.
-      })
-    return () => {
-      active = false
-    }
-  }, [bagId, topicName])
-
   const plotData = useMemo(() => {
-    return series.map((s, i) => ({
-      type: 'scattergl' as const,
-      mode: 'lines' as const,
-      name: s.label,
-      x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
-      y: s.values,
-      xaxis: 'x',
-      yaxis: i === 0 ? 'y' : `y${i + 1}`,
-      hovertemplate: `<b>${s.label}</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
-      line: { width: 1.2 },
-    }))
-  }, [series, firstTimestampNs])
+    const all = [
+      ...series.map((s, i) => ({
+        type: 'scattergl' as const,
+        mode: 'lines' as const,
+        name: s.label,
+        x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
+        y: s.values,
+        xaxis: 'x',
+        yaxis: i === 0 ? 'y' : `y${i + 1}`,
+        hovertemplate: `<b>${s.label}</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
+        line: { width: 1.2 },
+      })),
+      // Derived series live in their own subplot at the bottom so they
+      // don't visually compete with the primary series.
+      ...(derivedSeries ?? []).map((s, i) => ({
+        type: 'scattergl' as const,
+        mode: 'lines' as const,
+        name: s.label,
+        x: s.timestamps_ns.map(t => formatSec(t, firstTimestampNs)),
+        y: s.values,
+        xaxis: 'x',
+        yaxis: `y${series.length + i + 1}`,
+        hovertemplate: `<b>${s.label} (derived)</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
+        line: { width: 1.2, dash: 'dot' as const },
+      })),
+    ]
+    return all
+  }, [series, derivedSeries, firstTimestampNs])
 
   const plotLayout = useMemo(() => {
+    const totalRows = series.length + (derivedSeries?.length ?? 0)
     const axes: Record<string, unknown> = {}
-    const subplotHeight = 1 / Math.max(series.length, 1)
+    // Each subplot needs enough vertical space for at least the y-axis
+    // title text. With many rows (e.g. /imu/data has ~13 numeric columns
+    // plus a derived series) the per-row domain shrinks below the label
+    // height and the label collides with the next subplot's plot area.
+    // Cap title font + tick font sizes proportionally.
+    const tightStack = totalRows >= 8
+    const titleFontSize = tightStack ? 9 : 11
+    const tickFontSize = tightStack ? 9 : 10
+    const verticalGap = totalRows >= 6 ? 0.04 : 0.02
+    const subplotHeight = 1 / Math.max(totalRows, 1)
     series.forEach((_, i) => {
       const domainTop = 1 - i * subplotHeight
-      const domainBottom = 1 - (i + 1) * subplotHeight + 0.02
+      const domainBottom = 1 - (i + 1) * subplotHeight + verticalGap
       axes[`yaxis${i === 0 ? '' : i + 1}`] = {
         domain: [domainBottom, domainTop],
-        title: { text: series[i].label, font: { size: 11 } },
+        title: { text: series[i].label, font: { size: titleFontSize } },
+        tickfont: { size: tickFontSize },
         gridcolor: '#30363d',
         zerolinecolor: '#30363d',
         color: '#8b949e',
+        automargin: true,
+      }
+    })
+    // Derived series occupy the bottom slots.
+    ;(derivedSeries ?? []).forEach((s, i) => {
+      const slot = series.length + i
+      const domainTop = 1 - slot * subplotHeight
+      const domainBottom = 1 - (slot + 1) * subplotHeight + verticalGap
+      axes[`yaxis${slot + 1}`] = {
+        domain: [domainBottom, domainTop],
+        title: { text: s.label, font: { size: titleFontSize, color: '#a371f7' } },
+        tickfont: { size: tickFontSize },
+        gridcolor: '#30363d',
+        zerolinecolor: '#30363d',
+        color: '#a371f7',
+        automargin: true,
       }
     })
     // Translate annotations to shapes (vertical dashed lines).
@@ -138,34 +186,59 @@ export default function TopicPlot({
         borderpad: 3,
       }
     })
+    // Per-subplot floor of 140px so even tight stacks stay legible. The
+    // left margin widens with row count because tighter rows need more
+    // automargin headroom for the y-axis labels.
+    const perRowHeight = totalRows >= 8 ? 140 : 180
+    const leftMargin = totalRows >= 8 ? 110 : 80
     return {
       autosize: true,
       paper_bgcolor: '#161b22',
       plot_bgcolor: '#0d1117',
       font: { color: '#e1e4e8', size: 11 },
-      margin: { l: 60, r: 12, t: 12, b: 40 },
-      height: Math.max(200, series.length * 180),
+      margin: { l: leftMargin, r: 12, t: 12, b: 40 },
+      height: Math.max(200, totalRows * perRowHeight),
       hovermode: 'x unified' as const,
       xaxis: {
         title: { text: 'seconds', font: { size: 11 } },
         gridcolor: '#30363d',
         zerolinecolor: '#30363d',
         color: '#8b949e',
-        rangeslider: series.length === 1 ? { visible: false } : undefined,
+        rangeslider: totalRows === 1 ? { visible: false } : undefined,
       },
       ...axes,
       shapes,
       annotations: annotationLabels,
       showlegend: false,
-      dragmode: 'zoom' as const,
+      // Drag-mode is toggled by the parent's "Select range" button. In
+      // 'zoom' (default) drag pans/zooms the time axis; in 'select' a
+      // horizontal drag fires onSelected which the parent uses to open
+      // the trim popover. Plotly's `selectdirection: 'h'` constrains
+      // the brush to the time axis so y-coords don't matter.
+      dragmode: (selectMode ? 'select' : 'zoom') as 'select' | 'zoom',
+      selectdirection: 'h' as const,
     }
-  }, [series, annotations, firstTimestampNs])
+  }, [series, derivedSeries, annotations, firstTimestampNs, selectMode])
 
-  // onRelayout fires on zoom/brush; we forward the range to the parent
-  // so it can re-fetch a narrower slice. xaxis.autorange=true indicates
-  // a reset (double-click) — send nulls.
+  // onRelayout fires on zoom/brush AND on box-select (Plotly 2.x emits
+  // a `selections` array on relayout for the new persistent selections).
+  // We forward both: zoom -> onZoom, select -> onRangeSelected.
   const handleRelayout = useCallback(
     (event: any) => {
+      // Selection path: when dragmode='select', completing a drag emits
+      // event.selections = [{x0, x1, y0, y1, ...}]. Empty array on
+      // deselect.
+      const sel = event?.selections
+      if (Array.isArray(sel) && sel.length > 0 && onRangeSelected) {
+        const last = sel[sel.length - 1]
+        const a = Number(last.x0)
+        const b = Number(last.x1)
+        if (isFinite(a) && isFinite(b) && Math.abs(b - a) > 1e-6) {
+          onRangeSelected(Math.min(a, b), Math.max(a, b))
+          return
+        }
+      }
+      // Zoom path.
       if (!onZoom) return
       if (event['xaxis.autorange']) {
         onZoom(null, null)
@@ -176,7 +249,7 @@ export default function TopicPlot({
         onZoom(Number(event['xaxis.range[0]']), Number(event['xaxis.range[1]']))
       }
     },
-    [onZoom],
+    [onZoom, onRangeSelected],
   )
 
   // Click-to-annotate: Plotly emits plotly_click events with x/y; we
@@ -206,6 +279,24 @@ export default function TopicPlot({
     })
   }, [])
 
+  // Box-selection (shift-drag): forward the time range to the parent
+  // for trim-export. Plotly returns null on deselect; we ignore that.
+  const handleSelected = useCallback(
+    (event: any) => {
+      if (!onRangeSelected) return
+      const xRange = event?.range?.x
+      if (!Array.isArray(xRange) || xRange.length < 2) return
+      const a = Number(xRange[0])
+      const b = Number(xRange[1])
+      if (!isFinite(a) || !isFinite(b)) return
+      const start = Math.min(a, b)
+      const end = Math.max(a, b)
+      if (end - start < 1e-6) return
+      onRangeSelected(start, end)
+    },
+    [onRangeSelected],
+  )
+
   async function saveAnnotation() {
     if (!pendingNote || !noteText.trim()) {
       setPendingNote(null)
@@ -219,15 +310,15 @@ export default function TopicPlot({
       }),
     )
     if (created) {
-      setAnnotations(prev => [...prev, created].sort((a, b) => a.timestamp_ns - b.timestamp_ns))
+      const next = [...annotations, created].sort(
+        (a, b) => a.timestamp_ns - b.timestamp_ns,
+      )
+      onAnnotationsChanged(next)
     }
     setPendingNote(null)
   }
 
-  async function deleteAnnotation(id: number) {
-    const r = await runWithToast(toast, () => api.deleteAnnotation(id))
-    if (r) setAnnotations(prev => prev.filter(a => a.id !== id))
-  }
+  // (Annotation deletion lives in BookmarksPanel; TopicPlot only adds.)
 
   if (series.length === 0) {
     return (
@@ -263,55 +354,18 @@ export default function TopicPlot({
         config={{
           displaylogo: false,
           responsive: true,
-          modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+          // Leave 'select2d' visible — paired with the "Select range"
+          // toolbar button it gives users two ways to enter select mode.
+          modeBarButtonsToRemove: ['lasso2d', 'autoScale2d'],
         }}
         onRelayout={handleRelayout}
         onClick={handleClick}
         onHover={handleHover}
+        onSelected={handleSelected}
       />
 
-      {/* Inline annotation list with delete controls. */}
-      {annotations.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 12, color: '#8b949e', marginBottom: 6 }}>
-            Annotations ({annotations.length})
-          </div>
-          {annotations.map(a => (
-            <div
-              key={a.id}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '4px 8px',
-                borderLeft: '3px solid #f85149',
-                background: '#0d1117',
-                borderRadius: 4,
-                marginBottom: 4,
-                fontSize: 12,
-              }}
-            >
-              <span>
-                <span style={{ color: '#f85149' }}>
-                  t={formatSec(a.timestamp_ns, firstTimestampNs).toFixed(3)}s
-                </span>{' '}
-                — {a.text}
-              </span>
-              <button
-                onClick={() => deleteAnnotation(a.id)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#8b949e',
-                  cursor: 'pointer',
-                }}
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Annotation list lives in the right-rail BookmarksPanel now —
+          duplicate would show the same data twice. */}
 
       {pendingNote && (
         <div

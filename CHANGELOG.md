@@ -8,6 +8,69 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-25
+
+### What's new
+
+Power-features release. Six new dashboard surfaces plus a complete set of runnable exploration scripts so you can try every feature in your terminal before opening the dashboard. The strategically headline feature: **cross-bag overlay** — pick 2+ bags, pick a topic, see them aligned on one chart with per-bag offset sliders. Neither Foxglove nor Rerun does this cleanly today.
+
+### Dashboard — new surfaces
+
+- **Bookmarks panel** (right rail in Explorer) — searchable list of every annotation on the current bag with click-to-jump. Sets a 1-second window in Explorer's zoom around the bookmark.
+- **Per-topic message-density ribbon** — Plotly heatmap above the chart showing message counts in N time bins per topic. Drops, bursts, and missing data are visible at a glance. Highlighted topic floats to the top; current zoom range overlaid as a translucent box; click any cell to jump there.
+- **Math/transform editor** — modal with two tabs:
+  - **Common**: derivative, integral, moving average, low-pass, scale, abs, shift — with appropriate parameter inputs and live preview
+  - **Expression**: free-form Polars expression with sandboxed evaluation (allowlisted `pl.col()` chains, no imports, no dunder access)
+  - Saved transforms append a new dashed-purple subplot to the parent chart so you can compare original and derived
+- **Trim & export popover** — shift-drag a region on the chart, popover appears, pick MCAP / Parquet / CSV / HDF5 / NumPy / Zarr / MP4. MCAP output is byte-identical to a recording over that window (no decode/re-encode round-trip).
+- **Open in Jupyter** button — trims selection (or whole bag) to Parquet under `~/.resurrector/`, copies a Polars `read_parquet(...)` snippet to your clipboard, opens `localhost:8888` in a new tab.
+- **Compare runs page** (`/compare-runs`) — overlay the same topic across N bags. Pick bags as chips, pick a shared topic, see one Plotly trace per bag colored by `bag_label`. Per-bag offset sliders below the chart for sub-second alignment fine-tuning.
+
+### Backend
+
+- **`compute_density(bag_path, topics, bins)`** — computes per-topic message-count histograms over a bag-wide time axis. Powers the dashboard ribbon; cached server-side keyed on `(bag_id, bins, topic, mtime)` so panning is instant.
+- **`trim_to_mcap` / `trim_to_format`** in `core/trim.py` — time-range trim with byte-identical MCAP output (preserves schemas, channels, raw message bytes via `mcap.writer`); other formats delegate to the existing streaming Exporter.
+- **`apply_transform` and `apply_polars_expression`** in `core/transforms.py` — common math ops + AST-walked expression sandbox. Sandbox rejects names other than `pl`, dunder attribute access, imports, and unallowed `pl.*` functions.
+- **`align_bags_by_offset`** in `core/cross_bag.py` — long-format DataFrame builder for cross-bag overlay; LTTB-downsamples each bag's series independently so sparse and dense bags both render smoothly.
+
+### API
+
+- `GET /api/bags/{id}/density?bins=N&topic=...` — per-topic histograms
+- `POST /api/bags/{id}/trim` — time-range trim with format dispatch
+- `POST /api/transforms/preview` — preview a menu op or expression on real topic data, returns LTTB-downsampled result
+- `POST /api/compare/topics` — cross-bag overlay; aligned long-format JSON ready for one trace per bag
+
+### Exploration scripts (new)
+
+Eight runnable scripts under `examples/` that demo every v0.3.1 feature in the terminal — no docs reading required. First run auto-generates a synthetic sample bag at `~/.resurrector/explore_sample.mcap`; subsequent scripts reuse it.
+
+```
+examples/01_density_ribbon.py       — sparkline density per topic
+examples/02_trim_to_mcap.py         — trim a 2-second window 4 ways
+examples/03_math_transforms.py      — derivatives + Polars expression sandbox demo
+examples/04_cross_bag_overlay.py    — overlay two synthetic bags with per-bag offsets
+examples/05_dashboard_walkthrough.py— boots dashboard, opens browser, prints UI tour
+examples/06_bookmarks_via_api.py    — programmatic CRUD on the annotations API
+examples/07_jupyter_export.py       — Parquet + paste-ready Polars snippet
+examples/08_polars_lazy_filter.py   — lazy filter/projection vs. eager comparison
+```
+
+Each script is self-contained; run them in any order. They also serve as a smoke-test suite — running all 8 in sequence exercises every v0.3.1 surface end-to-end.
+
+### Bundle
+
+- Frontend: lazy-loaded `CompareRuns` and `Explorer` keep Plotly out of the main bundle. Main `index.js` is **63KB gz** (no change from v0.3.0); Plotly chunk loads on demand when an Explorer or CompareRuns route is visited.
+
+### Tests
+
+- 70 new Python tests across `test_density`, `test_trim`, `test_transforms_v040`, `test_cross_bag`, `test_api_v040`. Total: **348 passing** (up from 278 in v0.3.0), zero regressions.
+
+### Compatibility
+
+- All v0.3.0 endpoints and behaviors unchanged. v0.3.0 dashboard pages (Library, Explorer, Health, Compare, Search, Datasets, Bridge) all still work as before; v0.3.1 adds onto Explorer and adds the new Compare Runs page next to the existing Compare page.
+
+---
+
 ## [0.3.0] — 2026-04-19
 
 ### What's new
