@@ -33,7 +33,22 @@ class TestScanner:
         assert len(results) == 1
         assert results[0].extension == ".mcap"
         assert results[0].size_bytes > 0
-        assert len(results[0].sha256) == 64
+        assert len(results[0].fingerprint) == 64
+        # fast fingerprint by default — no full hash
+        assert results[0].sha256_full is None
+
+    def test_scan_full_hash(self, healthy_bag):
+        """--full-hash mode populates a real SHA256 alongside the fingerprint."""
+        import hashlib
+        results = scan_path(healthy_bag, full_hash=True)
+        assert results[0].sha256_full is not None
+        assert len(results[0].sha256_full) == 64
+        # Verify it matches a direct hashlib.sha256 over the file bytes.
+        h = hashlib.sha256()
+        with open(healthy_bag, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        assert results[0].sha256_full == h.hexdigest()
 
     def test_scan_directory(self, tmp_dir, healthy_bag, short_bag):
         results = scan_path(tmp_dir)

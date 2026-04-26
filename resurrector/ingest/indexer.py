@@ -18,6 +18,7 @@ from typing import Any
 
 import duckdb
 
+from resurrector.ingest.migrations import apply_pending
 from resurrector.ingest.parser import BagMetadata, TopicInfo
 from resurrector.ingest.scanner import ScannedFile
 
@@ -39,7 +40,14 @@ class BagIndex:
         self._init_schema()
 
     def _init_schema(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist, then apply any pending migrations.
+
+        Order matters: CREATE the v0.3.x base schema first (so an
+        upgrading user's existing tables are referenced unchanged),
+        then run apply_pending() to ALTER them forward. Brand-new
+        databases hit the same code path — they get the v0.3.x base
+        and then the migrations promote them to current.
+        """
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS bags (
                 id INTEGER PRIMARY KEY,
@@ -134,27 +142,32 @@ class BagIndex:
             CREATE SEQUENCE IF NOT EXISTS annotation_id_seq START 1
         """)
 
+        # Apply any schema migrations (e.g. sha256 -> fingerprint rename
+        # for users upgrading from v0.3.x).
+        apply_pending(self.conn)
+
     def upsert_bag(self, scanned: ScannedFile, metadata: BagMetadata) -> int:
         """Insert or update a bag in the index. Returns the bag ID."""
         with self._lock:
             existing = self.conn.execute(
-                "SELECT id, sha256, mtime FROM bags WHERE path = ?",
+                "SELECT id, fingerprint, mtime FROM bags WHERE path = ?",
                 [str(scanned.path)],
             ).fetchone()
 
-            if existing and existing[1] == scanned.sha256 and existing[2] == scanned.mtime:
+            if existing and existing[1] == scanned.fingerprint and existing[2] == scanned.mtime:
                 return existing[0]
 
             if existing:
                 bag_id = existing[0]
                 self.conn.execute("""
                     UPDATE bags SET
-                        format = ?, sha256 = ?, size_bytes = ?,
+                        format = ?, fingerprint = ?, sha256_full = ?, size_bytes = ?,
                         duration_sec = ?, start_time_ns = ?, end_time_ns = ?,
                         message_count = ?, mtime = ?, indexed_at = current_timestamp
                     WHERE id = ?
                 """, [
-                    metadata.format, scanned.sha256, scanned.size_bytes,
+                    metadata.format, scanned.fingerprint, scanned.sha256_full,
+                    scanned.size_bytes,
                     metadata.duration_sec, metadata.start_time_ns, metadata.end_time_ns,
                     metadata.message_count, scanned.mtime, bag_id,
                 ])
@@ -162,11 +175,13 @@ class BagIndex:
             else:
                 bag_id = self.conn.execute("SELECT nextval('bag_id_seq')").fetchone()[0]
                 self.conn.execute("""
-                    INSERT INTO bags (id, path, format, sha256, size_bytes,
-                        duration_sec, start_time_ns, end_time_ns, message_count, mtime)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO bags (id, path, format, fingerprint, sha256_full,
+                        size_bytes, duration_sec, start_time_ns, end_time_ns,
+                        message_count, mtime)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [
-                    bag_id, str(scanned.path), metadata.format, scanned.sha256,
+                    bag_id, str(scanned.path), metadata.format,
+                    scanned.fingerprint, scanned.sha256_full,
                     scanned.size_bytes, metadata.duration_sec, metadata.start_time_ns,
                     metadata.end_time_ns, metadata.message_count, scanned.mtime,
                 ])

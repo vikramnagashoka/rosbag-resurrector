@@ -66,6 +66,14 @@ def scan(
         help="Skip pre-building the frame-offset cache for image topics. "
              "Dashboard/search will build it lazily on first access.",
     )] = False,
+    full_hash: Annotated[bool, typer.Option(
+        "--full-hash",
+        help="Also compute a real SHA256 over every byte of each bag and "
+             "store it in the index (column: sha256_full). Slow on large "
+             "bags. Default behavior uses a fast fingerprint (first 1 MB + "
+             "size) which is sufficient for change detection but is NOT "
+             "a cryptographic digest.",
+    )] = False,
 ):
     """Scan a directory for bag files and index them.
 
@@ -80,7 +88,7 @@ def scan(
     from resurrector.ingest.frame_index import build_frame_offsets, image_topics
     from resurrector.cli.formatters import create_progress, console as fmt_console
 
-    files = scan_path(path)
+    files = scan_path(path, full_hash=full_hash)
     if not files:
         console.print("[yellow]No bag files found.[/yellow]")
         raise typer.Exit()
