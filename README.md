@@ -478,17 +478,17 @@ bf.export(topics=["/imu/data", "/joint_states"],
           downsample_hz=10)
 ```
 
-All export paths stream chunk-by-chunk so memory stays bounded even on multi-gigabyte topics.
+Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Parquet, HDF5, CSV, Zarr, and LeRobot are chunk-streamed (memory bounded by `chunk_size`, independent of topic size). NumPy `.npz` and RLDS accumulate per-topic and are bounded by total converted-array size; for very large topics, prefer Parquet.
 
-| Format | Best For |
-|--------|----------|
-| Parquet | Tabular sensor data, Spark/Polars pipelines |
-| HDF5 | Mixed numeric/image data, MATLAB compatibility |
-| NumPy (.npz) | Jupyter notebook workflows |
-| CSV | Quick inspection, sharing with non-technical team members |
-| Zarr | Cloud-native, chunked, very large datasets |
-| **LeRobot** | Hugging Face LeRobot training (parquet + meta JSON) |
-| **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) |
+| Format | Best For | Streaming |
+|--------|----------|-----------|
+| Parquet | Tabular sensor data, Spark/Polars pipelines | Chunk-streamed |
+| HDF5 | Mixed numeric/image data, MATLAB compatibility | Chunk-streamed |
+| CSV | Quick inspection, sharing with non-technical team members | Chunk-streamed |
+| Zarr | Cloud-native, chunked, very large datasets | Chunk-streamed |
+| **LeRobot** | Hugging Face LeRobot training (parquet + meta JSON) | Chunk-streamed |
+| NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
+| **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
 LeRobot needs no extra deps. RLDS needs `tensorflow`: `pip install rosbag-resurrector[all-exports]`.
 
@@ -617,29 +617,32 @@ resurrector bridge playback experiment.mcap --speed 2.0 --loop --port 9090
 resurrector bridge live --topic /imu/data --port 9090
 ```
 
-## Comparison
+## Where Resurrector fits
 
-| Feature | Resurrector | Foxglove | PlotJuggler | rosbag2_py |
-|---------|------------|----------|-------------|------------|
-| Automatic health checks | Yes (configurable) | No | No | No |
-| Pandas/Polars API | Yes | No | No | Partial |
-| Multi-stream sync | Yes (3 methods) | Visual only | Visual only | No |
-| ML-ready export | Yes (5 formats) | No | CSV only | No |
-| Reproducible datasets | Yes (versioned) | No | No | No |
-| Smart topic grouping | Yes | No | No | No |
-| Web dashboard | Yes | Yes (paid) | No | No |
-| Jupyter integration | Yes (rich HTML) | No | No | No |
-| Directory watch mode | Yes | No | No | No |
-| No ROS install needed | Yes | Yes | Needs ROS | Needs ROS |
-| DuckDB search index | Yes | No | No | No |
-| Streaming export (OOM-safe) | Yes | No | No | No |
-| Batch processing | Yes | No | No | Yes |
-| Semantic frame search | Yes (CLIP) | No | No | No |
-| Video/image export | Yes (MP4/PNG/JPEG) | No | No | No |
-| CompressedImage support | Yes | Yes | Yes | Yes |
-| WebSocket bridge | Yes (PlotJuggler compat) | Foxglove Bridge | PlotJuggler Bridge | No |
-| Bag playback streaming | Yes (0.1x–20x) | No | No | No |
-| Structured logging | Yes | N/A | N/A | No |
+Foxglove, PlotJuggler, and `rosbags` are all excellent at what they do. Resurrector isn't trying to displace them — it's a *bag-as-dataframe* analysis workbench, optimized for the parts those tools don't focus on:
+
+- **Treat a bag like a Pandas DataFrame.** `bf["/imu/data"].to_polars()` and you're in your normal data-analysis flow. No protobuf, no ROS imports.
+- **Health checks built in.** Catch dropped messages, rate drops, and gaps without writing a custom validator. Configurable thresholds.
+- **Multi-stream sync.** `bf.sync(["/imu", "/joint_states"], method="nearest")` returns one aligned DataFrame.
+- **ML-ready export.** Parquet, HDF5, CSV, Zarr, NumPy, plus first-class **LeRobot** and **RLDS** writers for Hugging Face / OpenX-style training pipelines.
+- **Cross-bag overlay.** Compare the same topic across multiple bags on one chart — the kind of "did the new firmware change the gait?" workflow nobody else handles cleanly.
+- **Memory bounds you can trust.** See [Performance contract](#performance-contract).
+- **PlotJuggler-compatible WebSocket bridge.** When the ad-hoc analysis is done, hand the data straight to PlotJuggler for live plotting.
+
+For interactive 3D scene viewing, TF tree visualization, marker rendering, and live ROS connection, **use Foxglove**. For super-fast OpenGL time-series plotting with millions of points, **use PlotJuggler**. For pure-Python rosbag1/rosbag2 read+write with custom message types, **use [rosbags](https://pypi.org/project/rosbags/)**.
+
+A more honest comparison, narrowed to what Resurrector is built for:
+
+| Capability | Resurrector | Foxglove | PlotJuggler | rosbags |
+|---|---|---|---|---|
+| DataFrame API on a bag (Polars/Pandas) | Yes | No | No | Partial |
+| Built-in health checks (dropped msgs, rate drops, gaps) | Yes | No | No | No |
+| Multi-stream timestamp sync | Yes (3 methods) | Visual only | Visual only | No |
+| ML-export to LeRobot / RLDS | Yes | No | No | No |
+| Cross-bag overlay (same topic, multiple bags) | Yes | No | No | No |
+| Semantic frame search (CLIP) | Yes | No | No | No |
+| Versioned dataset bundles | Yes | No | No | No |
+| Bounded-memory streaming (per the [contract](#performance-contract)) | Yes | N/A | N/A | Partial |
 
 ## Supported Formats
 
@@ -664,12 +667,22 @@ resurrector/
 ```
 
 **Design principles:**
-1. **Lazy by default** — never loads full bags into memory
+1. **Bounded memory** — see [Performance contract](#performance-contract) for the exact rule, enforced by tests
 2. **Batteries included** — health checks, sync, transforms, export with zero config
 3. **Escape hatches** — `.to_polars()` / `.to_pandas()` / `.to_numpy()` to drop into familiar tools
 4. **ROS-aware but not ROS-dependent** — parses MCAP directly, no ROS installation needed
 5. **Fast** — Polars for processing, DuckDB for queries, lazy evaluation
 6. **Reproducible** — versioned datasets with manifests and auto-generated documentation
+
+## Performance contract
+
+> **Memory is bounded by the configured chunk size, not by bag size, topic size, or export size.**
+
+That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and the chunk-streaming export formats (Parquet, HDF5, CSV, Zarr, LeRobot, RLDS).
+
+Two formats are explicit exceptions: **NumPy `.npz`** is bounded by total converted-array size and hard-capped at 1 M rows (use Parquet for larger topics — clear `LargeTopicError` is raised). The eager **`bf["/topic"].to_polars()`** path materializes the full topic and refuses topics > 1 M messages unless the user passes `force=True`.
+
+The contract is verified by [tests/test_streaming_oom.py](tests/test_streaming_oom.py), which builds a 10 M-message synthetic bag and asserts peak RSS deltas across every workflow. Run it locally with `pytest -m slow`.
 
 ## Development
 
