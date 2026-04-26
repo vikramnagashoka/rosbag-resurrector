@@ -111,9 +111,34 @@ export default function JupyterButton({
         toast.push('warn', `Snippet (copy manually): ${snippet}`)
       }
 
-      // Try to open Jupyter; opens regardless of whether it's running so
-      // the user gets a clear "no server" page if it isn't.
-      window.open('http://localhost:8888/', '_blank')
+      // Probe the default Jupyter port via a no-cors fetch. The
+      // promise resolves on connection success and rejects on
+      // ECONNREFUSED, which lets us distinguish "Jupyter is up" from
+      // "nothing is listening" without dragging the user to a generic
+      // browser error page. AbortController caps the wait so a slow
+      // network doesn't make the button feel hung.
+      const controller = new AbortController()
+      const probeTimeout = setTimeout(() => controller.abort(), 1500)
+      let jupyterUp = false
+      try {
+        await fetch('http://localhost:8888/', {
+          mode: 'no-cors',
+          signal: controller.signal,
+        })
+        jupyterUp = true
+      } catch {
+        jupyterUp = false
+      }
+      clearTimeout(probeTimeout)
+
+      if (jupyterUp) {
+        window.open('http://localhost:8888/', '_blank')
+      } else {
+        toast.push(
+          'warn',
+          `No Jupyter server at localhost:8888. Parquet is at ${r.output} — paste the snippet into any Python REPL, or run "jupyter notebook" first.`,
+        )
+      }
     } finally {
       setBusy(false)
     }
