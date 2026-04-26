@@ -83,15 +83,23 @@ macos: build-base
 ubuntu: build-base
 	bash $(PKG)/ubuntu/build_deb.sh $(VERSION)
 
-# --- With obfuscation (production builds) ---
+# --- Production builds ---
+#
+# Originally these went through Pyarmor obfuscation when we were
+# considering a closed-source binary. The project is MIT-licensed
+# open source on GitHub, so source obfuscation adds zero protection
+# (anyone can read the repo) while costing real money in Pyarmor
+# license fees once the file count crosses the free tier — which
+# happened in v0.3.1. Drop obfuscation; build straight from source.
 
-macos-release: obfuscate
-	@echo "=== Building obfuscated macOS release ==="
+macos-release:
+	@echo "=== Building macOS release ==="
 	cd $(ROOT) && pyinstaller \
 		--onefile \
 		--name resurrector \
 		--distpath $(DIST)/macos \
 		--workpath $(DIST)/build \
+		--specpath $(DIST) \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \
@@ -102,19 +110,23 @@ macos-release: obfuscate
 		--hidden-import mcap.reader \
 		--hidden-import polars \
 		--hidden-import duckdb \
+		--hidden-import starlette.responses \
 		--exclude-module torch \
 		--exclude-module sentence_transformers \
+		--exclude-module cv2 \
+		--exclude-module rclpy \
 		--exclude-module pytest \
-		$(DIST)/obfuscated/resurrector/cli/main.py
+		resurrector/cli/main.py
 	bash $(PKG)/macos/create_dmg.sh $(VERSION)
 
-ubuntu-release: obfuscate
-	@echo "=== Building obfuscated Ubuntu release ==="
+ubuntu-release:
+	@echo "=== Building Ubuntu release ==="
 	cd $(ROOT) && pyinstaller \
 		--onefile \
 		--name resurrector \
 		--distpath $(DIST)/ubuntu \
 		--workpath $(DIST)/build \
+		--specpath $(DIST) \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \
@@ -125,10 +137,13 @@ ubuntu-release: obfuscate
 		--hidden-import mcap.reader \
 		--hidden-import polars \
 		--hidden-import duckdb \
+		--hidden-import starlette.responses \
 		--exclude-module torch \
 		--exclude-module sentence_transformers \
+		--exclude-module cv2 \
+		--exclude-module rclpy \
 		--exclude-module pytest \
-		$(DIST)/obfuscated/resurrector/cli/main.py
+		resurrector/cli/main.py
 	bash $(PKG)/ubuntu/build_deb.sh $(VERSION)
 
 # --- Clean ---
