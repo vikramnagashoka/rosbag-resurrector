@@ -76,6 +76,10 @@ export default function Explorer() {
   const [showTransformEditor, setShowTransformEditor] = useState(false)
   const [derivedSeries, setDerivedSeries] = useState<PlotSeries[]>([])
   const [trimRange, setTrimRange] = useState<{ start: number; end: number } | null>(null)
+  // When true, the chart's drag-mode switches to box-select so the
+  // user's next drag opens the trim popover. Auto-disengages after a
+  // selection succeeds so subsequent drags are pan/zoom again.
+  const [selectMode, setSelectMode] = useState(false)
 
   // Lifted annotations state — owned here so TopicPlot and BookmarksPanel
   // share one source of truth. Without this, the panel's internal cache
@@ -399,21 +403,68 @@ export default function Explorer() {
                     <>
                       <div
                         style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
                           fontSize: 12,
                           color: '#8b949e',
                           marginBottom: 8,
                         }}
                       >
-                        {topicData.total.toLocaleString()} messages
-                        {topicData.downsampled &&
-                          ` · downsampled to ${topicData.data.length}`}
-                        {xRangeSec &&
-                          ` · zoomed to ${xRangeSec.start.toFixed(2)}-${xRangeSec.end.toFixed(2)}s`}
-                        {derivedSeries.length > 0 &&
-                          ` · ${derivedSeries.length} derived series`}
-                        <span style={{ float: 'right', color: '#484f58' }}>
-                          tip: shift+drag to select a range for trim/export
+                        <span>
+                          {topicData.total.toLocaleString()} messages
+                          {topicData.downsampled &&
+                            ` · downsampled to ${topicData.data.length}`}
+                          {xRangeSec &&
+                            ` · zoomed to ${xRangeSec.start.toFixed(2)}-${xRangeSec.end.toFixed(2)}s`}
+                          {derivedSeries.length > 0 &&
+                            ` · ${derivedSeries.length} derived series`}
                         </span>
+                        <span style={{ flex: 1 }} />
+                        <button
+                          onClick={() => setSelectMode(prev => !prev)}
+                          title={
+                            selectMode
+                              ? 'Click to exit select mode (back to zoom)'
+                              : 'Click, then drag horizontally on the chart to pick a range'
+                          }
+                          style={{
+                            background: selectMode ? '#1f6feb' : '#21262d',
+                            color: '#fff',
+                            border: selectMode ? '1px solid #1f6feb' : '1px solid #30363d',
+                            borderRadius: 6,
+                            padding: '4px 12px',
+                            cursor: 'pointer',
+                            fontSize: 12,
+                          }}
+                        >
+                          {selectMode ? '✓ Drag to select range' : 'Select range…'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            // Use current zoom window if any, else
+                            // a 1-second window at the start of the bag.
+                            const start = xRangeSec?.start ?? 0
+                            const end = xRangeSec?.end ?? Math.max(1, start + 1)
+                            setTrimRange({ start, end })
+                          }}
+                          title={
+                            xRangeSec
+                              ? 'Use the current zoom range'
+                              : 'Open trim popover with default range'
+                          }
+                          style={{
+                            background: '#21262d',
+                            color: '#e1e4e8',
+                            border: '1px solid #30363d',
+                            borderRadius: 6,
+                            padding: '4px 12px',
+                            cursor: 'pointer',
+                            fontSize: 12,
+                          }}
+                        >
+                          {xRangeSec ? 'Trim current zoom…' : 'Trim manually…'}
+                        </button>
                       </div>
                       <TopicPlot
                         bagId={bagId}
@@ -425,7 +476,14 @@ export default function Explorer() {
                           if (s === null || e === null) setXRangeSec(null)
                           else setXRangeSec({ start: s, end: e })
                         }}
-                        onRangeSelected={(s, e) => setTrimRange({ start: s, end: e })}
+                        onRangeSelected={(s, e) => {
+                          setTrimRange({ start: s, end: e })
+                          // Auto-exit select mode after a successful pick
+                          // so subsequent drags pan/zoom rather than re-
+                          // opening the popover.
+                          setSelectMode(false)
+                        }}
+                        selectMode={selectMode}
                         annotations={annotations}
                         onAnnotationsChanged={setAnnotations}
                       />

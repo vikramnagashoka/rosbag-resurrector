@@ -55,6 +55,10 @@ interface Props {
   // re-render together.
   annotations: Annotation[]
   onAnnotationsChanged: (next: Annotation[]) => void
+  // When true, switch the chart drag mode from zoom to box-select so
+  // the next horizontal drag fires onRangeSelected. Toggled by the
+  // "Select range" button in the parent toolbar.
+  selectMode?: boolean
 }
 
 function formatSec(ts_ns: number, first_ns: number): number {
@@ -71,6 +75,7 @@ export default function TopicPlot({
   firstTimestampNs,
   annotations,
   onAnnotationsChanged,
+  selectMode = false,
 }: Props) {
   const toast = useErrorToast()
   const [pendingNote, setPendingNote] = useState<{ ts_ns: number; label: string } | null>(null)
@@ -205,13 +210,15 @@ export default function TopicPlot({
       shapes,
       annotations: annotationLabels,
       showlegend: false,
-      // Mouse drag = zoom, shift+drag = box-select for trim. Plotly's
-      // selectdirection 'h' constrains the brush to the time axis so
-      // y-coords don't matter.
-      dragmode: 'zoom' as const,
+      // Drag-mode is toggled by the parent's "Select range" button. In
+      // 'zoom' (default) drag pans/zooms the time axis; in 'select' a
+      // horizontal drag fires onSelected which the parent uses to open
+      // the trim popover. Plotly's `selectdirection: 'h'` constrains
+      // the brush to the time axis so y-coords don't matter.
+      dragmode: (selectMode ? 'select' : 'zoom') as 'select' | 'zoom',
       selectdirection: 'h' as const,
     }
-  }, [series, derivedSeries, annotations, firstTimestampNs])
+  }, [series, derivedSeries, annotations, firstTimestampNs, selectMode])
 
   // onRelayout fires on zoom/brush; we forward the range to the parent
   // so it can re-fetch a narrower slice. xaxis.autorange=true indicates
@@ -333,7 +340,9 @@ export default function TopicPlot({
         config={{
           displaylogo: false,
           responsive: true,
-          modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+          // Leave 'select2d' visible — paired with the "Select range"
+          // toolbar button it gives users two ways to enter select mode.
+          modeBarButtonsToRemove: ['lasso2d', 'autoScale2d'],
         }}
         onRelayout={handleRelayout}
         onClick={handleClick}

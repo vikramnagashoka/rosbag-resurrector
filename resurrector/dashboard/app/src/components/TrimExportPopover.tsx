@@ -49,6 +49,10 @@ export default function TrimExportPopover({
   )
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<TrimResponse | null>(null)
+  // Editable start/end seeded from props so the user can fine-tune
+  // after picking via select-drag, current-zoom, or manual open.
+  const [start, setStart] = useState<number>(startSec)
+  const [end, setEnd] = useState<number>(endSec)
 
   function toggleTopic(t: string) {
     setTopics(prev => (prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]))
@@ -68,8 +72,8 @@ export default function TrimExportPopover({
   }
 
   async function handleExport() {
-    if (endSec <= startSec) {
-      toast.push('error', 'Selection has zero or negative duration')
+    if (end <= start) {
+      toast.push('error', 'End must be greater than start')
       return
     }
     if (topics.length === 0) {
@@ -85,8 +89,8 @@ export default function TrimExportPopover({
       toast,
       () =>
         api.trimRange(bagId, {
-          start_sec: startSec,
-          end_sec: endSec,
+          start_sec: start,
+          end_sec: end,
           topics,
           format,
           output_path: outputPath,
@@ -133,10 +137,37 @@ export default function TrimExportPopover({
         <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>
           Trim &amp; export
         </h2>
-        <p style={{ color: '#8b949e', fontSize: 13, marginBottom: 16 }}>
-          Selected window: <strong>{startSec.toFixed(3)}s</strong> →{' '}
-          <strong>{endSec.toFixed(3)}s</strong> ({(endSec - startSec).toFixed(3)}s)
+        <p style={{ color: '#8b949e', fontSize: 13, marginBottom: 12 }}>
+          Window:{' '}
+          <strong style={{ color: '#e1e4e8' }}>
+            {(end - start).toFixed(3)}s
+          </strong>
         </p>
+
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+          <label style={{ flex: 1 }}>
+            <span style={{ fontSize: 13, color: '#8b949e' }}>Start (sec)</span>
+            <input
+              type="number"
+              value={start}
+              step={0.05}
+              min={0}
+              onChange={e => setStart(Number(e.target.value))}
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            />
+          </label>
+          <label style={{ flex: 1 }}>
+            <span style={{ fontSize: 13, color: '#8b949e' }}>End (sec)</span>
+            <input
+              type="number"
+              value={end}
+              step={0.05}
+              min={0}
+              onChange={e => setEnd(Number(e.target.value))}
+              style={{ ...inputStyle, width: '100%', marginTop: 4 }}
+            />
+          </label>
+        </div>
 
         <label style={{ display: 'block', marginBottom: 12 }}>
           <span style={{ fontSize: 13, color: '#8b949e' }}>Format</span>
