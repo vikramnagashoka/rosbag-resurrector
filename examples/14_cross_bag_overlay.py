@@ -30,7 +30,7 @@ def main() -> None:
     second = out / "second_run.mcap"
     if not second.exists():
         print(f"  Creating a second synthetic bag at {second}...")
-        from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+        from resurrector.demo.sample_bag import BagConfig, generate_bag
         generate_bag(second, BagConfig(duration_sec=4.0))
 
     print(f"  Bag A: {primary.name}")

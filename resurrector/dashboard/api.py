@@ -161,15 +161,14 @@ async def generate_demo_bag_api(payload: dict[str, Any] | None = None) -> dict[s
     output = (Path.home() / ".resurrector" / f"{name}.mcap").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Inline-import the test fixture generator so we don't pull it
-    # eagerly when nobody calls this endpoint.
+    # Inline-import so the heavy mcap.writer dep doesn't load eagerly
+    # for users who never call this endpoint.
     try:
-        from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+        from resurrector.demo.sample_bag import BagConfig, generate_bag
     except ImportError as e:
         raise HTTPException(
             500,
-            "Demo bag generator not available — make sure the project is "
-            f"installed with `pip install -e \".[dev]\"`. ({e})",
+            f"Demo bag generator not available: {e}",
         )
 
     try:

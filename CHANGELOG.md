@@ -8,6 +8,24 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-26
+
+### Critical fix — `resurrector demo` was broken on PyPI installs
+
+v0.3.1 worked from source (`pip install -e .`) but the `resurrector demo` command and the dashboard's "Generate demo bag" button both crashed on PyPI installs with `ModuleNotFoundError: No module named 'tests'`. The synthetic-bag generator lived under `tests/fixtures/` which doesn't ship in the wheel.
+
+This release moves the generator to `resurrector/demo/sample_bag.py` so it ships with the package. A back-compat shim under `tests/fixtures/generate_test_bags.py` re-exports it so historical test imports keep working.
+
+### `resurrector --version`
+
+Added a top-level `--version` / `-V` flag that prints the installed version and exits. Typer doesn't add this automatically.
+
+### Other
+
+- 348 tests passing.
+
+---
+
 ## [0.3.1] — 2026-04-25
 
 ### What's new

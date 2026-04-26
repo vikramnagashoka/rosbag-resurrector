@@ -40,7 +40,7 @@ def ensure_sample_bag(duration_sec: float = 5.0) -> Path:
     if SAMPLE_BAG.exists():
         return SAMPLE_BAG
     print(f"  Generating demo bag at {SAMPLE_BAG} (~{int(duration_sec)}s)...")
-    from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+    from resurrector.demo.sample_bag import BagConfig, generate_bag
     generate_bag(SAMPLE_BAG, BagConfig(duration_sec=duration_sec))
     print(f"  [OK] Created {SAMPLE_BAG.stat().st_size // 1024} KB bag\n")
     return SAMPLE_BAG

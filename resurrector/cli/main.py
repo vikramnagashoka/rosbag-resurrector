@@ -17,6 +17,34 @@ app = typer.Typer(
 console = Console()
 
 
+def _print_version_and_exit(value: bool) -> None:
+    """`--version` callback. Typer doesn't add this automatically."""
+    if not value:
+        return
+    from resurrector import __version__
+    console.print(f"resurrector {__version__}")
+    raise typer.Exit()
+
+
+@app.callback()
+def _root_callback(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show the installed resurrector version and exit.",
+            callback=_print_version_and_exit,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Root-level options shared across every subcommand."""
+    # Only here so Typer wires up the --version flag at the top level;
+    # the actual handling lives in _print_version_and_exit.
+    pass
+
+
 def _setup_logging(verbose: bool = False, log_file: str | None = None):
     """Initialize logging based on CLI flags."""
     from resurrector.logging_config import setup_logging
@@ -822,7 +850,7 @@ def demo(
     Useful as a smoke test or to show what the tool can do without
     needing your own data.
     """
-    from tests.fixtures.generate_test_bags import generate_bag, BagConfig
+    from resurrector.demo.sample_bag import generate_bag, BagConfig
 
     output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
     output.parent.mkdir(parents=True, exist_ok=True)

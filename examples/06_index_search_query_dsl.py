@@ -39,7 +39,7 @@ def main() -> None:
     primary = ensure_sample_bag()
     second = out / "second_bag.mcap"
     if not second.exists():
-        from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+        from resurrector.demo.sample_bag import BagConfig, generate_bag
         generate_bag(second, BagConfig(duration_sec=4.0))
 
     # Use a scratch DB so we don't touch the user's real index.
