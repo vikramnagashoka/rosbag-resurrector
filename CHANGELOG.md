@@ -40,22 +40,42 @@ Power-features release. Six new dashboard surfaces plus a complete set of runnab
 - `POST /api/transforms/preview` — preview a menu op or expression on real topic data, returns LTTB-downsampled result
 - `POST /api/compare/topics` — cross-bag overlay; aligned long-format JSON ready for one trace per bag
 
-### Exploration scripts (new)
+### Exploration scripts (new) — 17 runnable demos covering every important feature
 
-Eight runnable scripts under `examples/` that demo every v0.3.1 feature in the terminal — no docs reading required. First run auto-generates a synthetic sample bag at `~/.resurrector/explore_sample.mcap`; subsequent scripts reuse it.
+A new `examples/` directory with 17 standalone scripts that demo every important feature in the terminal — no docs reading required. First run auto-generates a synthetic sample bag at `~/.resurrector/explore_sample.mcap`; subsequent scripts reuse it.
+
+**Core features (start here):**
 
 ```
-examples/01_density_ribbon.py       — sparkline density per topic
-examples/02_trim_to_mcap.py         — trim a 2-second window 4 ways
-examples/03_math_transforms.py      — derivatives + Polars expression sandbox demo
-examples/04_cross_bag_overlay.py    — overlay two synthetic bags with per-bag offsets
-examples/05_dashboard_walkthrough.py— boots dashboard, opens browser, prints UI tour
-examples/06_bookmarks_via_api.py    — programmatic CRUD on the annotations API
-examples/07_jupyter_export.py       — Parquet + paste-ready Polars snippet
-examples/08_polars_lazy_filter.py   — lazy filter/projection vs. eager comparison
+examples/01_bag_frame_basics.py        — pandas-like API, time slice, message iter
+examples/02_health_checks.py           — 0-100 quality score + custom HealthConfig
+examples/03_multi_stream_sync.py       — nearest / interpolate / sample-and-hold
+examples/04_image_video_export.py      — iter_images, PNG sequence, MP4 encode
+examples/05_ml_export_formats.py       — Parquet / HDF5 / NumPy / LeRobot / RLDS
+examples/06_index_search_query_dsl.py  — DuckDB index + query DSL + stale paths
+examples/07_semantic_frame_search.py   — CLIP embed + cosine search + clips
+examples/08_datasets_versioning.py     — versioned datasets with manifest + auto-README
+examples/09_plotjuggler_bridge.py      — start bridge subprocess + connection URLs
 ```
 
-Each script is self-contained; run them in any order. They also serve as a smoke-test suite — running all 8 in sequence exercises every v0.3.1 surface end-to-end.
+**v0.3.1 power features:**
+
+```
+examples/11_density_ribbon.py          — sparkline density per topic
+examples/12_trim_to_mcap.py            — trim a 2-second window 4 ways
+examples/13_math_transforms.py         — derivatives + Polars expression sandbox
+examples/14_cross_bag_overlay.py       — overlay two synthetic bags with per-bag offsets
+examples/15_dashboard_walkthrough.py   — boots dashboard, opens browser, prints UI tour
+examples/16_bookmarks_via_api.py       — programmatic CRUD on the annotations API
+examples/17_jupyter_export.py          — Parquet + paste-ready Polars snippet
+examples/18_polars_lazy_filter.py      — lazy filter/projection vs eager comparison
+```
+
+Each script is self-contained, runs in <10 seconds, and auto-skips with install instructions when an optional extra (CLIP, OpenCV, etc.) isn't installed. They also serve as a smoke-test suite — running them in sequence exercises every major surface of the toolkit.
+
+### Bugfixes shipped during smoke-testing
+
+- **`dataset_readme.py` Windows encoding crash** — README.md was written without an explicit encoding, so the cp1252 default on Windows couldn't represent the `→` and em-dashes in the auto-generated README. Forced `encoding="utf-8"` so dataset export works on every platform.
 
 ### Bundle
 
