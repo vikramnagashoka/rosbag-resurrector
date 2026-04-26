@@ -19,10 +19,16 @@ A pandas-like data analysis tool for **ROS 2 (MCAP)** bag files — with automat
 ### Python (recommended — works on Linux, macOS, Windows)
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install rosbag-resurrector
 ```
 
-Requires Python 3.10+. No ROS required. Optional extras unlock specific features (vision/CLIP, live ROS 2 bridge, additional export formats) — see [Optional Extras](#optional-extras) below.
+Requires Python 3.10+. No ROS required.
+
+The venv step matters on macOS (Sonoma+) and recent Ubuntu/Debian, where a bare `pip install` outside a virtualenv fails with `error: externally-managed-environment` (PEP 668). If you already manage Python environments with `uv`, `pipx`, `poetry`, or conda, install with whatever you normally use — `pipx install rosbag-resurrector` is a good one-liner if you only need the CLI.
+
+Optional extras unlock specific features (vision/CLIP, live ROS 2 bridge, additional export formats) — see [Optional Extras](#optional-extras) below.
 
 ### Standalone binaries
 
