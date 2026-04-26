@@ -16,11 +16,35 @@ A pandas-like data analysis tool for **ROS 2 (MCAP)** bag files — with automat
 
 ## Install
 
+### Python (recommended — works on Linux, macOS, Windows)
+
 ```bash
 pip install rosbag-resurrector
 ```
 
-That's the whole install. No ROS required. Optional extras unlock specific features (vision/CLIP, live ROS 2 bridge, additional export formats) — see [Optional Extras](#optional-extras) below.
+Requires Python 3.10+. No ROS required. Optional extras unlock specific features (vision/CLIP, live ROS 2 bridge, additional export formats) — see [Optional Extras](#optional-extras) below.
+
+### Standalone binaries
+
+Pre-built single-file binaries are attached to every [GitHub release](https://github.com/vikramnagashoka/rosbag-resurrector/releases) — useful if you want to install without setting up Python at all.
+
+**Ubuntu / Debian (`.deb`):**
+
+```bash
+curl -LO https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest/download/rosbag-resurrector_0.3.2_amd64.deb
+sudo dpkg -i rosbag-resurrector_0.3.2_amd64.deb
+sudo apt-get install -f   # resolve any missing system libraries
+```
+
+> **Note:** the `.deb` filename includes the version. Check the [latest release page](https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest) for the current filename if the URL above 404s after a new release.
+
+**macOS (`.dmg`):**
+
+Download `RosBag-Resurrector-vX.Y.Z-macos.dmg` from the [latest release](https://github.com/vikramnagashoka/rosbag-resurrector/releases/latest), open it, drag the app to Applications.
+
+> **Note:** the macOS binary isn't notarized yet, so on first launch you'll need to right-click → Open and confirm.
+
+For repeated installs across many machines, `pip install rosbag-resurrector` is still the path of least resistance. The standalone binaries shine when you want a one-file deployable.
 
 ## First 10 minutes
 
