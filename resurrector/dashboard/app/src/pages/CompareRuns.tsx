@@ -29,6 +29,26 @@ const TRACE_COLORS = [
   '#ee9a3a',
 ]
 
+// Columns we never auto-select for the y-axis even if they are
+// nominally numeric — they're metadata (sequence numbers, raw
+// nanosecond timestamps, frame ids) that produce visually useless
+// step-function plots.
+const METADATA_COLUMN_PATTERNS = [
+  /^header\.stamp_/i,
+  /^header\.frame_id$/i,
+  /^header\.seq$/i,
+  /^_pixel_data_offset$/,
+  /^_compressed_data_offset$/,
+  /^data_length$/,
+  /^step$/,
+  /^encoding$/i,
+  /^is_bigendian$/i,
+]
+
+function isMetadataColumn(name: string): boolean {
+  return METADATA_COLUMN_PATTERNS.some(p => p.test(name))
+}
+
 export default function CompareRuns() {
   const toast = useErrorToast()
   const [allBags, setAllBags] = useState<Bag[]>([])
@@ -38,6 +58,12 @@ export default function CompareRuns() {
   const [offsets, setOffsets] = useState<Record<number, number>>({})
   const [overlay, setOverlay] = useState<CompareTopicsResponse | null>(null)
   const [loadingOverlay, setLoadingOverlay] = useState(false)
+  // User-selected column; null until overlay loads then defaults to
+  // first non-metadata numeric column.
+  const [selectedColumn, setSelectedColumn] = useState<string | null>(null)
+  // When true and exactly 2 bags, render a third trace = bagB - bagA
+  // sampled on the union of timestamps. Surfaces *where* runs diverge.
+  const [showDiff, setShowDiff] = useState(false)
 
   useEffect(() => {
     runWithToast(toast, () => api.listBags()).then(r => {
@@ -112,41 +138,105 @@ export default function CompareRuns() {
     if (!overlay) return []
     // Group rows by bag_label and pick the first numeric column other
     // than relative_t_sec / timestamp_ns to plot.
-    const numericCols = overlay.columns.filter(c => {
-      if (c === 'bag_label' || c === 'relative_t_sec' || c === 'timestamp_ns') return false
-      const sample = overlay.data.find(r => typeof r[c] === 'number')
-      return sample !== undefined
-    })
-    const valueCol = numericCols[0]
+    const valueCol = selectedColumn
     if (!valueCol) return []
     const traces: any[] = []
+    // Per-bag traces.
+    const perBagSeries: Array<{ label: string; xs: number[]; ys: number[] }> = []
     overlay.labels.forEach((label, i) => {
       const rows = overlay.data.filter(r => r.bag_label === label)
+      const xs = rows.map(r => Number(r.relative_t_sec))
+      const ys = rows.map(r => Number(r[valueCol]))
+      perBagSeries.push({ label, xs, ys })
       traces.push({
         type: 'scattergl' as const,
         mode: 'lines' as const,
         name: label,
-        x: rows.map(r => Number(r.relative_t_sec)),
-        y: rows.map(r => Number(r[valueCol])),
+        x: xs,
+        y: ys,
         line: { color: TRACE_COLORS[i % TRACE_COLORS.length], width: 1.4 },
         hovertemplate: `<b>${label}</b><br>t=%{x:.3f}s<br>v=%{y:.4f}<extra></extra>`,
       })
     })
+    // Diff trace = B - A. Only sensible for exactly 2 bags. We resample
+    // bag B onto bag A's timestamps via linear interpolation so the
+    // subtraction is well-defined when the runs have different rates.
+    if (showDiff && perBagSeries.length === 2) {
+      const [a, b] = perBagSeries
+      const diffs: number[] = []
+      let bIdx = 0
+      for (const ax of a.xs) {
+        // Advance bIdx so b.xs[bIdx] <= ax < b.xs[bIdx+1]
+        while (bIdx + 1 < b.xs.length && b.xs[bIdx + 1] < ax) bIdx++
+        const x0 = b.xs[bIdx]
+        const x1 = b.xs[bIdx + 1] ?? x0
+        const y0 = b.ys[bIdx]
+        const y1 = b.ys[bIdx + 1] ?? y0
+        const span = x1 - x0
+        const interp = span === 0 ? y0 : y0 + ((ax - x0) / span) * (y1 - y0)
+        diffs.push(interp - a.ys[a.xs.indexOf(ax)])
+      }
+      traces.push({
+        type: 'scattergl' as const,
+        mode: 'lines' as const,
+        name: `${b.label} − ${a.label}`,
+        x: a.xs,
+        y: diffs,
+        line: { color: '#f85149', width: 1.4, dash: 'dash' as const },
+        yaxis: 'y2',
+        hovertemplate: `<b>diff</b><br>t=%{x:.3f}s<br>Δv=%{y:.4f}<extra></extra>`,
+      })
+    }
     return traces
+  }, [overlay, selectedColumn, showDiff])
+
+  // Available numeric columns + the auto-default we prefer (first
+  // non-metadata one). This drives the column picker dropdown.
+  const numericColumns = useMemo(() => {
+    if (!overlay) return [] as string[]
+    return overlay.columns.filter(c => {
+      if (c === 'bag_label' || c === 'relative_t_sec' || c === 'timestamp_ns') return false
+      const sample = overlay.data.find(r => typeof r[c] === 'number')
+      return sample !== undefined
+    })
   }, [overlay])
 
-  const valueColLabel = useMemo(() => {
-    if (!overlay) return ''
-    return (
-      overlay.columns.find(
-        c =>
-          c !== 'bag_label' &&
-          c !== 'relative_t_sec' &&
-          c !== 'timestamp_ns' &&
-          overlay.data.some(r => typeof r[c] === 'number'),
-      ) ?? ''
-    )
+  const usefulColumns = useMemo(
+    () => numericColumns.filter(c => !isMetadataColumn(c)),
+    [numericColumns],
+  )
+
+  // Re-default the column when the overlay refreshes so we don't keep
+  // pointing at a column the new payload doesn't have.
+  useEffect(() => {
+    if (!overlay) return
+    if (selectedColumn && numericColumns.includes(selectedColumn)) return
+    setSelectedColumn(usefulColumns[0] ?? numericColumns[0] ?? null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overlay])
+
+  // Per-bag summary stats for the selected column. Mean / min / max /
+  // std — the table that lives below the chart.
+  const stats = useMemo(() => {
+    if (!overlay || !selectedColumn) return [] as Array<{
+      label: string; n: number; mean: number; min: number; max: number; std: number
+    }>
+    return overlay.labels.map(label => {
+      const ys = overlay.data
+        .filter(r => r.bag_label === label)
+        .map(r => Number(r[selectedColumn]))
+        .filter(v => Number.isFinite(v))
+      const n = ys.length
+      if (n === 0) {
+        return { label, n: 0, mean: NaN, min: NaN, max: NaN, std: NaN }
+      }
+      const mean = ys.reduce((a, b) => a + b, 0) / n
+      const min = Math.min(...ys)
+      const max = Math.max(...ys)
+      const variance = ys.reduce((a, b) => a + (b - mean) ** 2, 0) / n
+      return { label, n, mean, min, max, std: Math.sqrt(variance) }
+    })
+  }, [overlay, selectedColumn])
 
   return (
     <div>
@@ -329,24 +419,118 @@ export default function CompareRuns() {
             </div>
           ) : (
             <>
+              {/* Column picker + diff toggle row */}
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  gap: 12,
+                  marginBottom: 12,
+                }}
+              >
+                <label
+                  style={{
+                    fontSize: 12,
+                    color: '#8b949e',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  Column:
+                  <select
+                    value={selectedColumn ?? ''}
+                    onChange={e => setSelectedColumn(e.target.value || null)}
+                    style={{
+                      background: '#0d1117',
+                      border: '1px solid #30363d',
+                      borderRadius: 6,
+                      padding: '4px 10px',
+                      color: '#e1e4e8',
+                      fontSize: 12,
+                      minWidth: 220,
+                    }}
+                  >
+                    {usefulColumns.length > 0 && (
+                      <optgroup label="Signals">
+                        {usefulColumns.map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {numericColumns.filter(c => isMetadataColumn(c)).length > 0 && (
+                      <optgroup label="Metadata (rarely useful)">
+                        {numericColumns
+                          .filter(c => isMetadataColumn(c))
+                          .map(c => (
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </label>
+                {selectedBagIds.length === 2 && (
+                  <label
+                    style={{
+                      fontSize: 12,
+                      color: '#8b949e',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={showDiff}
+                      onChange={e => setShowDiff(e.target.checked)}
+                    />
+                    Show diff (B − A)
+                  </label>
+                )}
+                <span style={{ flex: 1 }} />
+                <span style={{ fontSize: 11, color: '#484f58' }}>
+                  Tip: pick a topic field with real signal — timestamp / frame_id are usually noise.
+                </span>
+              </div>
+
               <Plot
                 data={plotData}
                 layout={{
                   autosize: true,
-                  height: 420,
+                  height: 460,
                   paper_bgcolor: '#161b22',
                   plot_bgcolor: '#0d1117',
                   font: { color: '#e1e4e8', size: 11 },
-                  margin: { l: 60, r: 12, t: 12, b: 40 },
+                  // Wider left margin + automargin so y-axis tick + title
+                  // labels never collide. Fixes the "00000004B" overlap
+                  // seen on header.stamp_nsec columns.
+                  margin: { l: 90, r: showDiff && selectedBagIds.length === 2 ? 80 : 12, t: 12, b: 40 },
                   xaxis: {
                     title: { text: 'seconds (relative to each bag start + offset)' },
                     color: '#8b949e',
                     gridcolor: '#30363d',
                   },
                   yaxis: {
-                    title: { text: valueColLabel },
+                    title: { text: selectedColumn ?? '', standoff: 12 },
                     color: '#8b949e',
                     gridcolor: '#30363d',
+                    automargin: true,
+                    // Use SI tick format so huge values (e.g. nanosec
+                    // timestamps) show as "1.7×10⁹" rather than "1.7B".
+                    tickformat: '~s',
+                    exponentformat: 'power',
+                  },
+                  yaxis2: {
+                    title: { text: 'diff', standoff: 12, font: { color: '#f85149' } },
+                    color: '#f85149',
+                    gridcolor: '#30363d',
+                    overlaying: 'y',
+                    side: 'right',
+                    automargin: true,
+                    tickformat: '~s',
+                    exponentformat: 'power',
                   },
                   legend: { orientation: 'h', y: -0.15 },
                   hovermode: 'x unified',
@@ -359,6 +543,70 @@ export default function CompareRuns() {
                   modeBarButtonsToRemove: ['lasso2d', 'select2d'],
                 }}
               />
+
+              {/* Per-bag summary stats. Same column the chart shows.
+                  Quick way to compare runs numerically without eye-balling. */}
+              {stats.length > 0 && selectedColumn && (
+                <div style={{ marginTop: 12, overflow: 'auto' }}>
+                  <table
+                    style={{
+                      borderCollapse: 'collapse',
+                      width: '100%',
+                      fontSize: 12,
+                    }}
+                  >
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #30363d' }}>
+                        <th style={{ padding: '4px 8px', textAlign: 'left', color: '#8b949e' }}>
+                          run
+                        </th>
+                        <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>
+                          n
+                        </th>
+                        <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>
+                          mean
+                        </th>
+                        <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>
+                          min
+                        </th>
+                        <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>
+                          max
+                        </th>
+                        <th style={{ padding: '4px 8px', textAlign: 'right', color: '#8b949e' }}>
+                          std
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stats.map((s, i) => (
+                        <tr key={s.label} style={{ borderBottom: '1px solid #21262d' }}>
+                          <td style={{
+                            padding: '4px 8px',
+                            color: TRACE_COLORS[i % TRACE_COLORS.length],
+                          }}>
+                            {s.label}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                            {s.n.toLocaleString()}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                            {Number.isFinite(s.mean) ? s.mean.toExponential(3) : '—'}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                            {Number.isFinite(s.min) ? s.min.toExponential(3) : '—'}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                            {Number.isFinite(s.max) ? s.max.toExponential(3) : '—'}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'right' }}>
+                            {Number.isFinite(s.std) ? s.std.toExponential(3) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
               {/* Per-bag offset sliders */}
               <div style={{ marginTop: 16 }}>
