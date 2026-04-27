@@ -651,10 +651,11 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 | Format | Extension | Status |
 |--------|-----------|--------|
 | **MCAP (ROS 2 default)** | `.mcap` | **Fully supported** — primary format |
-| ROS 2 SQLite | `.db3` | Planned |
-| ROS 1 bag | `.bag` | Planned (`pip install rosbag-resurrector[ros1]`) |
+| ROS 2 SQLite (single shard) | `.db3` | Auto-converted via `ros2 bag convert` |
+| ROS 2 SQLite (directory bag) | dir with `metadata.yaml` | Recognized by scanner; auto-converted |
+| ROS 1 bag | `.bag` | Auto-converted via `mcap convert` |
 
-> **Tip:** Have older ROS 2 `.db3` bags? Convert them to MCAP with `ros2 bag convert` and you're good to go. Same for ROS 1 — use [`mcap convert`](https://mcap.dev/guides/cli) to migrate `.bag` files.
+> **Note on legacy formats:** auto-conversion shells out to the official tools — `mcap convert` (Go binary, install via [mcap.dev/guides/cli](https://mcap.dev/guides/cli) or Homebrew/apt) for `.bag` files, and `ros2 bag convert` (ships with ROS 2) for `.db3`. Neither is bundled with the Python package because both are external binaries that pip can't ship. `resurrector doctor` will warn if either is missing — you only need the converter for the legacy format(s) you actually use.
 
 ## Architecture
 

@@ -1,4 +1,17 @@
-"""Recursively scan directories for rosbag/MCAP files."""
+"""Recursively scan directories for rosbag/MCAP files.
+
+Two discovery modes:
+
+1. **File-extension scan.** Any file ending in ``.mcap``, ``.bag``, or
+   ``.db3`` is a bag candidate.
+
+2. **ROS 2 directory-format scan.** Real ROS 2 bags are commonly
+   *directories* containing a ``metadata.yaml`` plus one or more
+   ``.db3`` shards. The directory itself is the bag — recursing into it
+   and treating each shard as a standalone bag would index a single
+   recording N times. We detect a ROS 2 bag directory by the presence
+   of ``metadata.yaml`` and treat the directory as the canonical path.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 BAG_EXTENSIONS = {".mcap", ".bag", ".db3"}
+
+# Marker filename inside a ROS 2 directory bag. Per the rosbag2 spec,
+# the metadata.yaml at the bag-directory root describes the storage
+# plugin and the .db3 shards.
+ROS2_BAG_MARKER = "metadata.yaml"
 
 
 @dataclass
@@ -77,6 +95,11 @@ def _compute_sha256_full(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def is_ros2_bag_directory(path: Path) -> bool:
+    """True if ``path`` is a directory containing a rosbag2 metadata.yaml."""
+    return path.is_dir() and (path / ROS2_BAG_MARKER).is_file()
+
+
 def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
     """Scan a file or directory for bag files.
 
@@ -88,7 +111,9 @@ def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
             cryptographically reproducible.
 
     Returns:
-        List of ScannedFile objects for each discovered bag file.
+        List of ScannedFile objects for each discovered bag file. ROS 2
+        directory-format bags are returned as a single entry pointing
+        to the directory itself (not the .db3 shards inside).
     """
     path = Path(path)
     if not path.exists():
@@ -99,18 +124,37 @@ def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
     if path.is_file():
         if path.suffix.lower() in BAG_EXTENSIONS:
             results.append(_scan_file(path, full_hash=full_hash))
+    elif is_ros2_bag_directory(path):
+        # The argument itself is a ROS 2 bag directory.
+        results.append(_scan_ros2_directory(path, full_hash=full_hash))
     elif path.is_dir():
-        for ext in BAG_EXTENSIONS:
-            for file_path in path.rglob(f"*{ext}"):
-                if file_path.is_file():
-                    results.append(_scan_file(file_path, full_hash=full_hash))
+        # Directory containing zero or more bags. Walk it, but treat
+        # any ROS 2 bag directory as a single unit — don't recurse
+        # into one looking for its own .db3 shards.
+        seen_ros2_roots: set[Path] = set()
+        for entry in sorted(path.rglob("*")):
+            if entry.is_dir() and is_ros2_bag_directory(entry):
+                resolved = entry.resolve()
+                if resolved in seen_ros2_roots:
+                    continue
+                seen_ros2_roots.add(resolved)
+                results.append(_scan_ros2_directory(entry, full_hash=full_hash))
+                continue
+            if not entry.is_file():
+                continue
+            # Skip any file that lives inside a ROS 2 bag directory we
+            # already indexed.
+            if any(root in entry.resolve().parents for root in seen_ros2_roots):
+                continue
+            if entry.suffix.lower() in BAG_EXTENSIONS:
+                results.append(_scan_file(entry, full_hash=full_hash))
 
     results.sort(key=lambda f: f.path)
     return results
 
 
 def _scan_file(path: Path, full_hash: bool = False) -> ScannedFile:
-    """Create a ScannedFile from a path."""
+    """Create a ScannedFile for a single bag file (.mcap, .bag, or .db3)."""
     stat = path.stat()
     return ScannedFile(
         path=path.resolve(),
@@ -119,6 +163,33 @@ def _scan_file(path: Path, full_hash: bool = False) -> ScannedFile:
         fingerprint=_fingerprint_fast(path),
         mtime=stat.st_mtime,
         sha256_full=_compute_sha256_full(path) if full_hash else None,
+    )
+
+
+def _scan_ros2_directory(path: Path, full_hash: bool = False) -> ScannedFile:
+    """Create a ScannedFile for a ROS 2 directory bag.
+
+    Aggregates size across the metadata.yaml + every .db3 shard.
+    Fingerprint and (optional) full hash are computed over the
+    metadata.yaml only — bag contents live in the .db3 shards but
+    metadata.yaml changes whenever the bag is re-recorded, which is
+    the change-detection signal we need.
+    """
+    metadata = path / ROS2_BAG_MARKER
+    total_size = metadata.stat().st_size
+    latest_mtime = metadata.stat().st_mtime
+    for db3 in path.rglob("*.db3"):
+        st = db3.stat()
+        total_size += st.st_size
+        if st.st_mtime > latest_mtime:
+            latest_mtime = st.st_mtime
+    return ScannedFile(
+        path=path.resolve(),
+        extension=".db3",  # canonical ROS 2 bag marker for downstream code
+        size_bytes=total_size,
+        fingerprint=_fingerprint_fast(metadata),
+        mtime=latest_mtime,
+        sha256_full=_compute_sha256_full(metadata) if full_hash else None,
     )
 
 

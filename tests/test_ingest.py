@@ -69,6 +69,29 @@ class TestScanner:
         results = scan_path(healthy_bag)
         assert results[0].format == "mcap"
 
+    def test_scan_ros2_directory_bag(self):
+        """A directory containing metadata.yaml is a single bag, not N shards."""
+        fixture = Path(__file__).parent / "fixtures" / "ros2_dir_bag"
+        results = scan_path(fixture)
+        # The directory IS the bag — exactly one entry, pointing at the dir.
+        assert len(results) == 1
+        assert results[0].path.is_dir()
+        assert results[0].path.name == "ros2_dir_bag"
+        assert results[0].format == "ros2db3"
+        # And nested within a parent scan, the .db3 shard inside is NOT
+        # double-counted as a separate bag.
+        parent_results = scan_path(fixture.parent)
+        ros2_dir_entries = [r for r in parent_results if r.path.name == "ros2_dir_bag"]
+        assert len(ros2_dir_entries) == 1
+
+    def test_ros2_directory_helper(self):
+        """is_ros2_bag_directory recognizes the fixture; rejects others."""
+        from resurrector.ingest.scanner import is_ros2_bag_directory
+        fixture = Path(__file__).parent / "fixtures" / "ros2_dir_bag"
+        assert is_ros2_bag_directory(fixture)
+        # A regular fixtures directory (no metadata.yaml) is not a bag.
+        assert not is_ros2_bag_directory(fixture.parent)
+
 
 class TestParser:
     def test_parse_metadata(self, healthy_bag):
