@@ -533,21 +533,53 @@ class BagFrame:
         method: str = "nearest",
         tolerance_ms: float = 50.0,
         anchor: str | None = None,
+        *,
+        engine: str = "auto",
+        out_of_order: str = "error",
+        boundary: str = "null",
+        max_buffer_messages: int = 100_000,
+        max_lateness_ms: float = 0.0,
     ) -> pl.DataFrame:
         """Synchronize multiple topics by timestamp.
 
         Args:
             topics: List of topic names to synchronize.
-            method: Sync method — "nearest", "interpolate", or "sample_and_hold".
+            method: ``"nearest"``, ``"interpolate"``, or ``"sample_and_hold"``.
             tolerance_ms: Maximum time difference for matching (ms).
-            anchor: Topic to use as the time reference. Defaults to highest-frequency topic.
+            anchor: Topic to use as the time reference. Defaults to the
+                highest-frequency topic.
+            engine: ``"eager"`` (load every topic, v0.3.x behavior),
+                ``"streaming"`` (per-topic bounded buffers), or
+                ``"auto"`` (eager when all topics are under
+                ``LARGE_TOPIC_THRESHOLD``, streaming otherwise — the default).
+            out_of_order: streaming-only. ``"error"`` (raise on
+                regression — the default), ``"warn_drop"`` (drop the
+                regression with a log warning), or ``"reorder"``
+                (bounded watermark reorder buffer).
+            boundary: streaming-only, interpolate-only. ``"null"``
+                (default), ``"drop"``, ``"hold"``, or ``"error"`` —
+                see ``synchronize()`` for details.
+            max_buffer_messages: streaming-only, per-topic cap. Tripped
+                raises :class:`SyncBufferExceededError`.
+            max_lateness_ms: streaming-only. Watermark lateness window
+                for the ``reorder`` policy. Ignored otherwise.
 
         Returns:
             A unified Polars DataFrame with columns prefixed by topic name.
         """
         from resurrector.core.sync import synchronize
         topic_views = {name: self[name] for name in topics}
-        return synchronize(topic_views, method=method, tolerance_ms=tolerance_ms, anchor=anchor)
+        return synchronize(
+            topic_views,
+            method=method,
+            tolerance_ms=tolerance_ms,
+            anchor=anchor,
+            engine=engine,
+            out_of_order=out_of_order,
+            boundary=boundary,
+            max_buffer_messages=max_buffer_messages,
+            max_lateness_ms=max_lateness_ms,
+        )
 
     def export(
         self,
