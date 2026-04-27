@@ -207,12 +207,45 @@ These are deferred to v0.5+ per the v0.4.0 plan. They're real, they're known, an
 
 ---
 
-## Local-only files (gitignored, don't commit)
+## What goes in git, what stays local
 
-- `PLAN.md`, `TODOS.md`, `LAUNCH_BLOCKERS.md`, `FUTURE_FEATURES.md` — working docs
-- `marketing/` — launch posts and threads (HN/Reddit/Twitter drafts)
-- `docs/usability_review.md` — internal review notes
-- `_exploration_output/`, `test_log.txt`, `trimmed.mcap`, `.claude/` — scratch
+This repo deliberately keeps two classes of files **outside git**:
+
+1. **Strategic / pre-release planning docs** — anything that reveals roadmap, internal trade-offs, or unshipped features before they ship.
+2. **Marketing drafts** — HN/Reddit/Twitter copy that's still being iterated and shouldn't be search-indexed in the public repo history.
+
+Why bother: the repo is public on GitHub. Anything committed is permanently visible (rewriting history is a pain and rarely complete — search engines and forks already indexed it). Keep "what we're about to ship" and "how we're going to talk about it" off the public timeline until the work is actually done. Once a feature lands, the `CHANGELOG.md` and code changes are the public record.
+
+### Stays local (gitignored — DO NOT commit)
+
+| Path | What it is | Why local |
+|---|---|---|
+| `PLAN.md` | In-progress release plan | Reveals roadmap before it ships |
+| `TODOS.md` | Maintainer's running task list | Working notes, not user-facing |
+| `LAUNCH_BLOCKERS.md` | Pre-release issue tracker | Reveals known issues during a launch window |
+| `FUTURE_FEATURES.md` | Long-tail roadmap (3D scene panel, stream extensibility, etc.) | Don't pre-announce features that may not happen |
+| `marketing/` | HN/Reddit/Twitter launch posts | Drafts iterate; only the published versions are user-facing |
+| `docs/usability_review.md` | Internal review notes | Candid critique not meant for public scrutiny |
+| `_exploration_output/`, `test_log.txt`, `trimmed.mcap` | Scratch artifacts from exploratory runs | Noise |
+| `.claude/`, `.gstack/` | Tool-local state | Per-checkout, per-machine |
+| `~/.resurrector/` | User cache (index DB, demo bag, exports) | Per-user, runtime state |
+
+These are all enforced by [.gitignore](.gitignore). If `git status` ever shows one of them as tracked, that's a bug — investigate before committing anything. The pattern for past slipups was "added to git in an early commit, then `.gitignore` added later but the file is still tracked" — fix with `git rm --cached <file>`.
+
+### Goes in git (the public record)
+
+- All source code under [resurrector/](resurrector/), [tests/](tests/), [examples/](examples/), [packaging/](packaging/), [scripts/](scripts/).
+- [README.md](README.md), [CHANGELOG.md](CHANGELOG.md), [LICENSE](LICENSE), this [CLAUDE.md](CLAUDE.md).
+- [.github/workflows/](.github/workflows/) — CI configs.
+- [pyproject.toml](pyproject.toml), [MANIFEST.in](MANIFEST.in), [Makefile](Makefile), [requirements.txt](requirements.txt) where present.
+- Test fixtures that aren't generated (e.g. [tests/fixtures/ros2_dir_bag/](tests/fixtures/ros2_dir_bag/) — the `metadata.yaml` + empty `.db3` for the directory-bag scanner test). Generated `.mcap` / `.bag` / `.db3` fixtures are gitignored — built on demand by the test suite.
+- The dashboard frontend **source** in [resurrector/dashboard/app/](resurrector/dashboard/app/). The **built bundle** at `resurrector/dashboard/static/` is gitignored — built fresh by CI / packaging.
+
+### When in doubt
+
+If you're a Claude session being asked to draft a planning doc, marketing post, or anything strategic for this project: **default to writing to a local-only path** (one of the gitignored locations above) unless the human explicitly asks you to commit it. If they later say "commit it," push back — most of the time, the answer is "keep it local." This convention has been re-established multiple times during the project's history; preserve it unless told otherwise.
+
+For the exception case (a strategic doc that *should* go in git — e.g. a new architectural ADR), put it under `docs/` with a clear public-facing name and ask the human to confirm before committing.
 
 ---
 
