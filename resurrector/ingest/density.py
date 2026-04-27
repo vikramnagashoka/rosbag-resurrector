@@ -8,14 +8,21 @@
               topics)        └────────────────────────────┘
                  │                       ▲
                  ▼                       │
-        per-topic timestamps             │
-        bucketed into N bins ────────────┘
+        per-topic counters               │
+        (one increment per message) ─────┘
 
 A ribbon row makes message gaps and rate drops visible at a glance, which
 is the motivating use case from the v0.4.0 plan and the rqt_bag pattern
-that aged well. Implementation reads the MCAP once and bucketizes
-timestamps in-memory; results are cached in the dashboard layer keyed on
-(bag_id, topic, mtime).
+that aged well.
+
+Implementation streams the MCAP once and increments per-topic bin
+counters in place — never accumulates timestamp lists. Memory bound is
+``O(num_topics * bins)`` (a few KB for the typical 200-bin × 10-topic
+case), independent of bag size. Required by the v0.4.0 performance
+contract; the v0.3.x version held all timestamps per topic in memory,
+which on a 100M-message bag would consume 800+ MB just for the int64s.
+
+Results are cached in the dashboard layer keyed on (bag_id, topic, mtime).
 """
 
 from __future__ import annotations
@@ -49,8 +56,12 @@ def compute_density(
             - ``total``: int, total messages across all buckets
             - ``bin_width_ns``: int, time-span of a single bucket
 
-    Topics with zero messages return an entry with ``total = 0`` and an
-    empty bins array so the frontend can render an "absent" placeholder.
+    Topics with zero messages return an entry with ``total = 0`` and
+    a zero-filled bins array so the frontend can render an "absent"
+    placeholder.
+
+    Memory: O(num_topics * bins). The whole histogram for a typical
+    10-topic 200-bin density fits in <100 KB regardless of bag size.
     """
     from resurrector.ingest.parser import parse_bag
 
@@ -80,38 +91,45 @@ def compute_density(
             for t in target
         }
 
-    # numpy float64 has 52-bit mantissa; ROS2 nanosecond timestamps fit
-    # but we shift to start-relative to keep precision when bag durations
-    # exceed a few hours.
     duration_ns = end_ns - start_ns
-    bin_edges = np.linspace(0.0, float(duration_ns), bins + 1)
-    bin_width_ns = duration_ns / bins
+    bin_width_ns = duration_ns / bins  # float; may be fractional
 
-    per_topic_relative_ts: dict[str, list[float]] = {t: [] for t in target}
+    # Allocate one int64 counter array per topic up front. ~1.6 KB
+    # per topic at bins=200 — bounded by num_topics * bins, NOT by
+    # message count.
+    counters: dict[str, np.ndarray] = {
+        t: np.zeros(bins, dtype=np.int64) for t in target
+    }
 
+    # Single pass over messages. For each message:
+    #   bin_idx = floor((ts - start_ns) / bin_width_ns)
+    #   clamp to [0, bins-1]
+    #   counters[topic][bin_idx] += 1
+    # Memory: bounded by num_topics * bins. Never materializes
+    # per-topic timestamp lists.
+    last_bin = bins - 1
     for msg in parser.read_messages(topics=list(target)):
-        if msg.topic not in per_topic_relative_ts:
+        c = counters.get(msg.topic)
+        if c is None:
             continue
-        per_topic_relative_ts[msg.topic].append(float(msg.timestamp_ns - start_ns))
+        offset = msg.timestamp_ns - start_ns
+        # Compute and clamp the bin index inline. Avoids np.clip
+        # per-message overhead.
+        idx = int(offset / bin_width_ns)
+        if idx < 0:
+            idx = 0
+        elif idx > last_bin:
+            idx = last_bin
+        c[idx] += 1
 
     result: dict[str, dict] = {}
     for topic in target:
-        ts = per_topic_relative_ts.get(topic, [])
-        if not ts:
-            result[topic] = {
-                "bins": [0] * bins,
-                "start_time_ns": start_ns,
-                "end_time_ns": end_ns,
-                "total": 0,
-                "bin_width_ns": int(bin_width_ns),
-            }
-            continue
-        counts, _ = np.histogram(ts, bins=bin_edges)
+        c = counters[topic]
         result[topic] = {
-            "bins": counts.tolist(),
+            "bins": c.tolist(),
             "start_time_ns": start_ns,
             "end_time_ns": end_ns,
-            "total": int(counts.sum()),
+            "total": int(c.sum()),
             "bin_width_ns": int(bin_width_ns),
         }
     return result
