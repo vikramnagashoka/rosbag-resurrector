@@ -12,9 +12,9 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ### What's new
 
-Reliability release. No new user-facing features — every change in v0.4.0 is about making the existing claims defensible. External code review on v0.3.2 surfaced eight credibility-affecting issues; this release fixes all of them.
+Reliability release. No new user-facing features — every change in v0.4.0 is about fixing multiple reliability issues.
 
-The headline change is that the **OOM-safe** claim in the README is now true and verified by tests, not just hoped at. Memory is bounded by a configured chunk size — not by bag size, topic size, or export size — for dashboard plotting, sync, health, density, cross-bag overlay, and the streaming export formats. There's a [Performance contract](README.md#performance-contract) section in the README that states the rule plainly and points at `tests/test_streaming_oom.py` as the verification.
+The headline change is to improve the **OOM-safe** capabilities. Memory is bounded by a configured chunk size — not by bag size, topic size, or export size — for dashboard plotting, sync, health, density, cross-bag overlay, and the streaming export formats. There's a [Performance contract](README.md#performance-contract) section in the README that states the rule plainly and points at `tests/test_streaming_oom.py` as the verification.
 
 This is a **minor-version bump with one breaking change**: `TopicView.to_lazy_polars()` was removed and replaced with `materialize_ipc_cache()`. See the migration snippet below.
 
@@ -28,6 +28,7 @@ This is a **minor-version bump with one breaking change**: `TopicView.to_lazy_po
 - **RLDS TFRecord streaming** — uses `total_rows` from the index instead of `list(chunks)` to derive `is_last`. Memory bounded by chunk size.
 - **`LargeTopicError` guards** on the eager `to_polars` / `to_pandas` / `to_numpy` (threshold 1 M messages, `force=True` to opt in). Replaces the v0.3.x silent log warning that nobody read.
 - **Memory regression test suite** (`tests/test_streaming_oom.py`, marked `@pytest.mark.slow`, run via `pytest -m slow`) — 8 tests assert peak RSS delta stays within budget for every advertised-as-bounded workflow on a synthetic bag. Wired into a new CI job.
+- **Tuning table in README** — the "Performance contract" section now has a tabular "Tuning the bounds" subsection listing every per-call knob (`chunk_size`, `max_buffer_messages`, `max_lateness_ms`, `tolerance_ms`, `engine`, `force=True`) with its default and a "Hard limits (not configurable)" table for `LARGE_TOPIC_THRESHOLD` / `NUMPY_HARD_CAP`. Surfaces what was previously only in docstrings.
 
 ### Streaming sync — explicit-contract design
 

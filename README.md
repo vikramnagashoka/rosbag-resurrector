@@ -685,6 +685,30 @@ Two formats are explicit exceptions: **NumPy `.npz`** is bounded by total conver
 
 The contract is verified by [tests/test_streaming_oom.py](tests/test_streaming_oom.py), which builds a 10 M-message synthetic bag and asserts peak RSS deltas across every workflow. Run it locally with `pytest -m slow`.
 
+### Tuning the bounds
+
+Every knob below has a sensible default. Override per-call when you need to — there is no global config file or environment variable.
+
+| Knob | Default | Where it applies | When to change it |
+|---|---|---|---|
+| `chunk_size=` | `50_000` | `iter_chunks()`, `materialize_ipc_cache()`, `stream_bucketed_minmax()`, all chunk-streaming exporters | Lower for tighter RSS budgets on small machines; raise to reduce per-chunk overhead on fast NVMe |
+| `max_buffer_messages=` | `100_000` | `bf.sync(engine="streaming")` per-topic lookahead buffer | Raise if a genuine rate mismatch trips `SyncBufferOverflowError`; lower to fail faster on misconfigured topics |
+| `max_lateness_ms=` | `0.0` | `bf.sync(out_of_order="reorder")` watermark window | Set > 0 to admit late samples within the window when reordering. Ignored unless `out_of_order="reorder"` |
+| `tolerance_ms=` | required arg | `bf.sync()` match window | Per-call — depends on your sensor rates |
+| `engine=` | `"auto"` | `bf.sync()` engine selector | `"auto"` picks eager when every topic is < 1 M messages, streaming otherwise. Force one explicitly to override |
+| `force=True` | `False` | `to_polars()`, `to_pandas()`, `to_numpy()` on a topic > 1 M messages | Escape hatch to materialize a large topic eagerly — you accept the RSS cost |
+
+### Hard limits (not configurable)
+
+These are constants the test suite verifies. There is no env var or config file to override them — by design, since they're the *contract*, not a tuning knob.
+
+| Constant | Value | Behavior past the limit |
+|---|---|---|
+| `LARGE_TOPIC_THRESHOLD` | 1,000,000 messages | `to_polars()` / `to_pandas()` / `to_numpy()` raise `LargeTopicError` unless you pass `force=True`. Also the cutoff `engine="auto"` uses to pick streaming over eager in `bf.sync()` |
+| `NUMPY_HARD_CAP` | 1,000,000 rows | NumPy `.npz` export refuses entirely (no `force=` escape) and raises `LargeTopicError` pointing at Parquet |
+
+If you want to raise these on a big-RAM machine, the only options today are forking or monkey-patching the constants. A user-facing override is on the v0.5 wishlist.
+
 ## Development
 
 ```bash
