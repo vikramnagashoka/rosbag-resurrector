@@ -473,24 +473,57 @@ class BagFrame:
         return TimeslicedBagFrame(self, start_sec, end_sec)
 
     def health_report(self) -> BagHealthReport:
-        """Run health checks and return a detailed report."""
+        """Run health checks and return a detailed report.
+
+        Streaming implementation: maintains a small per-topic
+        ``TopicHealthState`` and updates it message-by-message instead
+        of accumulating timestamp lists. Memory is bounded by
+        ``num_topics * constant``, regardless of bag size.
+        """
         if self._health_report is not None:
             return self._health_report
 
+        from resurrector.ingest.health_check import (
+            TopicHealthState, update_state,
+        )
+
         checker = HealthChecker()
-        topic_timestamps: dict[str, list[int]] = {}
-        topic_sizes: dict[str, list[int]] = {}
+        config = checker.config
+
+        # Pre-seed expected_intervals_ns from the metadata frequencies
+        # so the inline gap/rate checks can fire from message #1.
+        # `topic_info.frequency_hz` is computed by the parser at metadata
+        # time and is more accurate than a bootstrap running estimate.
+        expected_intervals_ns: dict[str, float] = {}
+        expected_frequencies: dict[str, float] = {}
+        for ti in self.metadata.topics:
+            if ti.frequency_hz and ti.frequency_hz > 0:
+                expected_intervals_ns[ti.name] = 1e9 / ti.frequency_hz
+                expected_frequencies[ti.name] = ti.frequency_hz
+
+        states: dict[str, TopicHealthState] = {}
+        for ti in self.metadata.topics:
+            states[ti.name] = TopicHealthState()
 
         for msg in self._parser.read_messages():
-            topic_timestamps.setdefault(msg.topic, []).append(msg.timestamp_ns)
-            if msg.raw_data:
-                topic_sizes.setdefault(msg.topic, []).append(len(msg.raw_data))
+            state = states.get(msg.topic)
+            if state is None:
+                # Topic not in metadata (shouldn't happen normally) — skip.
+                continue
+            update_state(
+                state=state,
+                topic=msg.topic,
+                timestamp_ns=msg.timestamp_ns,
+                message_size=len(msg.raw_data) if msg.raw_data else None,
+                config=config,
+                expected_interval_ns=expected_intervals_ns.get(msg.topic),
+            )
 
-        self._health_report = checker.run_all_checks(
-            topic_timestamps=topic_timestamps,
-            topic_message_sizes=topic_sizes,
+        self._health_report = checker.run_streaming(
+            states=states,
             bag_start_ns=self.metadata.start_time_ns,
             bag_end_ns=self.metadata.end_time_ns,
+            expected_frequencies=expected_frequencies,
         )
         return self._health_report
 
