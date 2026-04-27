@@ -26,6 +26,14 @@ pip install rosbag-resurrector
 
 Requires Python 3.10+. No ROS required.
 
+This pulls in the **`mcap`** and **`mcap-ros2-support`** Python libraries automatically — they're hard dependencies and required for native MCAP read/write. You don't need to install them separately, but if you ever want to upgrade them on their own (or pin a specific version), they're plain PyPI packages:
+
+```bash
+pip install mcap mcap-ros2-support
+```
+
+> **Note on legacy ROS 1 `.bag` files:** converting `.bag` → `.mcap` requires the separate **`mcap` Go CLI** (`brew install mcap`, `apt install mcap-cli`, or download from [mcap.dev/guides/cli](https://mcap.dev/guides/cli)). It's not bundled because pip can't ship a Go binary. `resurrector doctor` warns if it's missing — and you only need it if you actually have `.bag` files. ROS 2 `.mcap` files work out of the box with no external CLI.
+
 The venv step matters on macOS (Sonoma+) and recent Ubuntu/Debian, where a bare `pip install` outside a virtualenv fails with `error: externally-managed-environment` (PEP 668). If you already manage Python environments with `uv`, `pipx`, `poetry`, or conda, install with whatever you normally use — `pipx install rosbag-resurrector` is a good one-liner if you only need the CLI.
 
 Optional extras unlock specific features (vision/CLIP, live ROS 2 bridge, additional export formats) — see [Optional Extras](#optional-extras) below.
