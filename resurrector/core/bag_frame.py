@@ -13,6 +13,7 @@ from typing import Any, Iterator
 import numpy as np
 import polars as pl
 
+from resurrector.core.exceptions import LargeTopicError
 from resurrector.ingest.parser import (
     BagMetadata, MCAPParser, Message, TopicInfo, parse_bag,
     get_image_array, get_compressed_image_array,
@@ -23,6 +24,14 @@ _IMAGE_TYPES = {
     "sensor_msgs/msg/Image",
     "sensor_msgs/msg/CompressedImage",
 }
+
+# Per the v0.4.0 performance contract: eager .to_polars() / .to_pandas()
+# / .to_numpy() refuse topics above this threshold unless the caller
+# passes force=True. Beyond ~1M messages a flattened Polars DataFrame
+# typically exceeds 100 MB and the user almost always wanted streaming
+# (iter_chunks or materialize_ipc_cache) instead. Tests can monkeypatch
+# this constant down to verify the guard fires.
+LARGE_TOPIC_THRESHOLD = 1_000_000
 
 
 class IpcCache:
@@ -259,47 +268,70 @@ class TopicView:
 
         return IpcCache(path=tmp_path)
 
-    def to_polars(self) -> pl.DataFrame:
+    def to_polars(self, force: bool = False) -> pl.DataFrame:
         """Convert topic messages to a Polars DataFrame.
 
         Flattens nested message fields using dot notation:
         e.g., linear_acceleration.x, orientation.w
 
-        For topics with more than ~100k messages, this materializes the
-        entire topic in memory. Use iter_chunks() or
-        materialize_ipc_cache() instead for large topics.
+        Refuses topics larger than ``LARGE_TOPIC_THRESHOLD`` (1 M
+        messages by default) unless ``force=True`` — see the README
+        "Performance contract" section. For larger topics use
+        ``iter_chunks()`` or ``materialize_ipc_cache()`` instead.
+
+        Raises:
+            LargeTopicError: if message_count > LARGE_TOPIC_THRESHOLD
+                and force is False.
         """
         if self._cached_df is not None:
             return self._cached_df
 
-        if self._topic_info.message_count > 100_000:
-            import logging
-            logging.getLogger("resurrector.core.bag_frame").warning(
-                "Materializing %d messages for '%s' — consider iter_chunks() "
-                "or materialize_ipc_cache() to avoid OOM",
-                self._topic_info.message_count, self._topic_name,
+        if (
+            not force
+            and self._topic_info.message_count > LARGE_TOPIC_THRESHOLD
+        ):
+            raise LargeTopicError(
+                topic_name=self._topic_name,
+                message_count=self._topic_info.message_count,
+                threshold=LARGE_TOPIC_THRESHOLD,
             )
 
-        chunks = list(self.iter_chunks())
-        if not chunks:
-            self._cached_df = pl.DataFrame({"timestamp_ns": []})
-            return self._cached_df
+        # Fold chunks one at a time instead of building a list — even
+        # when force=True, we shouldn't double-buffer (raw chunks list
+        # plus the concatenated DataFrame).
+        result: pl.DataFrame | None = None
+        for chunk in self.iter_chunks():
+            if chunk.height == 0:
+                continue
+            result = chunk if result is None else pl.concat(
+                [result, chunk], how="diagonal_relaxed"
+            )
 
-        self._cached_df = pl.concat(chunks, how="diagonal_relaxed")
-        return self._cached_df
+        if result is None:
+            result = pl.DataFrame({"timestamp_ns": []})
 
-    def to_pandas(self):
-        """Convert topic messages to a Pandas DataFrame."""
-        return self.to_polars().to_pandas()
+        self._cached_df = result
+        return result
 
-    def to_numpy(self) -> dict[str, np.ndarray]:
+    def to_pandas(self, force: bool = False):
+        """Convert topic messages to a Pandas DataFrame.
+
+        Same large-topic guard as ``to_polars``. Pass ``force=True`` to
+        opt in past the threshold.
+        """
+        return self.to_polars(force=force).to_pandas()
+
+    def to_numpy(self, force: bool = False) -> dict[str, np.ndarray]:
         """Convert numeric columns to numpy arrays.
 
         Columns that cannot be converted (e.g., nested lists of varying length)
         are skipped and their names collected in the returned dict's
         ``__skipped__`` key so callers can inspect what was dropped.
+
+        Same large-topic guard as ``to_polars``. Pass ``force=True`` to
+        opt in past the threshold.
         """
-        df = self.to_polars()
+        df = self.to_polars(force=force)
         result: dict[str, np.ndarray] = {}
         skipped: list[str] = []
         for col in df.columns:
