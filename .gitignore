@@ -70,3 +70,9 @@ marketing/
 
 # Local-only review documents
 docs/usability_review.md
+
+# Tool-local state (Claude Code, exploratory scratch artifacts)
+.claude/
+_exploration_output/
+test_log.txt
+trimmed.mcap
