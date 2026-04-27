@@ -1,9 +1,14 @@
 """Export bag data to ML-friendly formats.
 
-Supports: Parquet, HDF5, CSV, NumPy, Zarr.
+Supports: Parquet, HDF5, CSV, NumPy, Zarr, LeRobot, RLDS.
 
-All formats stream chunk-by-chunk from the underlying MCAP so memory
-usage is bounded regardless of topic size.
+Per the v0.4.0 performance contract, the streaming-friendly formats
+(Parquet, HDF5, CSV, Zarr, LeRobot, RLDS) write chunk-by-chunk so
+peak memory is bounded by ``CHUNK_SIZE``. NumPy ``.npz`` is the
+exception: the format can't be incrementally appended, so writing
+requires materializing every column. We hard-cap NumPy export at
+``NUMPY_HARD_CAP`` rows and raise :class:`LargeTopicError` past that
+— users on bigger topics should use Parquet (which streams).
 """
 
 from __future__ import annotations
@@ -15,12 +20,20 @@ from typing import TYPE_CHECKING, Iterable, Iterator
 
 import numpy as np
 
+from resurrector.core.exceptions import LargeTopicError
+
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import BagFrame
 
 logger = logging.getLogger("resurrector.core.export")
 
 CHUNK_SIZE = 50_000
+
+# NumPy .npz can't append; we have to hold every column in memory until
+# savez_compressed flushes. Past ~1 M rows the materialized arrays plus
+# compression buffers easily exceed 1 GB. Refuse early with a clear
+# error pointing to Parquet, which streams.
+NUMPY_HARD_CAP = 1_000_000
 
 
 @dataclass
@@ -90,11 +103,25 @@ class Exporter:
                 logger.warning("Topic '%s' not found, skipping", topic)
                 continue
 
+            # Pre-flight: NumPy export is hard-capped because .npz
+            # can't append. Refuse early with a clear pointer to
+            # Parquet rather than letting the user wait through a
+            # multi-GB materialization.
+            if format == "numpy" and view.message_count > NUMPY_HARD_CAP:
+                raise LargeTopicError(
+                    topic_name=view.name,
+                    message_count=view.message_count,
+                    threshold=NUMPY_HARD_CAP,
+                )
+
             safe_name = topic.lstrip("/").replace("/", "_")
             chunks = _transform_chunks(
                 view.iter_chunks(CHUNK_SIZE), downsample_hz
             )
-            self._stream_dataframe_chunks(chunks, format, output_path, safe_name)
+            self._stream_dataframe_chunks(
+                chunks, format, output_path, safe_name,
+                expected_total_rows=view.message_count,
+            )
 
         return output_path
 
@@ -104,8 +131,15 @@ class Exporter:
         format: str,
         output_path: Path,
         name: str,
+        expected_total_rows: int | None = None,
     ) -> ExportResult:
-        """Dispatch streaming chunks to the right format writer."""
+        """Dispatch streaming chunks to the right format writer.
+
+        ``expected_total_rows`` is forwarded to writers that need it
+        (currently only ``_stream_rlds``, which uses it to derive
+        ``is_last`` per step without materializing the chunks). Writers
+        that don't need it ignore the parameter.
+        """
         if format == "parquet":
             return _stream_parquet(chunks, output_path, name)
         elif format == "csv":
@@ -119,7 +153,10 @@ class Exporter:
         elif format == "lerobot":
             return _stream_lerobot(chunks, output_path, name)
         elif format == "rlds":
-            return _stream_rlds(chunks, output_path, name)
+            return _stream_rlds(
+                chunks, output_path, name,
+                total_rows=expected_total_rows,
+            )
         else:
             raise ValueError(
                 f"Unknown export format: {format}. "
@@ -338,12 +375,16 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
 
 
 def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
-    """Stream chunks into an .npz archive.
+    """Write chunks into an .npz archive.
 
-    NumPy's .npz format can't be incrementally appended, so we accumulate
-    column arrays in memory and savez at the end. Memory is still bounded
-    by the total converted data (not the full raw messages), and failing
-    columns are collected rather than silently dropped.
+    NumPy's .npz format can't be incrementally appended, so this writer
+    accumulates column arrays in memory and ``savez_compressed`` flushes
+    at the end. Memory scales with total topic size, NOT chunk size —
+    the v0.4.0 ``Exporter.export`` pre-flight refuses topics larger
+    than ``NUMPY_HARD_CAP`` (1 M rows) before reaching here, raising
+    :class:`LargeTopicError` with a pointer to Parquet (which streams).
+    The cap exists because past ~1 M rows the materialized arrays
+    plus ``savez_compressed`` buffers easily exceed 1 GB.
     """
     filepath = output_path / f"{name}.npz"
     rows_written = 0
@@ -475,8 +516,13 @@ def _stream_lerobot(chunks: Iterable, output_path: Path, name: str) -> ExportRes
     return ExportResult(path=output_path, rows_written=rows_written)
 
 
-def _stream_rlds(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
-    """Export to RLDS (TFRecord) format.
+def _stream_rlds(
+    chunks: Iterable,
+    output_path: Path,
+    name: str,
+    total_rows: int | None = None,
+) -> ExportResult:
+    """Export to RLDS (TFRecord) format — streaming.
 
     Each chunk becomes a contiguous run of steps inside a single episode.
     Per-step features:
@@ -490,6 +536,16 @@ def _stream_rlds(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         is_terminal: True for last step
 
     Output: <output_path>/<name>.tfrecord
+
+    Memory: bounded by chunk size. The v0.3.x version did
+    ``list(chunks)`` upfront so it could derive ``is_last`` per row;
+    v0.4.0 takes ``total_rows`` from the caller (the index already
+    knows ``view.message_count``) and uses a running counter, which
+    eliminates the materialization.
+
+    If ``total_rows`` is None we fall back to a one-time materialization
+    so the writer remains correct for callers who don't have a count
+    handy. Inside ``Exporter.export`` we always pass it.
     """
     try:
         import tensorflow as tf
@@ -514,12 +570,18 @@ def _stream_rlds(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         # Fallback: stringify
         return tf.train.Feature(bytes_list=tf.train.BytesList(value=[str(value).encode("utf-8")]))
 
-    # Materialize chunks once so we can know which row is "is_last"
-    chunk_list = list(chunks)
-    total_rows = sum(c.height for c in chunk_list)
+    # Streaming-friendly path: caller supplied total_rows from the
+    # index. Otherwise fall back to materializing once (the v0.3.x
+    # behavior) so this writer is still safe to call from outside the
+    # Exporter.
+    if total_rows is None:
+        chunk_iter = list(chunks)
+        total_rows = sum(c.height for c in chunk_iter)
+    else:
+        chunk_iter = chunks
 
     with tf.io.TFRecordWriter(str(filepath)) as writer:
-        for chunk_idx, chunk in enumerate(chunk_list):
+        for chunk in chunk_iter:
             if not columns:
                 columns = list(chunk.columns)
             chunk_dicts = chunk.to_dicts()
