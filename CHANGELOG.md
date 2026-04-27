@@ -8,6 +8,96 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-26
+
+### What's new
+
+Reliability release. No new user-facing features — every change in v0.4.0 is about making the existing claims defensible. External code review on v0.3.2 surfaced eight credibility-affecting issues; this release fixes all of them.
+
+The headline change is that the **OOM-safe** claim in the README is now true and verified by tests, not just hoped at. Memory is bounded by a configured chunk size — not by bag size, topic size, or export size — for dashboard plotting, sync, health, density, cross-bag overlay, and the streaming export formats. There's a [Performance contract](README.md#performance-contract) section in the README that states the rule plainly and points at `tests/test_streaming_oom.py` as the verification.
+
+This is a **minor-version bump with one breaking change**: `TopicView.to_lazy_polars()` was removed and replaced with `materialize_ipc_cache()`. See the migration snippet below.
+
+### Performance contract — OOM-safe verified
+
+- **`stream_bucketed_minmax`** (new in `resurrector/core/streaming.py`) — single-pass time-bucketed min/max aggregation. Replaces eager `view.to_polars(); downsample_dataframe(...)` on the dashboard plot endpoint, transform preview, and cross-bag overlay. Memory is `O(num_buckets × num_columns)`, independent of topic size.
+- **Streaming health checks** — `BagFrame.health_report()` now maintains a small `TopicHealthState` per topic (Welford accumulators for size stats, running counters for gaps and ordering, bounded inline issue lists capped at 100 per category) instead of accumulating per-topic timestamp lists. Bag-size memory disappears.
+- **Streaming density** — `compute_density()` increments per-topic bin counters in-place rather than accumulating timestamps. ~100 KB regardless of bag size.
+- **Streaming sync engine** — new `engine="streaming"` and `engine="auto"` (the default). Lookahead-window buffer for `nearest`, prev/next pair tracking for `interpolate`, single-sample carry for `sample_and_hold`. Memory bounded by `tolerance_ms × topic_rate`. The eager engine is still available as `engine="eager"`.
+- **NumPy `.npz` hard-cap** — refuses topics > 1 M rows up front with `LargeTopicError` (use Parquet for larger). The format can't append; capping is more honest than a multi-GB silent spike.
+- **RLDS TFRecord streaming** — uses `total_rows` from the index instead of `list(chunks)` to derive `is_last`. Memory bounded by chunk size.
+- **`LargeTopicError` guards** on the eager `to_polars` / `to_pandas` / `to_numpy` (threshold 1 M messages, `force=True` to opt in). Replaces the v0.3.x silent log warning that nobody read.
+- **Memory regression test suite** (`tests/test_streaming_oom.py`, marked `@pytest.mark.slow`, run via `pytest -m slow`) — 8 tests assert peak RSS delta stays within budget for every advertised-as-bounded workflow on a synthetic bag. Wired into a new CI job.
+
+### Streaming sync — explicit-contract design
+
+The new streaming sync engine exposes three orthogonal policies that the eager engine doesn't need (because it has perfect global state):
+
+```python
+bf.sync(
+    topics=["/joint_states", "/imu/data"],
+    method="nearest",
+    tolerance_ms=50,
+    engine="auto",                # eager | streaming | auto
+    out_of_order="error",         # error | warn_drop | reorder
+    boundary="null",              # null | drop | hold | error  (interpolate only)
+    max_buffer_messages=100_000,  # per-topic cap; tripped raises SyncBufferExceededError
+    max_lateness_ms=0,            # watermark window for out_of_order="reorder"
+)
+```
+
+Failures are surfaced as typed exceptions with actionable messages: `SyncBufferExceededError`, `SyncOutOfOrderError`, `SyncBoundaryError`, `LargeTopicError`. All live in `resurrector/core/exceptions.py`.
+
+The streaming engine was tested for equivalence against the eager engine on 9 synthetic timing-pathology fixtures (fast-vs-slow, tie-at-anchor, missing-before-first, missing-after-last, out-of-order-within-topic, bursty-fast, sparse-no-match, duplicate-timestamps, topic-stops-halfway).
+
+### Breaking change — `to_lazy_polars()` removed
+
+The v0.3.x `TopicView.to_lazy_polars()` claimed temp-file cleanup happens "when the LazyFrame is dropped" but had no cleanup hook anywhere — every call leaked an Arrow IPC file in the OS temp dir. Replaced with explicit-lifecycle `materialize_ipc_cache()`:
+
+```python
+# v0.3.x — broken (leaks temp files on every call)
+lazy = bf["/imu/data"].to_lazy_polars()
+filtered = lazy.filter(pl.col("x") > 0).collect()
+
+# v0.4.0 — explicit lifecycle, file deleted on block exit
+with bf["/imu/data"].materialize_ipc_cache() as cache:
+    filtered = cache.scan().filter(pl.col("x") > 0).collect()
+```
+
+The new `IpcCache` supports context-manager usage, idempotent `close()`, raises if `scan()` is called after close, and emits a `ResourceWarning` on `__del__` if it wasn't closed (so notebook leaks become visible instead of silent).
+
+### Honesty fixes
+
+- **Renamed `_compute_sha256` to `_fingerprint_fast`** in `scanner.py`. The function only hashed the first 1 MB plus the file size — fine as a fast change-detection fingerprint, dishonest as a "SHA256". The DuckDB column `bags.sha256` is renamed to `bags.fingerprint`. Users who need a real cryptographic digest pass `--full-hash` to `resurrector scan`, which populates a new nullable `bags.sha256_full` column with a real full-file SHA256.
+- **DuckDB schema migration framework** (`resurrector/ingest/migrations.py`) — versioned forward-only migrations applied on first connect. The SHA rename is migration 1; existing v0.3.x indexes are upgraded transparently with row-level data preserved. Future schema changes append new migrations; never reorder, never rewrite.
+- **README claim cleanup** — replaced the "Streaming export (OOM-safe) Yes / No / No / No" comparison table with a narrower section that explicitly recommends Foxglove for 3D scenes, PlotJuggler for fast OpenGL time-series, and rosbags for pure-Python custom messages. Per-format streaming claims are now precise (Parquet/HDF5/CSV/Zarr/LeRobot/RLDS chunk-streamed; NumPy bounded-by-converted-array-size and hard-capped). New "Performance contract" section makes the rule concrete and testable.
+
+### Format support
+
+- **ROS 2 directory-format bags** — the scanner now recognizes directories containing `metadata.yaml` as ROS 2 bag candidates. Real ROS 2 bags are commonly directories with one or more `.db3` shards plus a `metadata.yaml`; the v0.3.x scanner treated each shard as a separate bag, which would index a single recording N times.
+- **`convert_to_mcap` accepts directory inputs** for ROS 2 bags. Forwards the directory path to `ros2 bag convert -i` as expected.
+- The mcap CLI (Go binary, distributed via Homebrew/apt/GitHub releases — not a PyPI package) is still required for `.bag` → `.mcap` conversion. `resurrector doctor` warns when it's missing. The Python `mcap` library that ships with the wheel handles all native MCAP read/write.
+
+### CI
+
+- **New `.github/workflows/ci.yml`** runs on every push and PR with four parallel jobs:
+  - `test` — pytest matrix on Python 3.10 / 3.11 / 3.12 / 3.13 (Ubuntu)
+  - `wheel-smoke` — `python -m build`, install the wheel into a fresh venv, run `resurrector --version`, `resurrector doctor`, and `pytest -m smoke`. This is the regression gate for packaging bugs like the v0.3.2 demo-import break that would have been caught here.
+  - `frontend-build` — `npm ci && npm run build` in the dashboard app to catch frontend regressions
+  - `lint` — `python -m compileall` syntax-error catcher (ruff/mypy is a v0.5+ project)
+  - `memory-regression` — runs `pytest -m slow` against the synthetic-bag fixture
+- The one-shot `backfill-latest-assets.yml` workflow (used to attach `_latest` filenames to the v0.3.2 release) was deleted.
+
+### Other
+
+- New `resurrector/core/exceptions.py` houses the typed exception hierarchy (`ResurrectorError`, `LargeTopicError`, `SyncBufferExceededError`, `SyncOutOfOrderError`, `SyncBoundaryError`).
+- `tests/test_streaming_oom.py` introduces `@pytest.mark.slow` (excluded by default via `pyproject.toml addopts = "-m 'not slow'"`).
+- `tests/test_python_api_smoke.py` introduces `@pytest.mark.smoke` for the wheel-install CI job.
+- `psutil>=5.9.0` added to the `[dev]` extras for the memory regression tests.
+- 415 tests passing in the default suite, 8 more under `pytest -m slow`, 423 total.
+
+---
+
 ## [0.3.2] — 2026-04-26
 
 ### Critical fix — `resurrector demo` was broken on PyPI installs
