@@ -70,6 +70,7 @@ marketing/
 
 # Local-only review documents
 docs/usability_review.md
+missing and enhancements.md
 
 # Tool-local state (Claude Code, exploratory scratch artifacts)
 .claude/
