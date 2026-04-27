@@ -9,6 +9,7 @@ from typing import Any
 import asyncio
 import json
 
+import polars as pl
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -368,12 +369,25 @@ async def get_topic_data(
         except KeyError:
             raise HTTPException(404, f"Topic '{topic_name}' not found")
 
-        df = view.to_polars()
-        total = df.height
+        # Use the index-recorded message_count as `total` instead of
+        # materializing the topic just to count rows. This is the
+        # streaming hot path — never call view.to_polars() here.
+        total = view.message_count
 
         if max_points is not None:
-            from resurrector.core.downsample import downsample_dataframe
-            df = downsample_dataframe(df, max_points=max_points)
+            # Stream-aggregate to ~max_points via bucketed min/max. Memory
+            # bounded by num_buckets, NOT by topic size. Replaces the
+            # v0.3.x `view.to_polars(); downsample_dataframe(...)` path.
+            from resurrector.core.streaming import (
+                stream_bucketed_minmax_from_view,
+            )
+            num_buckets = max(1, max_points // 2)
+            df = stream_bucketed_minmax_from_view(
+                view,
+                num_buckets=num_buckets,
+                bag_start_ns=int(bag["start_time_ns"] or 0),
+                bag_end_ns=int(bag["end_time_ns"] or 0),
+            )
             response = {
                 "topic": topic_name,
                 "total": total,
@@ -385,7 +399,29 @@ async def get_topic_data(
             set_topic_cache(cache_key, response)
             return response
         else:
-            df = df.slice(offset, limit)
+            # Paginated mode — collect the requested page via iter_chunks
+            # so we never materialize beyond the page size.
+            collected: list[pl.DataFrame] = []
+            rows_collected = 0
+            rows_skipped = 0
+            for chunk in view.iter_chunks(chunk_size=max(1000, limit)):
+                if chunk.height == 0:
+                    continue
+                if rows_skipped + chunk.height <= offset:
+                    rows_skipped += chunk.height
+                    continue
+                # The page intersects this chunk — slice into it.
+                start_in_chunk = max(0, offset - rows_skipped)
+                take = min(chunk.height - start_in_chunk, limit - rows_collected)
+                collected.append(chunk.slice(start_in_chunk, take))
+                rows_collected += take
+                rows_skipped += chunk.height
+                if rows_collected >= limit:
+                    break
+            df = (
+                pl.concat(collected, how="diagonal_relaxed")
+                if collected else pl.DataFrame({"timestamp_ns": []})
+            )
             return {
                 "topic": topic_name,
                 "total": total,
@@ -1415,7 +1451,24 @@ async def preview_transform_api(payload: dict[str, Any]) -> dict[str, Any]:
             view = bf[str(topic)]
         except KeyError:
             raise HTTPException(404, f"Topic '{topic}' not found in bag")
-        df = view.to_polars()
+        # Transform preview applies stateful transforms (derivative,
+        # integral, IIR, rolling) which can't be cleanly chunk-streamed
+        # without carrying state across chunks — out of scope for the
+        # v0.4.0 dashboard endpoint. Gate on LARGE_TOPIC_THRESHOLD with
+        # a clear actionable error so users on big topics see why and
+        # know what to do instead.
+        from resurrector.core.exceptions import LargeTopicError
+        try:
+            df = view.to_polars()
+        except LargeTopicError as e:
+            raise HTTPException(
+                413,
+                f"Transform preview is only supported for topics under "
+                f"{e.threshold:,} messages. {e.topic_name!r} has "
+                f"{e.message_count:,}. For larger topics, use "
+                f"bf[{e.topic_name!r}].iter_chunks() and apply_transform "
+                f"per chunk in a notebook.",
+            )
 
         # Mode 1: common menu op.
         if "op" in payload:
