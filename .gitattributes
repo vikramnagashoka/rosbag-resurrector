@@ -1,0 +1,14 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.mcap binary
+*.bag binary
+*.db3 binary
+*.db binary
+*.dmg binary
+*.deb binary
+*.whl binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
