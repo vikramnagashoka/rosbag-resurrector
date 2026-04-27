@@ -619,8 +619,6 @@ resurrector bridge live --topic /imu/data --port 9090
 
 ## Where Resurrector fits
 
-Foxglove, PlotJuggler, and `rosbags` are all excellent at what they do. Resurrector isn't trying to displace them — it's a *bag-as-dataframe* analysis workbench, optimized for the parts those tools don't focus on:
-
 - **Treat a bag like a Pandas DataFrame.** `bf["/imu/data"].to_polars()` and you're in your normal data-analysis flow. No protobuf, no ROS imports.
 - **Health checks built in.** Catch dropped messages, rate drops, and gaps without writing a custom validator. Configurable thresholds.
 - **Multi-stream sync.** `bf.sync(["/imu", "/joint_states"], method="nearest")` returns one aligned DataFrame.

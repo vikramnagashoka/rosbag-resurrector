@@ -71,7 +71,6 @@ The new `IpcCache` supports context-manager usage, idempotent `close()`, raises 
 
 - **Renamed `_compute_sha256` to `_fingerprint_fast`** in `scanner.py`. The function only hashed the first 1 MB plus the file size — fine as a fast change-detection fingerprint, dishonest as a "SHA256". The DuckDB column `bags.sha256` is renamed to `bags.fingerprint`. Users who need a real cryptographic digest pass `--full-hash` to `resurrector scan`, which populates a new nullable `bags.sha256_full` column with a real full-file SHA256.
 - **DuckDB schema migration framework** (`resurrector/ingest/migrations.py`) — versioned forward-only migrations applied on first connect. The SHA rename is migration 1; existing v0.3.x indexes are upgraded transparently with row-level data preserved. Future schema changes append new migrations; never reorder, never rewrite.
-- **README claim cleanup** — replaced the "Streaming export (OOM-safe) Yes / No / No / No" comparison table with a narrower section that explicitly recommends Foxglove for 3D scenes, PlotJuggler for fast OpenGL time-series, and rosbags for pure-Python custom messages. Per-format streaming claims are now precise (Parquet/HDF5/CSV/Zarr/LeRobot/RLDS chunk-streamed; NumPy bounded-by-converted-array-size and hard-capped). New "Performance contract" section makes the rule concrete and testable.
 
 ### Format support
 
