@@ -1687,7 +1687,24 @@ async def compare_topics_api(payload: dict[str, Any]) -> dict[str, Any]:
 # Serve static frontend files
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")
+    # SPA fallback: any path that isn't a real file in /static gets
+    # index.html so React Router can resolve it client-side. Without
+    # this, /help / /search / /datasets etc. all 404 on direct
+    # navigation or page reload — they only work via in-app Link clicks.
+    # /api/* routes are registered above this mount, so they keep
+    # their normal handlers.
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    class _SPAStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            try:
+                return await super().get_response(path, scope)
+            except _StarletteHTTPException as exc:
+                if exc.status_code == 404:
+                    return await super().get_response("index.html", scope)
+                raise
+
+    app.mount("/", _SPAStaticFiles(directory=str(_static_dir), html=True), name="static")
 else:
     @app.get("/")
     async def root():
