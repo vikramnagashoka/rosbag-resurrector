@@ -38,10 +38,64 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run pytest
-        # Skip vision tests (they need the heavy CLIP model + GPU
-        # extras) and the slow memory regression suite — the wheel-smoke
-        # job below covers the slow tier.
-        run: pytest tests/ --ignore=tests/test_vision.py -q
+        # The dedicated `extras-test` job below installs each optional
+        # extra and runs the suite end-to-end. Tests gated by
+        # `pytest.importorskip("sentence_transformers")` etc. skip
+        # cleanly here; they run for real in that job.
+        run: pytest tests/ -q
+
+  extras-test:
+    # One job per optional extras bundle declared in pyproject.toml.
+    # Each installs the extra and runs the full suite — pytest's
+    # existing importorskip / skipif gates surface the corresponding
+    # tests automatically once the dep is present. This catches bugs
+    # like the v0.4.0 search_embeddings BinderException where the
+    # SQL plumbing was wrong but the only test exercising it was
+    # always skipped because [vision] wasn't in CI.
+    #
+    # Skipped extras (intentional):
+    #   - bridge-live: needs rclpy, only available with a full ROS 2
+    #     system install; not pip-installable on a vanilla runner
+    #   - vision-openai: needs an OpenAI API key for live tests
+    #   - packaging: build tooling (pyinstaller, pyarmor), not feature
+    #     code with tests of its own
+    name: Extras (${{ matrix.extra }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra:
+          - vision-lite     # PIL + opencv-python-headless
+          - vision          # vision-lite + sentence-transformers (downloads CLIP model)
+          - all-exports     # zarr + tensorflow-datasets (heavy: TF wheel ~600 MB)
+          - watch           # watchdog (tiny)
+          - ros1            # rosbags (for legacy .bag reading)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache HuggingFace CLIP model
+        # Saves ~600 MB download on every vision-job run after the first.
+        # Bump the v# suffix when MODEL_NAME in resurrector/core/vision.py
+        # changes so the new model gets fetched fresh.
+        if: matrix.extra == 'vision'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-clip-vit-b32-v1
+
+      - name: Install package + dev + extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,${{ matrix.extra }}]"
+
+      - name: Run pytest
+        run: pytest tests/ -q
 
   wheel-smoke:
     name: Wheel install + smoke
