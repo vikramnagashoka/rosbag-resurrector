@@ -221,7 +221,16 @@ async def list_bags(
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
-    """List all indexed bags with optional filtering."""
+    """List indexed bags. The Library page's primary data source.
+
+    Filters compose with AND. ``search`` (when set) overrides the others
+    and runs the full DSL described in ``GET /api/search``. Pagination
+    is via ``limit`` (max 200) and ``offset``.
+
+    Returns a list of bag records; each has ``id``, ``path``,
+    ``health_score``, ``duration_sec``, ``recorded_at``, topic count,
+    and tags.
+    """
     index = _get_index()
     try:
         if search:
@@ -240,7 +249,12 @@ async def list_bags(
 
 @app.get("/api/bags/{bag_id}")
 async def get_bag(bag_id: int) -> dict[str, Any]:
-    """Get bag metadata and topic list."""
+    """Return one indexed bag's metadata + topic list. 404 if no such bag.
+
+    Used by the Explorer and Library pages to populate the bag's
+    sidebar (topics, message counts, health, tags). Cheap — reads from
+    the index, doesn't open the bag file.
+    """
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -253,7 +267,13 @@ async def get_bag(bag_id: int) -> dict[str, Any]:
 
 @app.get("/api/bags/{bag_id}/health")
 async def get_bag_health(bag_id: int) -> dict[str, Any]:
-    """Get health report for a bag."""
+    """Run the full health report for one bag — score, issues, recommendations.
+
+    Streams the bag once and returns the same data the CLI's
+    ``resurrector health`` would print. Backs the dashboard's Health
+    page. Not cached server-side; the BagFrame in-instance cache makes
+    the second call within a session free.
+    """
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -443,7 +463,14 @@ async def get_synced_data(
     tolerance_ms: float = Query(default=50.0),
     limit: int = Query(default=1000, le=10000),
 ) -> dict[str, Any]:
-    """Get synchronized multi-topic data."""
+    """Time-align multiple topics and return up to ``limit`` synced rows.
+
+    Wraps :meth:`BagFrame.sync` over the given comma-separated topics.
+    Backs the Sync tab on the Explorer page. ``method`` is one of
+    ``nearest`` / ``interpolate`` / ``sample_and_hold``; ``tolerance_ms``
+    is the maximum match window. Returns ``total`` (full sync size) +
+    the first ``limit`` rows for inspection.
+    """
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -478,7 +505,17 @@ async def export_bag(
     sync: bool = Query(default=False),
     output_dir: str = Query(default="./export", description="Output directory"),
 ) -> dict[str, str]:
-    """Trigger an export job."""
+    """Run a synchronous bag export. Returns the output path on completion.
+
+    The dashboard's ExportDialog hits this. Streams chunks through the
+    chosen format (parquet / hdf5 / csv / numpy / zarr / lerobot / rlds)
+    so memory stays bounded. ``output_dir`` is validated against
+    ``RESURRECTOR_ALLOWED_ROOTS`` to prevent writing outside trusted
+    locations.
+
+    No async / job system: large exports block the request. A user
+    cancel hangs up the connection but the server continues writing.
+    """
     validated_output = _validate_path(output_dir)
     index = _get_index()
     try:
@@ -502,7 +539,15 @@ async def export_bag(
 
 @app.get("/api/search")
 async def search_bags(q: str = Query(description="Search query")) -> list[dict[str, Any]]:
-    """Full-text search across bags."""
+    """Filter the index with the search DSL — ``topic:``, ``health:>N``, etc.
+
+    Same query syntax as the Python ``resurrector.search()`` API:
+    space-separated terms, ANDed together. Supported terms include
+    ``topic:/imu/data``, ``health:>=80``, ``tag:robot:digit``,
+    ``after:2026-04-01``, free text against the file path.
+
+    Returns a list of bag records.
+    """
     index = _get_index()
     try:
         return index.search(q)
@@ -515,7 +560,17 @@ async def trigger_scan(
     path: str = Query(description="Directory path to scan"),
     stream: bool = Query(default=False, description="Stream progress via SSE"),
 ) -> Any:
-    """Trigger a directory scan. Set stream=true for Server-Sent Events progress."""
+    """Scan a directory for bag files and index them. Synchronous unless ``stream=true``.
+
+    With ``stream=false`` (default), runs the full scan and returns a
+    summary on completion. With ``stream=true``, returns a Server-Sent
+    Events stream where each event is a per-bag progress record — used
+    by the dashboard's "Scan folder" button to render a live progress
+    bar.
+
+    ``path`` is validated against ``RESURRECTOR_ALLOWED_ROOTS`` so the
+    UI can't trigger scans outside trusted locations.
+    """
     scan_path_obj = _validate_path(path)
     if not scan_path_obj.exists():
         raise HTTPException(400, f"Path does not exist: {path}")
@@ -606,7 +661,12 @@ async def _scan_stream(scan_path_obj: Path):
 
 @app.get("/api/bags/{bag_id}/timeline")
 async def get_timeline(bag_id: int) -> dict[str, Any]:
-    """Get timeline data for visualization (topic spans and message density)."""
+    """Per-topic message density across the bag's duration. Backs the timeline strip.
+
+    Returns one entry per topic with a binned count vector + start/end
+    timestamps. Memory bounded by num_topics × num_bins, regardless of
+    bag size — uses the streaming density compute, not message lists.
+    """
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -716,7 +776,13 @@ async def get_frame_image(
 
 @app.get("/api/bags/{bag_id}/topics/{topic_name:path}/thumbnail")
 async def get_topic_thumbnail(bag_id: int, topic_name: str) -> Any:
-    """Serve a thumbnail of the first frame from an image topic."""
+    """Return a small JPEG of the first frame on an image topic. For Library cards.
+
+    Cached on disk under ``~/.resurrector/thumbnails/`` keyed by
+    ``(bag_id, topic, mtime)`` so repeat hits are O(1). Quality and
+    max-dimension are tuned to keep payloads small enough for grid
+    rendering.
+    """
     return await get_frame_image(bag_id, topic_name, frame_index=0, width=320)
 
 
@@ -729,7 +795,15 @@ async def search_frames_api(
     clips: bool = Query(default=False),
     clip_duration: float = Query(default=5.0),
 ) -> dict[str, Any]:
-    """Semantic search across frame embeddings."""
+    """CLIP-powered natural-language search across indexed frame embeddings.
+
+    Backs the Search page. ``q`` is plain English; results are ranked
+    by cosine similarity. ``clips=true`` groups consecutive matches
+    into temporal segments instead of returning isolated frames.
+
+    Preconditions: bags must be ``index-frames``-d first; the
+    ``[vision]`` or ``[vision-openai]`` extra must be installed.
+    """
     index = _get_index()
     try:
         from resurrector.core.vision import FrameSearchEngine
@@ -785,7 +859,12 @@ async def search_frames_api(
 
 @app.get("/api/bags/{bag_id}/frame-index-status")
 async def get_frame_index_status(bag_id: int) -> dict[str, Any]:
-    """Check if frames have been indexed for a bag."""
+    """Report whether a bag has CLIP frame embeddings, and how many.
+
+    Used by the Search page to decide whether to show "index this bag
+    first" vs querying directly. Returns ``{indexed: bool, count: int,
+    topics: [...]}``.
+    """
     index = _get_index()
     try:
         bag = index.get_bag(bag_id)
@@ -839,7 +918,12 @@ async def create_annotation_api(
     bag_id: int,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Create an annotation. Body: {timestamp_ns, text, topic?}"""
+    """Pin a text annotation at a specific timestamp on a bag.
+
+    Body: ``{timestamp_ns: int, text: str, topic: Optional[str]}``.
+    Annotations show up as Plotly markers on the Explorer page and
+    persist across reloads.
+    """
     if "timestamp_ns" not in payload or "text" not in payload:
         raise HTTPException(400, "Body must include 'timestamp_ns' and 'text'")
     text = str(payload["text"]).strip()
@@ -868,7 +952,10 @@ async def create_annotation_api(
 async def update_annotation_api(
     annotation_id: int, payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update an annotation's text."""
+    """Edit an existing annotation's text. Body: ``{text: str}``.
+
+    Returns 404 if the annotation id doesn't exist.
+    """
     text = str(payload.get("text", "")).strip()
     if not text:
         raise HTTPException(400, "Annotation text cannot be empty")
@@ -883,7 +970,7 @@ async def update_annotation_api(
 
 @app.delete("/api/annotations/{annotation_id}")
 async def delete_annotation_api(annotation_id: int) -> dict[str, Any]:
-    """Delete an annotation."""
+    """Permanently remove one annotation by id. 404 if not found."""
     index = _get_index()
     try:
         if not index.delete_annotation(annotation_id):
@@ -906,7 +993,11 @@ def _get_dataset_manager():
 
 @app.get("/api/datasets")
 async def list_datasets_api() -> dict[str, Any]:
-    """List every dataset with its version count."""
+    """List every dataset in the index, with version metadata. Backs the Datasets page.
+
+    Returns a list of dicts: id, name, description, version count,
+    timestamps. Sorted by most-recently-updated first.
+    """
     mgr = _get_dataset_manager()
     try:
         items = mgr.list_datasets()
@@ -917,7 +1008,12 @@ async def list_datasets_api() -> dict[str, Any]:
 
 @app.post("/api/datasets")
 async def create_dataset_api(payload: dict[str, Any]) -> dict[str, Any]:
-    """Create a dataset. Body: {name, description?}"""
+    """Create an empty dataset container. Body: ``{name: str, description?: str}``.
+
+    The dataset starts empty — add versions via the
+    ``POST /api/datasets/{name}/versions`` endpoint. Names must be
+    unique; collisions return 409.
+    """
     name = str(payload.get("name", "")).strip()
     if not name:
         raise HTTPException(400, "'name' is required")
@@ -939,7 +1035,7 @@ async def create_dataset_api(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/datasets/{name}")
 async def get_dataset_api(name: str) -> dict[str, Any]:
-    """Get a dataset plus its versions."""
+    """Return a single dataset by name with its full version list. 404 if not found."""
     mgr = _get_dataset_manager()
     try:
         ds = mgr.get_dataset(name)
@@ -952,7 +1048,10 @@ async def get_dataset_api(name: str) -> dict[str, Any]:
 
 @app.delete("/api/datasets/{name}")
 async def delete_dataset_api(name: str) -> dict[str, Any]:
-    """Delete a dataset and all its versions."""
+    """Remove a dataset and every version from the index. Doesn't touch exported files.
+
+    Idempotent — deleting a non-existent dataset returns 404.
+    """
     mgr = _get_dataset_manager()
     try:
         if not mgr.delete_dataset(name):
@@ -1021,7 +1120,14 @@ async def create_dataset_version_api(
 async def export_dataset_version_api(
     name: str, version: str, payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Export a dataset version to disk. Body: {"output_dir": "..."}"""
+    """Materialize a dataset version. Body: ``{"output_dir": str}``.
+
+    Reads each bag in the version, applies the recorded sync /
+    downsample / format settings, and writes data + manifest +
+    auto-README + reproducibility config under
+    ``<output_dir>/<dataset>/<version>/``. Synchronous; large datasets
+    block the request.
+    """
     payload = payload or {}
     output_dir = payload.get("output_dir", "./datasets")
     # Validate the output path against allowed roots.
@@ -1048,7 +1154,7 @@ async def export_dataset_version_api(
 async def delete_dataset_version_api(
     name: str, version: str,
 ) -> dict[str, Any]:
-    """Delete a specific version of a dataset."""
+    """Drop one version from a dataset (the dataset itself stays). Files on disk are untouched."""
     mgr = _get_dataset_manager()
     try:
         if not mgr.delete_version(name, version):
@@ -1170,7 +1276,11 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
 
 @app.post("/api/bridge/stop")
 async def stop_bridge_api() -> dict[str, Any]:
-    """Stop the running bridge subprocess, if any."""
+    """Terminate the WebSocket bridge subprocess. No-op if none is running.
+
+    Always returns 200 with the new state. Used by the Bridge page's
+    Stop button.
+    """
     state = _get_bridge_state()
     proc = state["process"]
     if proc is None or proc.poll() is not None:
@@ -1190,7 +1300,12 @@ async def stop_bridge_api() -> dict[str, Any]:
 
 @app.get("/api/bridge/status")
 async def bridge_status_api() -> dict[str, Any]:
-    """Report bridge subprocess state. Polled by the Bridge page."""
+    """Return current state of the WebSocket bridge subprocess.
+
+    Polled every few seconds by the Bridge page. Reports ``running``,
+    ``pid``, mode (``playback`` / ``live``), bound port, and (if
+    playback) the bag path being replayed.
+    """
     state = _get_bridge_state()
     proc = state["process"]
     if proc is None:
@@ -1576,6 +1691,12 @@ if _static_dir.exists():
 else:
     @app.get("/")
     async def root():
+        """Fallback root response when the React frontend bundle isn't built.
+
+        In a normal install (pip wheel) the React SPA is mounted at /
+        by StaticFiles; this handler runs only for source checkouts that
+        haven't run ``npm run build``.
+        """
         return {
             "message": "RosBag Resurrector API",
             "docs": "/docs",

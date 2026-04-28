@@ -194,5 +194,39 @@ def _scan_ros2_directory(path: Path, full_hash: bool = False) -> ScannedFile:
 
 
 def scan(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
-    """Public API: scan a path for bag files. Alias for scan_path."""
+    """Discover bag files at a path. Returns a :class:`ScannedFile` per bag.
+
+    Public API; an alias for :func:`scan_path`. Walks ``path`` recursively
+    if it's a directory, identifies every supported bag (``.mcap``,
+    ``.bag``, ROS 2 directory format), and builds a :class:`ScannedFile`
+    record for each one. Does NOT touch the index database — pair with
+    :class:`BagIndex.upsert_bag` if you want indexing.
+
+    A ROS 2 directory bag (a directory containing ``metadata.yaml`` plus
+    one or more ``.db3`` shards) is returned as a single entry, not one
+    entry per shard.
+
+    Args:
+        path: File or directory to scan.
+        full_hash: When True, also compute a real SHA256 over every byte
+            and populate ``ScannedFile.sha256_full``. Slow for large bags
+            — only set this when the index needs cryptographic
+            reproducibility (matches ``resurrector scan --full-hash`` from
+            the CLI). Default uses a fast first-1MB-plus-size fingerprint
+            that's sufficient for change detection.
+
+    Returns:
+        List of :class:`ScannedFile` records, sorted by path. Empty list
+        if no bags were found.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist.
+
+    Example::
+
+        from resurrector import scan
+
+        for found in scan("~/recordings"):
+            print(f"{found.path}  ({found.size_bytes:,} bytes)")
+    """
     return scan_path(path, full_hash=full_hash)

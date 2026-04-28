@@ -10,8 +10,10 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ### Docs
 
-- **Beefed up `--help` output across the CLI.** Every command's docstring now explains what it does, when to use it (vs. similar commands), what each flag actually means with units / examples, and shows runnable examples. Devs no longer need to read the README to use `resurrector search-frames`, `index-frames`, `export-frames`, `export`, `scan`, `health`, `list`, etc. effectively from the terminal alone.
+- **Beefed up `--help` output across the CLI.** Every command's docstring now explains what it does, when to use it (vs. similar commands), what each flag actually means with units / examples, and shows runnable examples. Each option also has an inline ``e.g.`` snippet showing the flag in a real command (e.g. ``--top-k 50``, ``-t /imu/data``, ``--sync nearest``, ``-o ./training_data``) so devs can copy-paste from ``--help`` without reading the README.
 - **Switched Typer's docstring renderer to `rich_markup_mode="markdown"`.** The default Rich-markup mode silently strips `[vision]`-style brackets in help text (interprets them as markup tags), which made every documented `pip install 'rosbag-resurrector[vision]'` command read as `pip install 'rosbag-resurrector'`. Markdown mode preserves the brackets and renders lists, code, and headings cleanly in the terminal.
+- **Python API docstrings filled in across the public surface.** ``BagFrame``, ``TopicView``, ``Exporter``, ``DatasetManager``, ``BagRef``, ``SyncConfig``, ``DatasetMetadata``, ``scan()``, and ``search()`` now all have full Args / Returns / Raises / Example blocks. ``help(bf.export)`` in a REPL or hovering in an IDE actually teaches you what the method does, what each parameter accepts, and what the call looks like in practice. Previously most public methods had a one-line summary and no example.
+- **FastAPI dashboard backend route docs.** Every route in ``resurrector/dashboard/api.py`` now has a docstring that populates the auto-generated OpenAPI spec at ``localhost:8080/docs``. Each entry explains what the endpoint returns, what page on the dashboard uses it, and any preconditions (e.g. ``[vision]`` extra needed for semantic search). Power users hitting the backend directly no longer have to read the source.
 
 ## [0.4.1] — 2026-04-28
 
