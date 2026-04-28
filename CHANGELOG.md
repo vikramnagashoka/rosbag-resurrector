@@ -8,6 +8,10 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+### Fixed
+
+- **`resurrector doctor` install hints** — the "Install" column for optional extras (vision, all-exports, watch, bridge-live) was rendering as bare `pip install rosbag-resurrector`, eating the `[extras]` brackets because Rich was parsing them as markup tags. Now escapes detail/fix_hint so users see the actual command they need to run (e.g. `pip install rosbag-resurrector[vision]`).
+
 ## [0.4.0] — 2026-04-26
 
 ### What's new

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import os
+
+from rich.console import Console
 
 from resurrector.cli.doctor import (
     CheckResult,
@@ -10,6 +13,7 @@ from resurrector.cli.doctor import (
     _check_index_path,
     _check_module,
     _check_python,
+    render,
     run_all_checks,
 )
 
@@ -58,3 +62,28 @@ class TestRunAllChecks:
         assert "Python" in names
         assert "MCAP parser" in names
         assert "DuckDB index" in names
+
+
+class TestRender:
+    def test_pip_extras_brackets_preserved(self, monkeypatch):
+        # Square brackets in Rich are markup syntax. Without escape() the
+        # render strips "[vision]" / "[all-exports]" etc. and the user sees
+        # `pip install rosbag-resurrector` — same command they already ran.
+        results = [
+            CheckResult(
+                "Zarr export", "warn", "zarr not installed",
+                "pip install rosbag-resurrector[all-exports]",
+                tier="optional",
+            ),
+        ]
+        buf = io.StringIO()
+        # Patch the module-level Console to write into our buffer
+        import resurrector.cli.doctor as doc
+        monkeypatch.setattr(
+            doc, "Console", lambda: Console(file=buf, width=200, force_terminal=False)
+        )
+        render(results)
+        out = buf.getvalue()
+        assert "[all-exports]" in out, (
+            f"pip extras bracket eaten by Rich markup parser; output was:\n{out}"
+        )

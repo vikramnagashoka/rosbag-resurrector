@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 
@@ -186,7 +187,10 @@ def render(results: list[CheckResult]) -> tuple[int, int, int]:
 
     passed = warned = failed = 0
     for r in core:
-        core_table.add_row(r.name, _style(r.status), r.detail, r.fix_hint)
+        # Escape detail/fix_hint so pip-extras like "[vision]" aren't
+        # eaten by Rich's markup parser. _style() output is already markup
+        # and must NOT be escaped.
+        core_table.add_row(r.name, _style(r.status), escape(r.detail), escape(r.fix_hint))
         if r.status == "pass":
             passed += 1
         elif r.status == "warn":
@@ -205,7 +209,9 @@ def render(results: list[CheckResult]) -> tuple[int, int, int]:
         opt_table.add_column("Detail", style="dim")
         opt_table.add_column("Install", style="dim")
         for r in optional:
-            opt_table.add_row(r.name, _optional_style(r.status), r.detail, r.fix_hint)
+            opt_table.add_row(
+                r.name, _optional_style(r.status), escape(r.detail), escape(r.fix_hint)
+            )
             if r.status == "pass":
                 passed += 1
         console.print()
