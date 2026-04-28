@@ -87,3 +87,19 @@ class TestRender:
         assert "[all-exports]" in out, (
             f"pip extras bracket eaten by Rich markup parser; output was:\n{out}"
         )
+
+    def test_optional_extras_hints_are_shell_quoted(self):
+        # zsh (default on macOS since 10.15) treats unquoted square brackets
+        # as glob patterns and refuses the command. Every optional fix_hint
+        # that mentions a pip extras spec must wrap the package in quotes
+        # so copy-paste works on Mac out of the box.
+        results = run_all_checks()
+        for r in results:
+            if r.tier != "optional":
+                continue
+            if "pip install" not in r.fix_hint:
+                continue
+            assert "'rosbag-resurrector[" in r.fix_hint, (
+                f"optional check {r.name!r} prints unquoted pip extras: "
+                f"{r.fix_hint!r} — will fail on zsh"
+            )

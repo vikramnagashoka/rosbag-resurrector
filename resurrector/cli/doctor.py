@@ -128,39 +128,41 @@ def run_all_checks() -> list[CheckResult]:
         _check_index_path(),
         _check_allowed_roots(),
         # --- optional extras ---
+        # Quote the package spec so zsh (default on macOS) doesn't try
+        # to glob the [extras] brackets and refuse the command.
         _check_module(
             "PIL", "Image/frame parsing",
-            "pip install rosbag-resurrector[vision-lite]",
+            "pip install 'rosbag-resurrector[vision-lite]'",
             tier="optional",
         ),
         _check_module(
             "cv2", "Video export",
-            "pip install rosbag-resurrector[vision-lite]",
+            "pip install 'rosbag-resurrector[vision-lite]'",
             tier="optional",
         ),
         _check_module(
             "sentence_transformers", "CLIP semantic search (local)",
-            "pip install rosbag-resurrector[vision]",
+            "pip install 'rosbag-resurrector[vision]'",
             tier="optional",
         ),
         _check_module(
             "openai", "CLIP semantic search (OpenAI)",
-            "pip install rosbag-resurrector[vision-openai]",
+            "pip install 'rosbag-resurrector[vision-openai]'",
             tier="optional",
         ),
         _check_module(
             "rclpy", "Live ROS 2 bridge",
-            "pip install rosbag-resurrector[bridge-live] (requires ROS 2 install)",
+            "pip install 'rosbag-resurrector[bridge-live]' (requires ROS 2 install)",
             tier="optional",
         ),
         _check_module(
             "watchdog", "Watch mode (auto-index new bags)",
-            "pip install rosbag-resurrector[watch]",
+            "pip install 'rosbag-resurrector[watch]'",
             tier="optional",
         ),
         _check_module(
             "zarr", "Zarr export",
-            "pip install rosbag-resurrector[all-exports]",
+            "pip install 'rosbag-resurrector[all-exports]'",
             tier="optional",
         ),
         _check_converter("mcap", "mcap CLI (.bag -> .mcap conversion)"),

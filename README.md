@@ -102,7 +102,7 @@ Click into the bag. From the Explorer page you can:
 - **Export button** — opens the dialog for Parquet / HDF5 / CSV / NumPy / Zarr export
 
 Other pages worth trying:
-- **Search** — semantic frame search across all your indexed bags ("robot dropping object" → matching clips with thumbnails). Requires `pip install rosbag-resurrector[vision]` for the local CLIP backend, OR `[vision-openai]` for the OpenAI API backend
+- **Search** — semantic frame search across all your indexed bags ("robot dropping object" → matching clips with thumbnails). Requires `pip install 'rosbag-resurrector[vision]'` for the local CLIP backend, OR `[vision-openai]` for the OpenAI API backend
 - **Datasets** — create versioned dataset collections for ML training pipelines
 - **Bridge** — start a PlotJuggler-compatible WebSocket bridge from any bag in one click
 - **Compare** — side-by-side topic / health comparison between two bags
@@ -190,13 +190,13 @@ In Jupyter, just display the `bf` object — it renders a rich HTML table with h
 Install only what you need:
 
 ```bash
-pip install rosbag-resurrector[vision]        # local CLIP semantic search (~2GB model)
-pip install rosbag-resurrector[vision-openai] # OpenAI-backed semantic search (lighter)
-pip install rosbag-resurrector[vision-lite]   # image/video parsing, no ML
-pip install rosbag-resurrector[bridge-live]   # live ROS 2 topic bridge (requires rclpy)
-pip install rosbag-resurrector[watch]         # auto-index new bags as they appear
-pip install rosbag-resurrector[all-exports]   # Zarr, additional export formats
-pip install rosbag-resurrector[ros1]          # ROS 1 .bag support via rosbags
+pip install 'rosbag-resurrector[vision]'        # local CLIP semantic search (~2GB model)
+pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search (lighter)
+pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
+pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
+pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
+pip install 'rosbag-resurrector[all-exports]'   # Zarr, additional export formats
+pip install 'rosbag-resurrector[ros1]'          # ROS 1 .bag support via rosbags
 ```
 
 Run `resurrector doctor` any time to see which extras are active.
@@ -335,13 +335,13 @@ Uses CLIP embeddings stored in DuckDB for fast cosine similarity search. Support
 
 ```bash
 # Option 1: Local CLIP (recommended, ~2GB model download)
-pip install rosbag-resurrector[vision]
+pip install 'rosbag-resurrector[vision]'
 
 # Option 2: OpenAI API (lighter install, requires API key)
-pip install rosbag-resurrector[vision-openai]
+pip install 'rosbag-resurrector[vision-openai]'
 
 # Option 3: Just image parsing + video export, no ML
-pip install rosbag-resurrector[vision-lite]
+pip install 'rosbag-resurrector[vision-lite]'
 ```
 
 **Python API:**
@@ -498,7 +498,7 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
-LeRobot needs no extra deps. RLDS needs `tensorflow`: `pip install rosbag-resurrector[all-exports]`.
+LeRobot needs no extra deps. RLDS needs `tensorflow`: `pip install 'rosbag-resurrector[all-exports]'`.
 
 ### Robotics Transforms
 

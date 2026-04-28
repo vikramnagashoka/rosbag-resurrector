@@ -48,8 +48,8 @@ def main() -> None:
     if not (has_local or has_openai):
         print(
             "\n  [SKIP] Semantic search needs a CLIP backend. Install one:\n"
-            "    pip install rosbag-resurrector[vision]         # local CLIP, ~2GB model\n"
-            "    pip install rosbag-resurrector[vision-openai]  # OpenAI API, lighter\n"
+            "    pip install 'rosbag-resurrector[vision]'         # local CLIP, ~2GB model\n"
+            "    pip install 'rosbag-resurrector[vision-openai]'  # OpenAI API, lighter\n"
         )
         return
 
@@ -78,7 +78,7 @@ def main() -> None:
             print(f"  [SKIP] OpenAI backend needs an API key:\n"
                   f"           export OPENAI_API_KEY=sk-...\n"
                   f"         Or install the local CLIP backend:\n"
-                  f"           pip install rosbag-resurrector[vision]")
+                  f"           pip install 'rosbag-resurrector[vision]'")
         else:
             print(f"  [SKIP] Frame indexing failed: {e}")
         index.close()

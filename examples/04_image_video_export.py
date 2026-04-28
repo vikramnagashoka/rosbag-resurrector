@@ -62,7 +62,7 @@ def main() -> None:
             print(f"  Wrote {video_path.name}  ({video_path.stat().st_size // 1024} KB)")
             print(f"  Open with: any video player (VLC, QuickTime, etc.)")
     except ImportError as e:
-        print(f"  [SKIP] MP4 export needs OpenCV: pip install rosbag-resurrector[vision-lite]")
+        print(f"  [SKIP] MP4 export needs OpenCV: pip install 'rosbag-resurrector[vision-lite]'")
         print(f"         ({e})")
 
     print(

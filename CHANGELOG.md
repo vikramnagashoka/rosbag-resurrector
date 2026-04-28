@@ -10,7 +10,8 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ### Fixed
 
-- **`resurrector doctor` install hints** — the "Install" column for optional extras (vision, all-exports, watch, bridge-live) was rendering as bare `pip install rosbag-resurrector`, eating the `[extras]` brackets because Rich was parsing them as markup tags. Now escapes detail/fix_hint so users see the actual command they need to run (e.g. `pip install rosbag-resurrector[vision]`).
+- **`resurrector doctor` install hints** — the "Install" column for optional extras (vision, all-exports, watch, bridge-live) was rendering as bare `pip install rosbag-resurrector`, eating the `[extras]` brackets because Rich was parsing them as markup tags. Now escapes detail/fix_hint so users see the actual command they need to run.
+- **Shell-safe pip extras commands everywhere** — `pip install rosbag-resurrector[vision]` and friends now print and document as `pip install 'rosbag-resurrector[vision]'` (single-quoted package spec). Without quotes, zsh — the default shell on macOS since 10.15 — treats `[vision]` as a glob pattern and refuses the command (`zsh: no matches found`). Quoted form works on zsh, bash, fish, and PowerShell. Updated in `doctor`'s output, README install commands, and example scripts.
 
 ## [0.4.0] — 2026-04-26
 
