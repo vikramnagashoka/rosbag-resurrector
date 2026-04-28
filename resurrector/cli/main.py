@@ -1281,7 +1281,7 @@ def bridge_live(
     )] = 50.0,
     no_browser: Annotated[bool, typer.Option("--no-browser",
         help="Accepted for API parity with `bridge playback`; live mode "
-             "never opens a browser.",
+             "never opens a browser. e.g. --no-browser",
     )] = False,
 ):
     """Relay LIVE ROS 2 topics over WebSocket — PlotJuggler-compatible.
