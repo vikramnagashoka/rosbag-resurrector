@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rosbag-resurrector"
-version = "0.4.0"
+version = "0.4.1"
 description = "Stop letting your rosbag data rot. A pandas-like analysis tool for robotics bag files — no ROS install required."
 readme = "README.md"
 license = {text = "MIT"}

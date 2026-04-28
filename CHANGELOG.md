@@ -8,16 +8,27 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-28
+
+### What's new
+
+Patch release. Fixes a critical bug in semantic frame search and a few launch-prep paper cuts in the install / doctor flow. Also closes a CI coverage gap that allowed those bugs to ship.
+
 ### Fixed
 
-- **Semantic frame search was completely broken on every install** — `BagIndex.search_embeddings()` had a parameter-order bug that fed `min_similarity` (a scalar float) to the WHERE clause's embedding placeholder and the embedding list to the threshold comparison. Every search raised `duckdb.BinderException: Cannot compare values of type DOUBLE and type DOUBLE[]`. The end-to-end test in `test_vision.py` would have caught it but is gated behind `pytest.importorskip("sentence_transformers")` and CI doesn't install the `[vision]` extra (avoids the 2 GB CLIP model download), so the test was always skipped. New SQL-level regression tests in `test_indexer_concurrency.py::TestSearchEmbeddings` insert synthetic 512-d embeddings directly so the param binding is exercised on every CI run, no CLIP model needed.
+- **Semantic frame search was completely broken on every install** — `BagIndex.search_embeddings()` had a parameter-order bug that fed `min_similarity` (a scalar float) to the WHERE clause's embedding placeholder and the embedding list to the threshold comparison. Every search raised `duckdb.BinderException: Cannot compare values of type DOUBLE and type DOUBLE[]`. The end-to-end test in `test_vision.py` would have caught it but is gated behind `pytest.importorskip("sentence_transformers")` and CI didn't install the `[vision]` extra (avoiding the 2 GB CLIP model download), so the test was always skipped. New SQL-level regression tests in `test_indexer_concurrency.py::TestSearchEmbeddings` insert synthetic 512-d embeddings directly so the param binding is exercised on every CI run, no CLIP model needed.
+- **`resurrector doctor` install hints** — the "Install" column for optional extras (vision, all-exports, watch, bridge-live) was rendering as bare `pip install rosbag-resurrector`, eating the `[extras]` brackets because Rich was parsing them as markup tags. Now escapes detail/fix_hint so users see the actual command they need to run.
+- **Shell-safe pip extras commands everywhere** — `pip install rosbag-resurrector[vision]` and friends now print and document as `pip install 'rosbag-resurrector[vision]'` (single-quoted package spec). Without quotes, zsh — the default shell on macOS since 10.15 — treats `[vision]` as a glob pattern and refuses the command (`zsh: no matches found`). Quoted form works on zsh, bash, fish, and PowerShell. Updated in `doctor`'s output, README install commands, and example scripts.
 
 ### CI
 
 - **New `extras-test` job covers every optional extras bundle.** Previously CI only installed `[dev]`, so any code path gated by `pytest.importorskip("sentence_transformers")` / `import zarr` / `import watchdog` etc. was silently skipped — that's how the broken search SQL above shipped. The new job is a matrix over `vision-lite`, `vision`, `all-exports`, `watch`, and `ros1` — each entry installs the extra and runs the whole suite, so existing importorskip gates surface their tests for real. HuggingFace cache makes the CLIP-model download a one-time cost. Excluded by design: `bridge-live` (rclpy needs a real ROS 2 system install), `vision-openai` (needs API key), `packaging` (build tooling).
 - **Main `test` job no longer ignores `tests/test_vision.py`.** With the new extras-test job, the main job's importorskip gates handle the CLIP-dependent classes cleanly, and the non-CLIP `TestFrameSampler` tests now actually run there.
-- **`resurrector doctor` install hints** — the "Install" column for optional extras (vision, all-exports, watch, bridge-live) was rendering as bare `pip install rosbag-resurrector`, eating the `[extras]` brackets because Rich was parsing them as markup tags. Now escapes detail/fix_hint so users see the actual command they need to run.
-- **Shell-safe pip extras commands everywhere** — `pip install rosbag-resurrector[vision]` and friends now print and document as `pip install 'rosbag-resurrector[vision]'` (single-quoted package spec). Without quotes, zsh — the default shell on macOS since 10.15 — treats `[vision]` as a glob pattern and refuses the command (`zsh: no matches found`). Quoted form works on zsh, bash, fish, and PowerShell. Updated in `doctor`'s output, README install commands, and example scripts.
+
+### Docs
+
+- **README install section now surfaces MCAP as a hard dependency.** Adds an explicit `pip install mcap mcap-ros2-support` block + a callout clarifying the separate Go-based `mcap` CLI is only required for legacy ROS 1 `.bag` conversion. Previously you had to grep `pyproject.toml` to see what came bundled.
+- **`Performance contract` section now has a tabular "Tuning the bounds" subsection** listing every per-call OOM knob (`chunk_size`, `max_buffer_messages`, `max_lateness_ms`, `tolerance_ms`, `engine`, `force=True`) with its default and when to change, plus a separate "Hard limits (not configurable)" table for `LARGE_TOPIC_THRESHOLD` / `NUMPY_HARD_CAP`. Surfaces what was previously only in code docstrings.
 
 ## [0.4.0] — 2026-04-26
 
