@@ -8,6 +8,10 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+### Dashboard
+
+- **New "Help & Docs" page** at `/help`, linked from the top nav. Single in-app reference covering: a quick-start, a tour of every dashboard page (with what it does and when to use it), CLI reference table, Python API code snippets (open / iter_chunks / sync / health / export / search), links to the FastAPI auto-generated `/docs` (Swagger UI), `/redoc`, and `/openapi.json`, a troubleshooting section (zsh extras quoting, search-blank-frames, scan-403, etc.), and external links (GitHub, README, CHANGELOG, PyPI). Right-aligned in the nav so it reads as a "secondary" reference link, separate from the workspace pages.
+
 ### Docs
 
 - **Beefed up `--help` output across the CLI.** Every command's docstring now explains what it does, when to use it (vs. similar commands), what each flag actually means with units / examples, and shows runnable examples. Each option also has an inline ``e.g.`` snippet showing the flag in a real command (e.g. ``--top-k 50``, ``-t /imu/data``, ``--sync nearest``, ``-o ./training_data``) so devs can copy-paste from ``--help`` without reading the README.
