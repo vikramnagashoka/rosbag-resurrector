@@ -8,9 +8,19 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-04-28
+
+### What's new
+
+Documentation release. Every user-facing surface — the CLI, the Python API, the dashboard, and the REST backend — is now self-documenting from its own help text. Plus a small dashboard bug fix surfaced while testing the new in-app docs page.
+
 ### Dashboard
 
 - **New "Help & Docs" page** at `/help`, linked from the top nav. Single in-app reference covering: a quick-start, a tour of every dashboard page (with what it does and when to use it), CLI reference table, Python API code snippets (open / iter_chunks / sync / health / export / search), links to the FastAPI auto-generated `/docs` (Swagger UI), `/redoc`, and `/openapi.json`, a troubleshooting section (zsh extras quoting, search-blank-frames, scan-403, etc.), and external links (GitHub, README, CHANGELOG, PyPI). Right-aligned in the nav so it reads as a "secondary" reference link, separate from the workspace pages.
+
+### Fixed
+
+- **SPA fallback for client-side routes.** `StaticFiles(html=True)` was returning 404 for any path that wasn't a real file in `/static`, including every React Router route — `/help`, `/search`, `/datasets`, `/compare`, `/compare-runs`, `/bridge` all 404'd on direct navigation or page reload. Worked fine via in-app `<Link>` clicks, which is why the bug went unnoticed. Subclassed `StaticFiles` to fall back to `index.html` on 404, the standard Starlette pattern. `/api/*` routes registered above the mount keep their normal handlers.
 
 ### Docs
 
