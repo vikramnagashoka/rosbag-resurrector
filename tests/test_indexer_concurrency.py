@@ -139,3 +139,75 @@ class TestMixedReadsAndWrites:
             t.join()
 
         assert not errors, f"Mixed r/w failed: {errors[:3]}"
+
+
+class TestSearchEmbeddings:
+    """SQL-level coverage for `search_embeddings` that doesn't need CLIP.
+
+    The full end-to-end test in test_vision.py uses a real CLIP model and
+    is gated behind importorskip("sentence_transformers") — CI doesn't
+    install the [vision] extra to avoid the 2 GB model download, so that
+    test is always skipped. These tests insert synthetic 512-d embeddings
+    directly so the SQL plumbing (param order, type binding) is exercised
+    on every CI run.
+    """
+
+    def _make_indexed(self, populated_index, n_frames=4):
+        """Insert n synthetic embeddings against the first bag."""
+        bag_id = populated_index.list_bags()[0]["id"]
+        rows = [
+            (i + 1, bag_id, "/camera/rgb", 1_000_000_000 * (i + 1), i, [float(i) / 100] * 512)
+            for i in range(n_frames)
+        ]
+        with populated_index._lock:
+            populated_index.conn.executemany(
+                "INSERT INTO frame_embeddings (id, bag_id, topic, timestamp_ns, frame_index, embedding)"
+                " VALUES (?, ?, ?, ?, ?, ?::DOUBLE[512])",
+                rows,
+            )
+        return bag_id
+
+    def test_search_runs_without_binder_error(self, populated_index):
+        """Regression: param-order bug raised
+        `Cannot compare values of type DOUBLE and type DOUBLE[]`
+        because WHERE's embedding placeholder was getting min_similarity.
+        """
+        self._make_indexed(populated_index)
+        results = populated_index.search_embeddings(
+            query_embedding=[0.01] * 512,
+            top_k=10,
+            min_similarity=0.0,
+        )
+        # We don't assert on result content (synthetic embeddings, not real CLIP) —
+        # just that the SQL planned, bound, and executed without raising.
+        assert isinstance(results, list)
+
+    def test_search_with_bag_id_filter(self, populated_index):
+        """The optional bag_id condition adds a placeholder mid-query —
+        params must still match textual order."""
+        bag_id = self._make_indexed(populated_index)
+        results = populated_index.search_embeddings(
+            query_embedding=[0.01] * 512,
+            top_k=10,
+            bag_id=bag_id,
+            min_similarity=0.0,
+        )
+        assert isinstance(results, list)
+        # All returned rows should be from the requested bag
+        for r in results:
+            assert r["bag_id"] == bag_id
+
+    def test_search_returns_similarity_column(self, populated_index):
+        """The SELECT also computes similarity — that placeholder
+        must get the embedding too, not the threshold."""
+        self._make_indexed(populated_index)
+        results = populated_index.search_embeddings(
+            query_embedding=[0.05] * 512,
+            top_k=2,
+            min_similarity=0.0,
+        )
+        if results:
+            assert "similarity" in results[0]
+            assert isinstance(results[0]["similarity"], float)
+            # Cosine similarity is bounded; a real DOUBLE not a list
+            assert -1.0 <= results[0]["similarity"] <= 1.0

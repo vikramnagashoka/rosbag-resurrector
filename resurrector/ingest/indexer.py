@@ -504,15 +504,23 @@ class BagIndex:
         min_similarity: float = 0.15,
     ) -> list[dict[str, Any]]:
         """Cosine similarity search against frame embeddings."""
+        # Params must match the textual order of `?` placeholders in the SQL
+        # below. The SELECT's similarity expression comes first textually,
+        # then WHERE's similarity expression, then the threshold, then the
+        # optional bag_id filter, then LIMIT.
+        params: list[Any] = [
+            query_embedding,    # SELECT  list_cosine_similarity(fe.embedding, ?::DOUBLE[512])
+            query_embedding,    # WHERE   list_cosine_similarity(fe.embedding, ?::DOUBLE[512])
+            min_similarity,     # WHERE   ... >= ?
+        ]
         conditions = ["list_cosine_similarity(fe.embedding, ?::DOUBLE[512]) >= ?"]
-        params: list[Any] = [query_embedding, min_similarity]
 
         if bag_id is not None:
             conditions.append("fe.bag_id = ?")
             params.append(bag_id)
 
+        params.append(top_k)    # LIMIT  ?
         where = " AND ".join(conditions)
-        params.extend([query_embedding, top_k])
 
         with self._lock:
             rows = self.conn.execute(f"""
