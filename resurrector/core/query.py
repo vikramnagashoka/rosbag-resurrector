@@ -12,18 +12,41 @@ def search(
     query: str,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Search indexed bags using a query string.
+    """Search bags in the index with a compact filter-string DSL.
 
-    Query syntax:
-        topic:/camera/rgb         — has this topic
-        health:>80                — health score above 80
-        tag:task:pick_and_place   — has this tag
-        after:2025-01-01          — recorded after date
-        before:2025-06-01         — recorded before date
-        Free text                 — matches against file path
+    Query terms are space-separated. Multiple terms compose with AND.
 
-    Example:
-        results = search("topic:/camera/rgb health:>80 after:2025-01")
+    Supported terms:
+
+      ===============================  ===========================================
+      Term                             Meaning
+      ===============================  ===========================================
+      ``topic:<name>``                 Has this exact topic name
+      ``health:>N``                    Health score strictly greater than N
+      ``health:<N``                    Health score strictly less than N
+      ``health:>=N`` / ``health:<=N``  Inclusive variants
+      ``tag:<key>:<value>``            Has this exact tag
+      ``after:YYYY-MM-DD``             Recorded on or after this date
+      ``before:YYYY-MM-DD``            Recorded on or before this date
+      ``<plain text>``                 Substring match against the file path
+      ===============================  ===========================================
+
+    Args:
+        query: The filter string. Empty string returns every indexed bag.
+        db_path: Custom index DB path. ``None`` uses ``~/.resurrector/index.db``.
+
+    Returns:
+        List of bag dicts (each has ``id``, ``path``, ``health_score``,
+        ``duration_sec``, ``recorded_at``, etc.). Empty list if no matches.
+
+    Example::
+
+        from resurrector import search
+
+        # Clean recent bags with IMU data
+        hits = search("topic:/imu/data health:>=80 after:2026-04-01")
+        for bag in hits:
+            print(bag["path"], "score:", bag["health_score"])
     """
     index = BagIndex(db_path or DEFAULT_INDEX_PATH)
     try:

@@ -28,7 +28,19 @@ logger = logging.getLogger("resurrector.core.dataset")
 
 @dataclass
 class BagRef:
-    """Reference to a bag file (or slice of one) in a dataset."""
+    """Reference to a bag file or a time-slice of one, used inside a dataset version.
+
+    Attributes:
+        path: Filesystem path to the source bag.
+        topics: Topics to include from this bag, or ``None`` for all topics.
+        start_time: Time-slice start, e.g. ``"10s"`` or ``5.0``. ``None`` = bag start.
+        end_time: Time-slice end, same format.
+
+    Example::
+
+        BagRef(path="session_001.mcap")
+        BagRef(path="long_run.mcap", topics=["/imu/data"], start_time="10s", end_time="60s")
+    """
     path: str
     topics: list[str] | None = None  # None = all topics
     start_time: str | float | None = None  # time slice start
@@ -37,7 +49,17 @@ class BagRef:
 
 @dataclass
 class SyncConfig:
-    """Synchronization configuration for a dataset."""
+    """Sync configuration for a dataset version. Mirrors :meth:`BagFrame.sync`.
+
+    Attributes:
+        method: ``"nearest"`` / ``"interpolate"`` / ``"sample_and_hold"``.
+        tolerance_ms: Maximum time delta for a match, in milliseconds.
+        anchor: Anchor topic name. ``None`` picks the highest-frequency topic.
+
+    Example::
+
+        SyncConfig(method="nearest", tolerance_ms=50.0, anchor="/joint_states")
+    """
     method: str = "nearest"
     tolerance_ms: float = 50.0
     anchor: str | None = None
@@ -45,7 +67,30 @@ class SyncConfig:
 
 @dataclass
 class DatasetMetadata:
-    """Metadata for publishing (HuggingFace-compatible)."""
+    """Optional dataset-card fields. Surfaced in the auto-generated README.
+
+    Designed to map cleanly onto a HuggingFace Hub dataset card if you
+    later publish there.
+
+    Attributes:
+        description: Free-text description of the dataset.
+        license: SPDX-style license id (default ``"MIT"``).
+        citation: BibTeX or plain-text citation block.
+        tags: Free-form tags for filtering / search.
+        robot_type: e.g. ``"digit"``, ``"spot"``, ``"ur5"``.
+        environment: e.g. ``"warehouse"``, ``"home"``, ``"lab"``.
+        task: e.g. ``"pick_and_place"``, ``"navigation"``.
+
+    Example::
+
+        DatasetMetadata(
+            description="Pick-and-place across April",
+            license="CC-BY-4.0",
+            tags=["manipulation", "real-world"],
+            robot_type="digit",
+            task="pick_and_place",
+        )
+    """
     description: str = ""
     license: str = "MIT"
     citation: str = ""
@@ -70,7 +115,31 @@ class DatasetVersion:
 
 
 class DatasetManager:
-    """Manage datasets stored in DuckDB."""
+    """Create, list, and export reproducible bag-derived datasets, stored in DuckDB.
+
+    A dataset is a named container; each version pins a set of bags +
+    sync/export config. On export, every output file is hashed into a
+    ``manifest.json`` so the dataset is byte-for-byte reproducible.
+
+    Args:
+        db_path: Custom index DB. ``None`` uses ``~/.resurrector/index.db``.
+
+    Example::
+
+        from resurrector import DatasetManager, BagRef, SyncConfig
+        mgr = DatasetManager()
+        mgr.create("pick-place", "Pick-and-place runs April 2026")
+        mgr.create_version(
+            dataset_name="pick-place",
+            version="1.0",
+            bag_refs=[BagRef(path="session_001.mcap")],
+            topics=["/imu/data", "/joint_states"],
+            sync_config=SyncConfig(method="nearest", tolerance_ms=50),
+            export_format="parquet",
+        )
+        mgr.export_version("pick-place", "1.0", "./out")
+        mgr.close()
+    """
 
     def __init__(self, db_path: str | Path | None = None):
         from resurrector.ingest.indexer import DEFAULT_INDEX_PATH
@@ -111,7 +180,20 @@ class DatasetManager:
         """)
 
     def create(self, name: str, description: str = "") -> int:
-        """Create a new dataset. Returns dataset ID."""
+        """Create a new (empty) dataset.
+
+        Args:
+            name: Unique dataset name.
+            description: Free-text description shown in ``list_datasets``
+                and the auto-generated README on export.
+
+        Returns:
+            The new dataset's integer id.
+
+        Example::
+
+            mgr.create("pick-place", "Pick-and-place runs April 2026")
+        """
         did = self.conn.execute("SELECT nextval('dataset_id_seq')").fetchone()[0]
         self.conn.execute(
             "INSERT INTO datasets (id, name, description) VALUES (?, ?, ?)",
@@ -131,7 +213,51 @@ class DatasetManager:
         downsample_hz: float | None = None,
         metadata: DatasetMetadata | None = None,
     ) -> int:
-        """Create a new version of a dataset. Returns version ID."""
+        """Pin a set of bags + sync / export settings to a named version.
+
+        The dataset must already exist (call :meth:`create` first). The
+        version captures everything needed to re-materialize the same
+        data later: bag paths, topic filter, time slices, sync method,
+        export format, downsampling. No data is written to disk yet —
+        call :meth:`export_version` for that.
+
+        Args:
+            dataset_name: The dataset's name (must exist).
+            version: Version label. Free-form (``"1.0"``, ``"2026-04-28"``).
+            bag_refs: List of :class:`BagRef` — bags to include, with optional
+                per-bag topic filter and time slice.
+            topics: Default topic filter applied if a ``BagRef`` doesn't
+                specify its own. ``None`` means all topics.
+            sync_config: Optional :class:`SyncConfig` to time-align the
+                included topics on export.
+            export_format: Format used at materialization time. Supports
+                anything :class:`Exporter` does — ``parquet``, ``hdf5``,
+                ``lerobot``, ``rlds``, etc.
+            downsample_hz: Resample rate applied at export time.
+            metadata: Optional :class:`DatasetMetadata` published with
+                the dataset (auto-README, citation, license, etc.).
+
+        Returns:
+            The new version's integer id.
+
+        Raises:
+            KeyError: If ``dataset_name`` does not exist.
+
+        Example::
+
+            mgr.create_version(
+                dataset_name="pick-place",
+                version="1.0",
+                bag_refs=[
+                    BagRef(path="session_001.mcap"),
+                    BagRef(path="session_002.mcap", start_time="10s", end_time="60s"),
+                ],
+                topics=["/imu/data", "/joint_states"],
+                sync_config=SyncConfig(method="nearest", tolerance_ms=50),
+                export_format="parquet",
+                downsample_hz=50,
+            )
+        """
         ds = self._get_dataset_by_name(dataset_name)
         if ds is None:
             raise KeyError(f"Dataset '{dataset_name}' not found. Create it first.")
@@ -188,9 +314,34 @@ class DatasetManager:
         version: str,
         output_dir: str = "./datasets",
     ) -> Path:
-        """Export a dataset version to disk.
+        """Materialize a dataset version to disk with manifest, README, and config.
 
-        Creates the output directory with exported data files and a manifest.
+        Reads each bag listed in the version (applying per-bag time slice
+        if any), runs the recorded sync / downsample / format settings,
+        and writes the result to ``<output_dir>/<dataset_name>/<version>/``.
+
+        Side effects:
+          - Writes data files in the requested format
+          - Writes ``manifest.json`` (SHA256 of every output file) for
+            reproducibility
+          - Writes ``dataset_config.json`` (the exact config used)
+          - Writes ``README.md`` (auto-generated, HuggingFace-card-friendly)
+
+        Args:
+            dataset_name: Existing dataset's name.
+            version: Existing version label.
+            output_dir: Parent directory for the export.
+
+        Returns:
+            ``Path`` to the version's output directory.
+
+        Raises:
+            KeyError: If the dataset or version doesn't exist.
+
+        Example::
+
+            out = mgr.export_version("pick-place", "1.0", "./datasets")
+            print(out)            # ./datasets/pick-place/1.0
         """
         from resurrector.core.bag_frame import BagFrame
         from resurrector.core.export import Exporter
@@ -271,7 +422,18 @@ class DatasetManager:
         return output_path
 
     def list_datasets(self) -> list[dict[str, Any]]:
-        """List all datasets."""
+        """Return every dataset in the index, with versions pre-populated.
+
+        Returns:
+            List of dicts with keys ``id``, ``name``, ``description``,
+            ``created_at``, ``updated_at``, and ``versions`` (list of
+            per-version dicts). Sorted by most-recently-updated first.
+
+        Example::
+
+            for ds in mgr.list_datasets():
+                print(f"{ds['name']}: {len(ds['versions'])} version(s)")
+        """
         rows = self.conn.execute(
             "SELECT * FROM datasets ORDER BY updated_at DESC"
         ).fetchall()
@@ -284,7 +446,11 @@ class DatasetManager:
         return results
 
     def get_dataset(self, name: str) -> dict[str, Any] | None:
-        """Get a dataset by name with all versions."""
+        """Look up one dataset by name and return its versions.
+
+        Returns:
+            The dataset dict (with ``versions`` list) or ``None`` if not found.
+        """
         ds = self._get_dataset_by_name(name)
         if ds is None:
             return None
@@ -292,7 +458,14 @@ class DatasetManager:
         return ds
 
     def delete_dataset(self, name: str) -> bool:
-        """Delete a dataset and all its versions."""
+        """Remove a dataset and every version under it from the index.
+
+        Does NOT touch any already-exported files on disk. Idempotent:
+        deleting a non-existent dataset returns False rather than raising.
+
+        Returns:
+            True if the dataset was removed, False if it didn't exist.
+        """
         ds = self._get_dataset_by_name(name)
         if ds is None:
             return False
@@ -301,7 +474,13 @@ class DatasetManager:
         return True
 
     def delete_version(self, name: str, version: str) -> bool:
-        """Delete a specific version of a dataset."""
+        """Remove one version from a dataset (the dataset itself stays).
+
+        Does NOT touch already-exported files on disk.
+
+        Returns:
+            True if the version was removed, False if dataset/version not found.
+        """
         ds = self._get_dataset_by_name(name)
         if ds is None:
             return False
@@ -342,6 +521,10 @@ class DatasetManager:
         return [dict(zip(cols, row)) for row in rows]
 
     def close(self):
+        """Close the underlying DuckDB connection.
+
+        Safe to call multiple times. Recommended at the end of a script.
+        """
         self.conn.close()
 
 

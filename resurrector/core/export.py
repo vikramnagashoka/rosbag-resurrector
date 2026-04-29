@@ -68,10 +68,29 @@ class ExportResult:
 
 
 class Exporter:
-    """Export bag data to various ML-friendly formats.
+    """Lower-level export engine. Most users should call :meth:`BagFrame.export` instead.
+
+    Use this directly if you want fine-grained control: per-topic
+    streaming via :meth:`export_frames` / :meth:`export_video`, or
+    custom orchestration where ``BagFrame.export`` doesn't quite fit.
 
     All export paths stream chunk-by-chunk. Peak memory is roughly the
-    size of one chunk (CHUNK_SIZE rows), regardless of total topic size.
+    size of one chunk (``CHUNK_SIZE`` rows), regardless of total topic
+    size. ``numpy`` is the documented exception — it materializes
+    per-topic and refuses topics over ``NUMPY_HARD_CAP`` (1 M rows).
+
+    Example::
+
+        from resurrector import BagFrame
+        from resurrector.core.export import Exporter
+
+        bf = BagFrame("experiment.mcap")
+        Exporter().export(
+            bag_frame=bf,
+            topics=["/imu/data", "/joint_states"],
+            format="parquet",
+            output_dir="./out",
+        )
     """
 
     def export(
@@ -84,6 +103,33 @@ class Exporter:
         sync_method: str = "nearest",
         downsample_hz: float | None = None,
     ) -> Path:
+        """Stream-export selected topics to the given format.
+
+        Args:
+            bag_frame: The :class:`BagFrame` to read from.
+            topics: List of topic names. Missing topics are logged and
+                skipped — the export does NOT fail on a single missing
+                topic.
+            format: ``parquet`` (default), ``hdf5``, ``csv``, ``numpy``,
+                ``zarr`` (needs ``[all-exports]``), ``lerobot``, or
+                ``rlds`` (needs ``[all-exports]``).
+            output_dir: Directory to write into. Created if missing.
+            sync: When True (and 2+ topics), time-align via
+                :meth:`BagFrame.sync` before exporting; the result is
+                written as a single ``synced.<ext>`` file.
+            sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
+                Only used when ``sync`` is True.
+            downsample_hz: Per-chunk resampling rate before writing. ``None``
+                preserves the native rate.
+
+        Returns:
+            ``Path`` to ``output_dir``.
+
+        Raises:
+            LargeTopicError: If ``format == "numpy"`` and a topic has
+                more than ``NUMPY_HARD_CAP`` rows.
+            ValueError: For unknown format strings.
+        """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -171,7 +217,29 @@ class Exporter:
         max_frames: int | None = None,
         every_n: int = 1,
     ) -> Path:
-        """Export an image topic as numbered image files."""
+        """Write every frame of an image topic as a numbered image file.
+
+        Args:
+            topic_view: A :class:`~resurrector.core.bag_frame.TopicView`
+                for an image topic.
+            output_dir: Parent directory; a sub-directory named after
+                the topic is created beneath it.
+            format: ``png`` (lossless) or ``jpeg`` (smaller, lossy).
+            max_frames: Stop after this many frames. ``None`` for no limit.
+            every_n: Sample every Nth frame (1 = every frame, 5 = thin a
+                30 Hz stream to 6 Hz).
+
+        Returns:
+            ``Path`` to the topic's frames directory.
+
+        Raises:
+            ImportError: If Pillow isn't installed (in the
+                ``[vision-lite]`` extra).
+
+        Example::
+
+            Exporter().export_frames(bf["/camera/rgb"], "./frames", every_n=5)
+        """
         try:
             from PIL import Image as PILImage
         except ImportError:
@@ -206,7 +274,29 @@ class Exporter:
         fps: float | None = None,
         codec: str = "mp4v",
     ) -> Path:
-        """Export an image topic as an MP4 video file."""
+        """Encode an image topic as a single MP4 video file (via OpenCV).
+
+        Useful for quick visual review of a long camera recording without
+        materializing thousands of PNGs.
+
+        Args:
+            topic_view: A :class:`TopicView` for an image topic.
+            output_path: MP4 file to write. Parent directory is created.
+            fps: Output frame rate. Defaults to ``topic_view.frequency_hz``
+                (the recorded rate) if available, else 30.0.
+            codec: FourCC string for the encoder. Default ``"mp4v"``;
+                use ``"avc1"`` for broader compatibility on some players.
+
+        Returns:
+            ``Path`` to the written MP4.
+
+        Raises:
+            ImportError: If OpenCV isn't installed (in ``[vision-lite]``).
+
+        Example::
+
+            Exporter().export_video(bf["/camera/rgb"], "preview.mp4", fps=10)
+        """
         try:
             import cv2
         except ImportError:

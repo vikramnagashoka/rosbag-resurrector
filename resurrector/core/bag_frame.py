@@ -110,10 +110,22 @@ class IpcCache:
 
 
 class TopicView:
-    """Lazy view of a single topic in a bag file.
+    """Lazy view of a single topic, returned by ``BagFrame[topic_name]``.
 
-    Supports conversion to Polars/Pandas DataFrames and iteration
-    over raw messages.
+    Supports conversion to Polars/Pandas/NumPy, message-level iteration,
+    and bounded-memory chunked streaming for large topics. All eager
+    conversion methods (``to_polars`` etc.) refuse topics larger than
+    ``LARGE_TOPIC_THRESHOLD`` (1 M messages by default) unless you pass
+    ``force=True`` — see the README "Performance contract".
+
+    Example::
+
+        from resurrector import BagFrame
+        bf = BagFrame("experiment.mcap")
+        imu = bf["/imu/data"]                            # TopicView (lazy)
+        df = imu.to_polars()                             # Polars DataFrame
+        for chunk in imu.iter_chunks(chunk_size=10_000): # bounded-memory
+            process(chunk)
     """
 
     def __init__(
@@ -133,27 +145,43 @@ class TopicView:
 
     @property
     def name(self) -> str:
+        """The topic name as recorded in the bag (e.g. ``"/imu/data"``)."""
         return self._topic_name
 
     @property
     def message_type(self) -> str:
+        """ROS message type string (e.g. ``"sensor_msgs/msg/Imu"``)."""
         return self._topic_info.message_type
 
     @property
     def message_count(self) -> int:
+        """Total number of messages on this topic in the bag."""
         return self._topic_info.message_count
 
     @property
     def frequency_hz(self) -> float | None:
+        """Average publish frequency in Hz, or ``None`` if not computable."""
         return self._topic_info.frequency_hz
 
     @property
     def is_image_topic(self) -> bool:
-        """True if this topic contains image data (raw or compressed)."""
+        """True iff the topic is ``sensor_msgs/msg/Image`` or ``CompressedImage``."""
         return self._topic_info.message_type in _IMAGE_TYPES
 
     def iter_messages(self) -> Iterator[Message]:
-        """Iterate over raw messages for this topic."""
+        """Yield raw decoded messages one at a time. Memory bounded by message size.
+
+        Each yielded ``Message`` has ``.topic``, ``.timestamp_ns``,
+        ``.data`` (decoded fields as a dict), and ``.raw_data`` (the
+        underlying serialized bytes). Use this when you need access to
+        the raw schema-decoded fields rather than a flattened DataFrame.
+
+        Example::
+
+            for msg in bf["/imu/data"].iter_messages():
+                accel_x = msg.data["linear_acceleration"]["x"]
+                t = msg.timestamp_ns
+        """
         parser = parse_bag(self._bag_path)
         yield from parser.read_messages(
             topics=[self._topic_name],
@@ -162,13 +190,20 @@ class TopicView:
         )
 
     def iter_images(self) -> Iterator[tuple[int, np.ndarray]]:
-        """Yield (timestamp_ns, numpy_array) for image topics.
+        """Yield ``(timestamp_ns, image_array)`` pairs for an image topic.
 
-        Works with both sensor_msgs/msg/Image and
-        sensor_msgs/msg/CompressedImage topics.
+        Decodes each frame to an HxWxC NumPy array (uint8). Handles both
+        ``sensor_msgs/msg/Image`` (raw, encoding-aware) and
+        ``sensor_msgs/msg/CompressedImage`` (JPEG/PNG via OpenCV).
 
         Raises:
-            TypeError: If this topic is not an image type.
+            TypeError: If this topic is not an image type — see
+                :attr:`is_image_topic`.
+
+        Example::
+
+            for ts, frame in bf["/camera/rgb"].iter_images():
+                cv2.imwrite(f"frame_{ts}.png", frame)
         """
         if not self.is_image_topic:
             raise TypeError(
@@ -186,13 +221,30 @@ class TopicView:
                 yield msg.timestamp_ns, arr
 
     def iter_chunks(self, chunk_size: int = 50_000) -> Iterator[pl.DataFrame]:
-        """Yield topic messages as Polars DataFrames in fixed-size chunks.
+        """Yield the topic as Polars DataFrames in fixed-size chunks. Bounded memory.
 
-        This is the core streaming primitive. Memory usage is bounded by
-        chunk_size regardless of total topic size.
+        This is the core streaming primitive. Memory usage is bounded
+        by ``chunk_size`` regardless of total topic size — open a 100 GB
+        bag without OOMing. Nested message fields are flattened with
+        dot notation (``linear_acceleration.x``, ``orientation.w``).
+
+        Args:
+            chunk_size: Rows per yielded DataFrame. Default 50_000.
+                Lower for tighter RSS budgets; raise to amortize the
+                per-chunk overhead on fast disks.
 
         Yields:
-            pl.DataFrame of up to chunk_size rows with flattened columns.
+            ``pl.DataFrame`` with up to ``chunk_size`` rows and a
+            ``timestamp_ns`` column plus one column per leaf message field.
+
+        Example::
+
+            # Streaming downsample of a large topic to 1 Hz
+            buckets = []
+            for chunk in bf["/imu/data"].iter_chunks(chunk_size=10_000):
+                ds = chunk.group_by_dynamic("timestamp_ns", every="1s").mean()
+                buckets.append(ds)
+            full = pl.concat(buckets)
         """
         buffer: list[dict[str, Any]] = []
         for msg in self.iter_messages():
@@ -269,19 +321,32 @@ class TopicView:
         return IpcCache(path=tmp_path)
 
     def to_polars(self, force: bool = False) -> pl.DataFrame:
-        """Convert topic messages to a Polars DataFrame.
+        """Materialize the entire topic as one Polars DataFrame.
 
-        Flattens nested message fields using dot notation:
-        e.g., linear_acceleration.x, orientation.w
+        Flattens nested message fields with dot notation (e.g.
+        ``linear_acceleration.x``, ``orientation.w``). Cached after
+        the first call so repeated access is free.
 
-        Refuses topics larger than ``LARGE_TOPIC_THRESHOLD`` (1 M
-        messages by default) unless ``force=True`` — see the README
-        "Performance contract" section. For larger topics use
-        ``iter_chunks()`` or ``materialize_ipc_cache()`` instead.
+        Args:
+            force: Bypass the ``LARGE_TOPIC_THRESHOLD`` (1 M messages)
+                guard and materialize anyway. Use only when you've
+                confirmed the topic fits in RAM. For larger topics
+                prefer :meth:`iter_chunks` or
+                :meth:`materialize_ipc_cache`.
+
+        Returns:
+            ``pl.DataFrame`` with a ``timestamp_ns`` column plus one
+            column per leaf message field.
 
         Raises:
-            LargeTopicError: if message_count > LARGE_TOPIC_THRESHOLD
-                and force is False.
+            LargeTopicError: if ``message_count > LARGE_TOPIC_THRESHOLD``
+                and ``force`` is False. The exception message points at
+                the streaming alternatives.
+
+        Example::
+
+            df = bf["/imu/data"].to_polars()
+            big = bf["/camera/rgb"].to_polars(force=True)  # only if you have RAM
         """
         if self._cached_df is not None:
             return self._cached_df
@@ -314,22 +379,42 @@ class TopicView:
         return result
 
     def to_pandas(self, force: bool = False):
-        """Convert topic messages to a Pandas DataFrame.
+        """Materialize the entire topic as a Pandas DataFrame.
 
-        Same large-topic guard as ``to_polars``. Pass ``force=True`` to
-        opt in past the threshold.
+        Convenience wrapper around :meth:`to_polars` for users who
+        prefer Pandas. Same large-topic guard applies; pass
+        ``force=True`` to bypass it.
+
+        Returns:
+            ``pandas.DataFrame``.
+
+        Example::
+
+            df_pd = bf["/imu/data"].to_pandas()
+            df_pd.plot.line(x="timestamp_ns", y="linear_acceleration.x")
         """
         return self.to_polars(force=force).to_pandas()
 
     def to_numpy(self, force: bool = False) -> dict[str, np.ndarray]:
-        """Convert numeric columns to numpy arrays.
+        """Materialize the topic as a dict of column-name → numpy array.
 
-        Columns that cannot be converted (e.g., nested lists of varying length)
-        are skipped and their names collected in the returned dict's
-        ``__skipped__`` key so callers can inspect what was dropped.
+        Columns that cannot be converted to a numeric ndarray (nested
+        lists of varying length, structured fields, etc.) are skipped
+        and their names collected under the ``__skipped__`` key in the
+        return dict so callers can audit what was dropped.
 
-        Same large-topic guard as ``to_polars``. Pass ``force=True`` to
-        opt in past the threshold.
+        Same ``LARGE_TOPIC_THRESHOLD`` guard as :meth:`to_polars`.
+
+        Returns:
+            ``dict[str, np.ndarray]``. Always contains ``timestamp_ns``;
+            also contains one entry per convertible flat field.
+
+        Example::
+
+            arrays = bf["/imu/data"].to_numpy()
+            t = arrays["timestamp_ns"]
+            ax = arrays["linear_acceleration.x"]
+            print(arrays.get("__skipped__"))   # any columns that didn't convert
         """
         df = self.to_polars(force=force)
         result: dict[str, np.ndarray] = {}
@@ -355,19 +440,44 @@ class TopicView:
 
 
 class BagFrame:
-    """Main data abstraction for working with rosbag files.
+    """Pandas-like front door for a rosbag file. The main entry point of the library.
 
-    Provides a pandas-like API for robotics data:
+    Lazy by default — construction reads only metadata, not message
+    payloads. Topics are accessed with bracket-indexing (``bf[topic]``)
+    which returns a :class:`TopicView`. From there you can convert to
+    Polars / Pandas / NumPy, iterate in bounded-memory chunks, or feed
+    into :meth:`sync` / :meth:`export`.
+
+    Args:
+        path: Path to a bag file. Supports ``.mcap`` natively;
+            ``.bag`` (ROS 1) and ``.db3`` (ROS 2 SQLite) are
+            auto-converted to MCAP via the official ``mcap`` and
+            ``ros2 bag convert`` CLIs respectively.
+
+    Example::
+
+        from resurrector import BagFrame
 
         bf = BagFrame("experiment.mcap")
-        bf.info()                          # Overview of the bag
-        imu = bf["/imu/data"]              # Select a topic (lazy)
-        df = imu.to_polars()               # Get as Polars DataFrame
-        segment = bf.time_slice("10s", "30s")  # Time slice
-        synced = bf.sync(["/imu/data", "/joint_states"])  # Synchronize
+        bf.info()                                          # rich overview
+        df = bf["/imu/data"].to_polars()                   # Polars DataFrame
+        report = bf.health_report()                        # 0-100 quality score
+        synced = bf.sync(["/imu/data", "/joint_states"],   # multi-stream sync
+                         method="nearest", tolerance_ms=50)
+        bf.export(topics=["/imu/data"], format="parquet",  # ML-ready export
+                  output="./data")
     """
 
     def __init__(self, path: str | Path):
+        """Open a bag for analysis. Reads metadata only — message payloads stay on disk.
+
+        Raises:
+            FileNotFoundError: If the path doesn't exist.
+
+        Example::
+
+            bf = BagFrame("~/.resurrector/demo_sample.mcap")
+        """
         self._path = Path(path)
         if not self._path.exists():
             raise FileNotFoundError(f"Bag file not found: {self._path}")
@@ -378,35 +488,48 @@ class BagFrame:
 
     @property
     def path(self) -> Path:
+        """Filesystem path to the bag file."""
         return self._path
 
     @property
     def metadata(self) -> BagMetadata:
-        """Bag metadata (lazy loaded)."""
+        """Cached :class:`BagMetadata` — start/end time, topics, schemas, etc."""
         if self._metadata is None:
             self._metadata = self._parser.get_metadata()
         return self._metadata
 
     @property
     def topics(self) -> list[TopicInfo]:
-        """List of topics in the bag."""
+        """List of :class:`TopicInfo` records (name, type, count, frequency)."""
         return self.metadata.topics
 
     @property
     def topic_names(self) -> list[str]:
-        """List of topic names."""
+        """List of topic names as strings — convenient for iteration."""
         return [t.name for t in self.topics]
 
     @property
     def duration_sec(self) -> float:
+        """Bag duration in seconds (end - start)."""
         return self.metadata.duration_sec
 
     @property
     def message_count(self) -> int:
+        """Total number of messages across all topics."""
         return self.metadata.message_count
 
     def __getitem__(self, topic_name: str) -> TopicView:
-        """Select a topic by name. Returns a lazy TopicView."""
+        """Return a lazy :class:`TopicView` for ``topic_name`` — the main accessor.
+
+        Raises:
+            KeyError: If the topic is not present. The error message
+                lists the available topics.
+
+        Example::
+
+            imu = bf["/imu/data"]               # TopicView, no I/O yet
+            df = imu.to_polars()                # actual read happens here
+        """
         topic_info = self._find_topic(topic_name)
         return TopicView(self._path, topic_name, topic_info)
 
@@ -419,7 +542,20 @@ class BagFrame:
         raise KeyError(f"Topic '{name}' not found. Available: {available}")
 
     def info(self) -> str:
-        """Print a summary of the bag contents (like df.info())."""
+        """Print and return a human-readable summary of the bag.
+
+        Like ``pandas.DataFrame.info()`` — shows the bag's name, health
+        score, duration, size, and a per-topic table (name, type, count,
+        frequency, health). Side effect: prints to stdout. Also returns
+        the same text as a string for convenience.
+
+        Returns:
+            The full summary as a single string (already printed).
+
+        Example::
+
+            bf.info()
+        """
         meta = self.metadata
         health = self.health_report()
 
@@ -459,26 +595,52 @@ class BagFrame:
         return output
 
     def time_slice(self, start: str | float, end: str | float) -> "BagFrame":
-        """Create a time-sliced view of the bag.
+        """Return a view of the bag restricted to a time range.
+
+        The returned ``TimeslicedBagFrame`` quacks like a ``BagFrame``
+        for the API surface used in analysis (``[topic]``, ``sync``,
+        ``topic_names``, etc.) but every read is bounded to the
+        ``[start, end)`` window. Useful for "I only care about the
+        manipulation segment" workflows without re-recording.
 
         Args:
-            start: Start time as seconds (float) or string like "10s", "1.5min".
-            end: End time as seconds (float) or string like "30s", "2min".
+            start: Start time, relative to bag start. Accepts a float
+                (seconds) or a string like ``"10s"``, ``"1.5min"``,
+                ``"500ms"``, ``"2h"``.
+            end: End time, same format.
 
         Returns:
-            A new BagFrame-like object filtered to the time range.
+            A time-restricted view that supports the standard analysis API.
+
+        Example::
+
+            chunk = bf.time_slice("10s", "30s")
+            df = chunk["/imu/data"].to_polars()
+            chunk.sync(["/imu/data", "/joint_states"])
         """
         start_sec = _parse_time(start)
         end_sec = _parse_time(end)
         return TimeslicedBagFrame(self, start_sec, end_sec)
 
     def health_report(self) -> BagHealthReport:
-        """Run health checks and return a detailed report.
+        """Compute a 0-100 quality score for the bag plus per-topic breakdowns.
 
-        Streaming implementation: maintains a small per-topic
-        ``TopicHealthState`` and updates it message-by-message instead
-        of accumulating timestamp lists. Memory is bounded by
-        ``num_topics * constant``, regardless of bag size.
+        Detects dropped messages, time gaps, out-of-order timestamps,
+        frequency drift, and message-size anomalies. Cached after the
+        first call. Streaming implementation: memory is bounded by
+        ``num_topics × constant`` regardless of bag size.
+
+        Returns:
+            ``BagHealthReport`` with ``.score`` (0-100), ``.issues`` (list
+            of typed findings), ``.recommendations`` (suggested next steps),
+            and ``.topic_scores`` (per-topic breakdown).
+
+        Example::
+
+            r = bf.health_report()
+            print(f"Score: {r.score}/100 — {len(r.issues)} issues")
+            for issue in r.issues:
+                print(f"  [{issue.severity.value}] {issue.message}")
         """
         if self._health_report is not None:
             return self._health_report
@@ -590,18 +752,47 @@ class BagFrame:
         sync_method: str = "nearest",
         downsample_hz: float | None = None,
     ) -> Path:
-        """Export bag data to ML-friendly formats.
+        """Export bag data to ML-friendly formats — the main bulk-export entry point.
+
+        Streams topic data through the chosen format writer; chunk-streaming
+        formats (Parquet, HDF5, CSV, Zarr, LeRobot, RLDS) are bounded
+        by chunk size, not topic size. NumPy ``.npz`` materializes
+        per-topic and refuses topics over 1 M messages with a clear
+        :class:`LargeTopicError`.
 
         Args:
-            topics: Topics to export (default: all).
-            format: Output format — "parquet", "hdf5", "csv", "numpy", "zarr".
-            output: Output directory path.
-            sync: Whether to synchronize topics before export.
-            sync_method: Sync method if sync=True.
-            downsample_hz: Target frequency for downsampling.
+            topics: Topics to export. ``None`` means every non-image topic.
+            format: One of ``parquet`` (default, columnar, best for ML),
+                ``hdf5``, ``csv``, ``numpy``, ``zarr`` (needs
+                ``[all-exports]``), ``lerobot`` / ``rlds`` (needs
+                ``[all-exports]``, training-pipeline-ready).
+            output: Output directory. Created if missing.
+            sync: When True, time-align all topics before writing using
+                ``sync_method``.
+            sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
+                Only used when ``sync`` is True.
+            downsample_hz: Resample to this rate before writing. Useful
+                for shrinking a 1 kHz IMU to 50 Hz training data.
 
         Returns:
-            Path to the output directory.
+            ``Path`` to the output directory.
+
+        Raises:
+            LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
+
+        Example::
+
+            # Quick Parquet snapshot of two topics
+            bf.export(topics=["/imu/data", "/joint_states"], format="parquet",
+                      output="./parquet_out")
+
+            # Time-synced HDF5 at 50 Hz for ML training
+            bf.export(topics=["/imu/data", "/joint_states"],
+                      format="hdf5", output="./training",
+                      sync=True, sync_method="nearest", downsample_hz=50)
+
+            # LeRobot-formatted dataset for direct use in robot-learning pipelines
+            bf.export(format="lerobot", output="./lerobot_data")
         """
         from resurrector.core.export import Exporter
         exporter = Exporter()

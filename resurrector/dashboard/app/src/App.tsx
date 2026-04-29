@@ -6,6 +6,7 @@ import Compare from './pages/Compare'
 import Search from './pages/Search'
 import Datasets from './pages/Datasets'
 import Bridge from './pages/Bridge'
+import Help from './pages/Help'
 import { ErrorToastProvider } from './ErrorToast'
 
 // Lazy-load Plotly-heavy pages — they pull in plotly.js-cartesian
@@ -66,6 +67,11 @@ export default function App() {
           <Link to="/bridge" style={linkStyle}>
             Bridge
           </Link>
+          {/* Help link is right-aligned so it sits as a "secondary" nav item;
+              everything before it is workspace navigation, this is reference. */}
+          <Link to="/help" style={{ ...linkStyle, marginLeft: 'auto' }}>
+            Help & Docs
+          </Link>
         </nav>
         <main style={{ padding: '24px', maxWidth: '1400px', margin: '0 auto' }}>
           <Suspense fallback={<div style={loadingStyle}>Loading…</div>}>
@@ -78,6 +84,7 @@ export default function App() {
               <Route path="/search" element={<Search />} />
               <Route path="/datasets" element={<Datasets />} />
               <Route path="/bridge" element={<Bridge />} />
+              <Route path="/help" element={<Help />} />
             </Routes>
           </Suspense>
         </main>
