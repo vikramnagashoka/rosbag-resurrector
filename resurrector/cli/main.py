@@ -1390,27 +1390,65 @@ def demo(
     output: Annotated[Optional[Path], typer.Option(
         "--output", "-o",
         help="Where to write the sample bag. Defaults to "
-             "~/.resurrector/demo_sample.mcap. e.g. -o /tmp/demo.mcap",
+             "~/.resurrector/demo_sample.mcap (synth) or "
+             "~/.resurrector/samples/hku2.mcap (--download). "
+             "e.g. -o /tmp/demo.mcap",
     )] = None,
     run_full: Annotated[bool, typer.Option(
         "--full",
-        help="Also run scan + health + export on the generated bag, "
-             "showing the full pipeline end-to-end. e.g. --full",
+        help="Also run scan + health + export on the bag, showing the "
+             "full pipeline end-to-end. e.g. --full",
+    )] = False,
+    download: Annotated[bool, typer.Option(
+        "--download",
+        help="Download a real-data MCAP bag (HKU FAST-LIVO dataset, "
+             "~844 MB, CC-BY-NC-4.0) instead of generating the synthetic "
+             "sample. Real footage is needed for the dashboard's CLIP "
+             "semantic frame search to return visually meaningful results. "
+             "Idempotent — skips download if the file already exists. "
+             "e.g. --download",
+    )] = False,
+    download_url: Annotated[Optional[str], typer.Option(
+        "--download-url",
+        help="Override the default download URL (HKU FAST-LIVO hku2). "
+             "Use to fetch a different public sample bag. "
+             "e.g. --download-url https://example.com/sample.mcap",
+    )] = None,
+    force: Annotated[bool, typer.Option(
+        "--force",
+        help="Re-download (or re-generate) even if the target file already "
+             "exists. e.g. --force",
     )] = False,
 ):
-    """Generate a synthetic sample bag and walk through the basic workflow.
+    """Generate or download a sample bag and walk through the basic workflow.
 
-    Useful as a smoke test or to show what the tool can do without
-    needing your own data.
+    Default: generates a 5-second synthetic bag (fast, good for smoke tests
+    but cameras contain colored noise — bad for visual demos like CLIP
+    search). Pass --download to fetch a real-data MCAP bag with actual
+    camera footage instead.
+
+    Examples:
+      resurrector demo --full                          # synthetic + walkthrough
+      resurrector demo --download                      # fetch real-data sample
+      resurrector demo --download --full               # download + walkthrough
+      resurrector demo --download -o /data/sample.mcap # custom path
     """
+    if download:
+        _demo_download(output=output, run_full=run_full, url=download_url, force=force)
+        return
+
+    # Default path: generate synthetic bag
     from resurrector.demo.sample_bag import generate_bag, BagConfig
 
     output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
-    generate_bag(output, BagConfig(duration_sec=5.0))
-    console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
+    if output.exists() and not force:
+        console.print(f"[dim]Sample already exists at {output} (use --force to regenerate)[/dim]")
+    else:
+        console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
+        generate_bag(output, BagConfig(duration_sec=5.0))
+        console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
 
     console.print("[cyan]Opening with BagFrame...[/cyan]")
     from resurrector.core.bag_frame import BagFrame
@@ -1434,6 +1472,100 @@ def demo(
         f"  [cyan]resurrector scan {output.parent}[/cyan]       # index the bag\n"
         f"  [cyan]resurrector health {output}[/cyan]    # detailed health report\n"
         f"  [cyan]resurrector dashboard[/cyan]                   # open the web UI\n"
+    )
+
+
+def _demo_download(
+    output: Optional[Path],
+    run_full: bool,
+    url: Optional[str],
+    force: bool,
+) -> None:
+    """Implementation of `resurrector demo --download`."""
+    from resurrector.demo.download import (
+        DEFAULT_SAMPLE_URL,
+        LICENSE_NOTE,
+        download_sample,
+    )
+    from rich.progress import (
+        BarColumn, DownloadColumn, Progress, TextColumn,
+        TimeRemainingColumn, TransferSpeedColumn,
+    )
+
+    target = output  # may be None — download_sample handles default
+    download_url = url or DEFAULT_SAMPLE_URL
+
+    console.print(
+        f"[cyan]Downloading real-data sample bag (HKU FAST-LIVO, ~844 MB)...[/cyan]"
+    )
+    console.print(f"[dim]URL: {download_url}[/dim]")
+    if target:
+        console.print(f"[dim]Target: {target}[/dim]")
+    console.print()
+
+    progress = Progress(
+        TextColumn("[bold blue]hku2.mcap"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+
+    task_id = None
+    try:
+        with progress:
+            def cb(bytes_so_far: int, total: int) -> None:
+                nonlocal task_id
+                if task_id is None:
+                    # First chunk — set the bar's total now that we know it.
+                    # If server didn't send Content-Length (total=0), the bar
+                    # will show indeterminate spinner mode, which is fine.
+                    task_id = progress.add_task("download", total=total or None)
+                progress.update(task_id, completed=bytes_so_far)
+
+            result = download_sample(
+                target=target,
+                url=download_url,
+                progress_callback=cb,
+                force=force,
+            )
+    except Exception as e:
+        console.print(f"[red]Download failed: {type(e).__name__}: {e}[/red]")
+        raise typer.Exit(1)
+
+    if result.skipped:
+        size_mb = result.bytes_downloaded / (1024 * 1024)
+        console.print(
+            f"[green][OK] Already downloaded at {result.path} "
+            f"({size_mb:.0f} MB) — use --force to re-download[/green]\n"
+        )
+    else:
+        size_mb = result.bytes_downloaded / (1024 * 1024)
+        console.print(
+            f"[green][OK] Downloaded {size_mb:.0f} MB to {result.path}[/green]\n"
+        )
+
+    console.print(f"[yellow]{LICENSE_NOTE}[/yellow]\n")
+
+    console.print("[cyan]Opening with BagFrame...[/cyan]")
+    from resurrector.core.bag_frame import BagFrame
+    bf = BagFrame(result.path)
+    bf.info()
+    console.print()
+
+    if run_full:
+        console.print("[cyan]Running health check (real bags can take a moment)...[/cyan]")
+        report = bf.health_report()
+        console.print(f"Health score: [bold]{report.score}/100[/bold]")
+        console.print(f"Warnings: {len(report.warnings)}\n")
+
+    console.print(
+        "[dim]Next steps:[/dim]\n"
+        f"  [cyan]resurrector scan {result.path.parent}[/cyan]\n"
+        f"  [cyan]resurrector index-frames {result.path}[/cyan]    # build CLIP embeddings\n"
+        f"  [cyan]resurrector search-frames \"person walking\" --save ./hits[/cyan]\n"
+        f"  [cyan]resurrector dashboard[/cyan]                   # open localhost:8080\n"
     )
 
 
