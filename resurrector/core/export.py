@@ -902,23 +902,37 @@ def _stream_rlds(
 
 
 def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
-    """Stream chunks to Zarr using appendable arrays."""
+    """Stream chunks to Zarr using appendable chunked arrays.
+
+    Compatible with both zarr 2.x (DirectoryStore + create_dataset) and
+    zarr 3.x (LocalStore + create_array). Detected at import time.
+    Either way: peak memory bounded by chunk size, not topic size.
+    """
     try:
         import zarr
     except ImportError:
         raise ImportError(
             "Zarr export requires the zarr package. "
-            "Install with: pip install rosbag-resurrector[all-exports]"
+            "Install with: pip install 'rosbag-resurrector[all-exports]'"
         )
 
     filepath = output_path / f"{name}.zarr"
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     rows_written = 0
     failures: list[ExportColumnFailure] = []
     failed_cols: set[str] = set()
 
-    store = zarr.DirectoryStore(str(filepath))
-    root = zarr.group(store, overwrite=True)
-    arrays: dict[str, zarr.Array] = {}
+    # Zarr 2.x → 3.x renamed DirectoryStore → LocalStore and create_dataset →
+    # create_array. Detect via attribute presence to support both.
+    zarr_v3 = not hasattr(zarr, "DirectoryStore")
+    if zarr_v3:
+        store = zarr.storage.LocalStore(str(filepath))
+        root = zarr.create_group(store=store, overwrite=True)
+    else:
+        store = zarr.DirectoryStore(str(filepath))  # type: ignore[attr-defined]
+        root = zarr.group(store, overwrite=True)
+
+    arrays: dict = {}
 
     for chunk in chunks:
         chunk_rows = chunk.height
@@ -940,10 +954,20 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
                 failed_cols.add(col)
                 continue
             if col not in arrays:
-                arrays[col] = root.create_dataset(
-                    col, shape=(0,), chunks=(min(chunk_rows, CHUNK_SIZE),),
-                    dtype=arr.dtype,
-                )
+                if zarr_v3:
+                    arrays[col] = root.create_array(
+                        name=col,
+                        shape=(0,),
+                        chunks=(min(chunk_rows, CHUNK_SIZE),),
+                        dtype=arr.dtype,
+                    )
+                else:
+                    arrays[col] = root.create_dataset(  # type: ignore[attr-defined]
+                        col,
+                        shape=(0,),
+                        chunks=(min(chunk_rows, CHUNK_SIZE),),
+                        dtype=arr.dtype,
+                    )
             arrays[col].append(arr)
         rows_written += chunk_rows
 
