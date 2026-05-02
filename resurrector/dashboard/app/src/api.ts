@@ -130,6 +130,18 @@ export interface BridgeStatus {
   return_code?: number
 }
 
+export interface ExportPreset {
+  name: string
+  format: string
+  sync: boolean
+  sync_method: string
+  downsample_hz: number | null
+  topic_filter: string | null
+  description: string
+  extras_required: string[]
+  available: boolean
+}
+
 export interface FrameSearchResult {
   query: string
   mode: 'frames' | 'clips'
@@ -173,7 +185,15 @@ export const api = {
     }),
   exportBag: (
     bagId: number,
-    body: { topics: string[]; format: string; output_dir: string; sync?: boolean; sync_method?: string; downsample_hz?: number },
+    body: {
+      topics: string[]
+      format?: string
+      output_dir: string
+      sync?: boolean
+      sync_method?: string
+      downsample_hz?: number
+      preset?: string
+    },
   ) => request<{ output: string }>('POST', `/api/bags/${bagId}/export`, { body, query: {
     topics: body.topics.join(','),
     format: body.format,
@@ -181,7 +201,11 @@ export const api = {
     sync: body.sync,
     sync_method: body.sync_method,
     downsample_hz: body.downsample_hz,
+    preset: body.preset,
   } }),
+  // v0.5.0 — list named export presets for the ExportDialog dropdown
+  listExportPresets: () =>
+    request<ExportPreset[]>('GET', `/api/export-presets`),
   frameUrl: (bagId: number, topic: string, frameIndex: number, width?: number) => {
     const t = topic.startsWith('/') ? topic.slice(1) : topic
     const w = width ? `?width=${width}` : ''
