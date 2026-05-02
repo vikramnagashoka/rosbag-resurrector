@@ -43,6 +43,10 @@ export/
 # Node modules (dashboard frontend)
 node_modules/
 resurrector/dashboard/app/node_modules/
+# Dropbox conflict copies: "<name> 2", "<name> 3" etc. when multiple
+# devices touch the same path. The bare patterns above don't catch
+# these because of the trailing space + digit.
+**/node_modules\ *
 resurrector/dashboard/static/
 
 # Environment
@@ -58,12 +62,22 @@ dist/ubuntu/
 dist/build/
 .gstack/
 
+# gstack — personal install only; nothing gstack-related ships in the repo.
+# (gstack itself lives in ~/.claude/skills/gstack, outside the repo. These
+# patterns are defense-in-depth in case any host integration ever writes
+# to a per-project directory.)
+.codex/
+.factory/
+.opencode/
+
 # Local-only planning docs (kept on the maintainer's disk; not for git)
 PLAN.md
 TODOS.md
 LAUNCH_BLOCKERS.md
 FUTURE_FEATURES.md
 CLAUDE.md
+v0.5_PLAN.md
+v*_PLAN.md
 
 # Local-only marketing/launch material
 marketing/
@@ -75,5 +89,15 @@ missing and enhancements.md
 # Tool-local state (Claude Code, exploratory scratch artifacts)
 .claude/
 _exploration_output/
+
+# Marketing / demo assets stay local — large binaries (.gif, .mp4)
+# don't belong in git history. Keep `demo.gif` because it's referenced
+# from README.md as the hero image; if it's ever replaced, force-add
+# the new file with `git add -f assets/<name>`.
+# Note: ignore contents (`assets/*`) rather than the dir itself,
+# otherwise the `!assets/demo.gif` negation has no effect — git can't
+# re-include a file if its parent directory is excluded.
+assets/*
+!assets/demo.gif
 test_log.txt
 trimmed.mcap
