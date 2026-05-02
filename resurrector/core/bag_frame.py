@@ -746,11 +746,12 @@ class BagFrame:
     def export(
         self,
         topics: list[str] | None = None,
-        format: str = "parquet",
+        format: str | None = None,
         output: str = "./export",
-        sync: bool = False,
-        sync_method: str = "nearest",
+        sync: bool | None = None,
+        sync_method: str | None = None,
         downsample_hz: float | None = None,
+        preset: str | None = None,
     ) -> Path:
         """Export bag data to ML-friendly formats — the main bulk-export entry point.
 
@@ -761,50 +762,69 @@ class BagFrame:
         :class:`LargeTopicError`.
 
         Args:
-            topics: Topics to export. ``None`` means every non-image topic.
-            format: One of ``parquet`` (default, columnar, best for ML),
-                ``hdf5``, ``csv``, ``numpy``, ``zarr`` (needs
-                ``[all-exports]``), ``lerobot`` / ``rlds`` (needs
-                ``[all-exports]``, training-pipeline-ready).
+            topics: Topics to export. ``None`` means every topic (or, with a
+                preset, the preset's ``topic_filter`` decides).
+            format: One of ``parquet`` (default), ``hdf5``, ``csv``,
+                ``numpy``, ``zarr`` (needs ``[all-exports]``), ``lerobot`` /
+                ``rlds`` (needs ``[all-exports]``). Defaults to ``parquet``
+                when no preset is given.
             output: Output directory. Created if missing.
             sync: When True, time-align all topics before writing using
                 ``sync_method``.
             sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
-                Only used when ``sync`` is True.
-            downsample_hz: Resample to this rate before writing. Useful
-                for shrinking a 1 kHz IMU to 50 Hz training data.
+            downsample_hz: Resample to this rate before writing.
+            preset: Optional named preset (``lerobot``, ``rlds``,
+                ``training-tabular``, ``camera-only``, ``multimodal``).
+                Fills in unset args with the preset's values; user-supplied
+                args always override. See ``resurrector.core.export.PRESETS``.
 
         Returns:
             ``Path`` to the output directory.
 
         Raises:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
+            ValueError: If ``preset`` is not a known preset name.
 
         Example::
 
-            # Quick Parquet snapshot of two topics
+            # Manual config
             bf.export(topics=["/imu/data", "/joint_states"], format="parquet",
                       output="./parquet_out")
 
-            # Time-synced HDF5 at 50 Hz for ML training
-            bf.export(topics=["/imu/data", "/joint_states"],
-                      format="hdf5", output="./training",
-                      sync=True, sync_method="nearest", downsample_hz=50)
+            # Use a preset (one line; LeRobot-format, time-synced 30 Hz)
+            bf.export(preset="lerobot", output="./lerobot_data")
 
-            # LeRobot-formatted dataset for direct use in robot-learning pipelines
-            bf.export(format="lerobot", output="./lerobot_data")
+            # Preset with override (LeRobot defaults, but at 60 Hz instead of 30)
+            bf.export(preset="lerobot", downsample_hz=60, output="./lerobot_60hz")
         """
-        from resurrector.core.export import Exporter
-        exporter = Exporter()
-        topic_names = topics or self.topic_names
-        return exporter.export(
-            bag_frame=self,
-            topics=topic_names,
+        from resurrector.core.export import Exporter, apply_topic_filter, resolve_preset
+
+        resolved = resolve_preset(
+            preset_name=preset,
             format=format,
-            output_dir=output,
             sync=sync,
             sync_method=sync_method,
             downsample_hz=downsample_hz,
+            topics=topics,
+        )
+
+        # Topic filter (from preset) only applies if user didn't supply explicit topics
+        if resolved["topics"] is None:
+            topic_filter = resolved.pop("topic_filter")
+            topic_names = apply_topic_filter(self, topic_filter)
+        else:
+            topic_names = resolved["topics"]
+            resolved.pop("topic_filter")
+
+        exporter = Exporter()
+        return exporter.export(
+            bag_frame=self,
+            topics=topic_names,
+            format=resolved["format"],
+            output_dir=output,
+            sync=resolved["sync"],
+            sync_method=resolved["sync_method"],
+            downsample_hz=resolved["downsample_hz"],
         )
 
     def __repr__(self) -> str:

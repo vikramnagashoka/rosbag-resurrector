@@ -36,6 +36,206 @@ CHUNK_SIZE = 50_000
 NUMPY_HARD_CAP = 1_000_000
 
 
+@dataclass(frozen=True)
+class ExportPreset:
+    """A named bundle of export settings for common workflows.
+
+    Presets are convention-over-configuration shortcuts. User-supplied
+    flags always override preset values, so a preset is a baseline,
+    not a constraint.
+
+    Attributes:
+        name: Short identifier (used as the ``--preset`` flag value).
+        format: Default export format (``parquet``, ``hdf5``, etc.).
+        sync: Whether to time-align selected topics before export.
+        sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
+        downsample_hz: Resample rate applied per chunk. ``None`` = native.
+        topic_filter: Selector applied to ``bf.topic_names`` when the
+            user doesn't pass ``--topics``. ``"images"`` / ``"non-images"``
+            / ``None`` (no filter).
+        description: One-line human-readable description (used in
+            ``--help`` output and the dashboard preset dropdown).
+        extras_required: Optional list of pip extras the format needs
+            at runtime (e.g. ``["all-exports"]`` for zarr/rlds).
+    """
+    name: str
+    format: str
+    sync: bool
+    sync_method: str
+    downsample_hz: float | None
+    topic_filter: str | None
+    description: str
+    extras_required: tuple[str, ...] = ()
+
+
+# The ROS image message types we use to identify "image topics" for
+# preset filtering. Kept in sync with resurrector.core.bag_frame.
+_IMAGE_MESSAGE_TYPES = {
+    "sensor_msgs/msg/Image",
+    "sensor_msgs/msg/CompressedImage",
+}
+
+
+PRESETS: dict[str, ExportPreset] = {
+    "lerobot": ExportPreset(
+        name="lerobot",
+        format="lerobot",
+        sync=True,
+        sync_method="nearest",
+        downsample_hz=30.0,
+        topic_filter=None,  # LeRobot wants images + state, all selected topics
+        description=(
+            "LeRobot-format dataset for robot-learning training. "
+            "Time-synced, 30 Hz, all topics."
+        ),
+        extras_required=("all-exports",),
+    ),
+    "rlds": ExportPreset(
+        name="rlds",
+        format="rlds",
+        sync=True,
+        sync_method="nearest",
+        downsample_hz=10.0,
+        topic_filter=None,
+        description=(
+            "RLDS / TFRecord for RT-2 / OpenX-style training pipelines. "
+            "Time-synced, 10 Hz."
+        ),
+        extras_required=("all-exports",),
+    ),
+    "training-tabular": ExportPreset(
+        name="training-tabular",
+        format="parquet",
+        sync=True,
+        sync_method="nearest",
+        downsample_hz=50.0,
+        topic_filter="non-images",
+        description=(
+            "Numerical sensor data for classical ML. Parquet, time-synced "
+            "at 50 Hz, image topics excluded."
+        ),
+    ),
+    "camera-only": ExportPreset(
+        name="camera-only",
+        format="hdf5",
+        sync=False,
+        sync_method="nearest",
+        downsample_hz=None,
+        topic_filter="images",
+        description=(
+            "Image topics only, native rates. HDF5 for CV training data prep."
+        ),
+    ),
+    "multimodal": ExportPreset(
+        name="multimodal",
+        format="zarr",
+        sync=True,
+        sync_method="nearest",
+        downsample_hz=None,
+        topic_filter=None,
+        description=(
+            "All topics, time-synced, Zarr for chunked multimodal datasets."
+        ),
+        extras_required=("all-exports",),
+    ),
+}
+
+
+def list_presets() -> list[ExportPreset]:
+    """Return every named preset as a list (useful for the dashboard API)."""
+    return list(PRESETS.values())
+
+
+def resolve_preset(
+    preset_name: str | None,
+    *,
+    format: str | None = None,
+    sync: bool | None = None,
+    sync_method: str | None = None,
+    downsample_hz: float | None = None,
+    topics: list[str] | None = None,
+) -> dict:
+    """Merge a named preset with user-supplied overrides.
+
+    User-supplied values always win; the preset only fills holes. This
+    is the "preset is a baseline, not a constraint" rule. Returns a
+    dict with the resolved settings ready to pass to ``Exporter.export``.
+
+    Args:
+        preset_name: Name of a preset in ``PRESETS``, or ``None`` for
+            no preset (returns the user's values verbatim, with sensible
+            defaults for any missing).
+        format / sync / sync_method / downsample_hz / topics: User-supplied
+            values. ``None`` for any field means "use the preset's value
+            if there is one, else the default".
+
+    Returns:
+        ``dict`` with keys: ``format``, ``sync``, ``sync_method``,
+        ``downsample_hz``, ``topics`` (may be None — caller resolves to
+        all-topics later), and ``topic_filter`` (the preset's filter, or
+        None). Caller applies the topic_filter to bag_frame.topics if
+        the user didn't pass explicit topics.
+
+    Raises:
+        ValueError: If ``preset_name`` is not in ``PRESETS``.
+    """
+    if preset_name is None:
+        return {
+            "format": format if format is not None else "parquet",
+            "sync": sync if sync is not None else False,
+            "sync_method": sync_method if sync_method is not None else "nearest",
+            "downsample_hz": downsample_hz,
+            "topics": topics,
+            "topic_filter": None,
+        }
+
+    if preset_name not in PRESETS:
+        available = ", ".join(sorted(PRESETS.keys()))
+        raise ValueError(
+            f"Unknown preset {preset_name!r}. Available: {available}"
+        )
+
+    preset = PRESETS[preset_name]
+    return {
+        "format": format if format is not None else preset.format,
+        "sync": sync if sync is not None else preset.sync,
+        "sync_method": sync_method if sync_method is not None else preset.sync_method,
+        "downsample_hz": downsample_hz if downsample_hz is not None else preset.downsample_hz,
+        "topics": topics,  # User's explicit topic list always wins
+        "topic_filter": preset.topic_filter if topics is None else None,
+    }
+
+
+def apply_topic_filter(
+    bag_frame: "BagFrame",
+    topic_filter: str | None,
+) -> list[str]:
+    """Apply a preset's ``topic_filter`` to a BagFrame's topic list.
+
+    Args:
+        bag_frame: The :class:`BagFrame` to filter.
+        topic_filter: ``"images"`` (only image topics) / ``"non-images"``
+            (only non-image topics) / ``None`` (all topics).
+
+    Returns:
+        Filtered list of topic names.
+    """
+    if topic_filter is None:
+        return bag_frame.topic_names
+    image_topic_names = {
+        t.name for t in bag_frame.topics
+        if t.message_type in _IMAGE_MESSAGE_TYPES
+    }
+    if topic_filter == "images":
+        return [n for n in bag_frame.topic_names if n in image_topic_names]
+    if topic_filter == "non-images":
+        return [n for n in bag_frame.topic_names if n not in image_topic_names]
+    raise ValueError(
+        f"Unknown topic_filter {topic_filter!r}. "
+        f"Expected 'images', 'non-images', or None."
+    )
+
+
 @dataclass
 class ExportColumnFailure:
     """One column that failed to serialize during export."""

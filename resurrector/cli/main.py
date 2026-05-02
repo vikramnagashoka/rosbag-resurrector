@@ -312,77 +312,125 @@ def list_bags(
 def export(
     path: Annotated[Path, typer.Argument(
         help="Path to a bag file (.mcap). "
-             "e.g. resurrector export experiment.mcap -t /imu/data -f parquet",
+             "e.g. resurrector export experiment.mcap --preset lerobot",
     )],
     topics: Annotated[Optional[list[str]], typer.Option("--topics", "-t",
         help="Topics to export. Pass --topics multiple times for multi-topic "
-             "exports. When omitted, every non-image topic is exported. "
+             "exports. When omitted, every topic is exported (or, with --preset, "
+             "the preset's topic filter applies). "
              "e.g. -t /imu/data -t /joint_states",
     )] = None,
-    format: Annotated[str, typer.Option("--format", "-f",
-        help="Output format. parquet (default, columnar, best for ML), "
-             "hdf5 (numerical workflows), csv (readable, large), "
-             "numpy (.npz, capped at 1 M rows per topic — refuses larger), "
-             "zarr (chunked, requires [all-exports]), "
-             "lerobot / rlds (training-ready, requires [all-exports]). "
+    format: Annotated[Optional[str], typer.Option("--format", "-f",
+        help="Output format. parquet (default), hdf5, csv, numpy "
+             "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
+             "lerobot / rlds (training-ready, needs [all-exports]). "
+             "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
-    )] = "parquet",
+    )] = None,
     output: Annotated[Path, typer.Option("--output", "-o",
-        help="Output directory. Created if missing. One file (or sub-directory "
-             "for multi-file formats) per exported topic. "
-             "e.g. -o ./training_data",
+        help="Output directory. Created if missing. e.g. -o ./training_data",
     )] = Path("./export"),
     sync: Annotated[Optional[str], typer.Option("--sync",
-        help="When set, all selected topics are time-aligned to one another "
-             "before export. Methods: 'nearest' (closest-in-time match), "
-             "'interpolate' (linear interp on numeric fields), "
-             "'sample_and_hold' (carry last value forward). Default: no sync; "
-             "each topic exported at its native rate. e.g. --sync nearest",
+        help="Sync method to time-align selected topics: 'nearest', "
+             "'interpolate', 'sample_and_hold'. Overrides the preset's "
+             "sync_method if --preset is set. e.g. --sync nearest",
     )] = None,
     downsample: Annotated[Optional[float], typer.Option("--downsample",
-        help="Resample exported topics to this rate in Hz before writing. "
-             "Useful for shrinking dataset size when full sensor rate is "
-             "more than your model needs. e.g. --downsample 50",
+        help="Resample to this rate in Hz before writing. Overrides the "
+             "preset's downsample_hz if --preset is set. e.g. --downsample 50",
     )] = None,
+    preset: Annotated[Optional[str], typer.Option("--preset",
+        help="Use a named export preset that bundles format + sync + "
+             "downsample for common workflows. Available: lerobot, rlds, "
+             "training-tabular, camera-only, multimodal. Run "
+             "`resurrector export --list-presets` to see details. Any "
+             "user-supplied flags override the preset's values. "
+             "e.g. --preset lerobot",
+    )] = None,
+    list_presets_flag: Annotated[bool, typer.Option("--list-presets",
+        help="List available export presets and their settings, then exit. "
+             "e.g. --list-presets",
+    )] = False,
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
-    All chunk-streaming formats (Parquet, HDF5, CSV, Zarr, LeRobot, RLDS)
-    are memory-bounded by chunk size, not topic size — open a 100 GB bag
-    without OOMing. NumPy `.npz` is the exception: it materializes the
-    full topic and refuses topics over 1 M messages with a clear error
-    pointing at Parquet.
+    All chunk-streaming formats are memory-bounded by chunk size, not topic
+    size — open a 100 GB bag without OOMing. NumPy `.npz` is the exception:
+    it materializes the full topic and refuses topics over 1 M messages.
+
+    **Presets** (--preset NAME) bundle format/sync/downsample for common
+    workflows. User-supplied flags always override preset values, so a
+    preset is a baseline, not a constraint.
 
     Examples:
-      Quick Parquet export of two topics, native rates:
-          resurrector export bag.mcap -t /imu/data -t /joint_states
-
-      Time-synced export at 50 Hz for downstream ML training:
-          resurrector export bag.mcap -t /imu/data -t /joint_states \
+      Manual config:
+          resurrector export bag.mcap -t /imu/data -t /joint_states \\
               --sync nearest --downsample 50 --format hdf5 -o ./training
 
-      LeRobot-format dataset for direct use in robot-learning pipelines:
-          resurrector export bag.mcap --format lerobot -o ./lerobot_data
+      One-line LeRobot dataset (synced 30 Hz, all topics):
+          resurrector export bag.mcap --preset lerobot -o ./lerobot_data
 
-    Format support note: zarr/rlds need `pip install
-    'rosbag-resurrector[all-exports]'`. The export will fail with a
-    clear message if the extra isn't installed.
+      Preset with override (LeRobot defaults but at 60 Hz):
+          resurrector export bag.mcap --preset lerobot --downsample 60 \\
+              -o ./lerobot_60hz
+
+    Format support note: zarr/rlds (and the lerobot/rlds presets) need
+    `pip install 'rosbag-resurrector[all-exports]'`.
     """
+    from resurrector.core.export import PRESETS
+
+    # --list-presets short-circuits to a table dump and exits
+    if list_presets_flag:
+        from rich.table import Table
+        t = Table(title="Export presets", show_header=True, header_style="bold")
+        t.add_column("Name", style="cyan")
+        t.add_column("Format")
+        t.add_column("Sync")
+        t.add_column("Hz")
+        t.add_column("Topics")
+        t.add_column("Description", style="dim", max_width=44)
+        for p in PRESETS.values():
+            t.add_row(
+                p.name,
+                p.format,
+                f"{p.sync_method}" if p.sync else "—",
+                f"{p.downsample_hz:.0f}" if p.downsample_hz else "native",
+                p.topic_filter or "all",
+                p.description,
+            )
+        console.print(t)
+        if any(p.extras_required for p in PRESETS.values()):
+            console.print(
+                "\n[dim]Extras required for some presets — install via "
+                "`pip install 'rosbag-resurrector[all-exports]'`.[/dim]"
+            )
+        raise typer.Exit()
+
     from resurrector.core.bag_frame import BagFrame
 
     bf = BagFrame(path)
-    do_sync = sync is not None
-    sync_method = sync or "nearest"
+    # `sync` arg in CLI is the method string (or None); BagFrame.export
+    # takes a bool sync + str sync_method separately. Resolve here.
+    do_sync = sync is not None if preset is None else None  # let preset decide
+    sync_method = sync if sync is not None else None
 
-    result_path = bf.export(
-        topics=topics,
-        format=format,
-        output=str(output),
-        sync=do_sync,
-        sync_method=sync_method,
-        downsample_hz=downsample,
-    )
+    try:
+        result_path = bf.export(
+            topics=topics,
+            format=format,
+            output=str(output),
+            sync=do_sync,
+            sync_method=sync_method,
+            downsample_hz=downsample,
+            preset=preset,
+        )
+    except ValueError as e:
+        console.print(f"[red]Export failed: {e}[/red]")
+        raise typer.Exit(1)
+
     console.print(f"[green]Exported to {result_path}[/green]")
+    if preset:
+        console.print(f"[dim]Used preset: {preset}[/dim]")
 
 
 @app.command()

@@ -497,13 +497,55 @@ async def get_synced_data(
         index.close()
 
 
+@app.get("/api/export-presets")
+async def list_export_presets() -> list[dict[str, Any]]:
+    """Return the registered export presets for the dashboard's preset picker.
+
+    Each entry has the same shape as ``ExportPreset`` plus a flag
+    ``available`` indicating whether the required pip extras are installed
+    (e.g. ``zarr`` / ``rlds`` need ``[all-exports]``).
+
+    Used by ExportDialog to populate the preset dropdown and disable
+    presets whose required extras are missing on this install.
+    """
+    from resurrector.core.export import list_presets
+
+    def _extra_available(extra: str) -> bool:
+        # Only one extra currently ships in this codebase: all-exports
+        # (zarr, tensorflow-datasets). Detect via package import.
+        if extra == "all-exports":
+            try:
+                import zarr  # noqa: F401
+                return True
+            except ImportError:
+                return False
+        return True  # Unknown extras default to available
+
+    out: list[dict[str, Any]] = []
+    for p in list_presets():
+        out.append({
+            "name": p.name,
+            "format": p.format,
+            "sync": p.sync,
+            "sync_method": p.sync_method,
+            "downsample_hz": p.downsample_hz,
+            "topic_filter": p.topic_filter,
+            "description": p.description,
+            "extras_required": list(p.extras_required),
+            "available": all(_extra_available(e) for e in p.extras_required),
+        })
+    return out
+
+
 @app.post("/api/bags/{bag_id}/export")
 async def export_bag(
     bag_id: int,
     topics: str | None = Query(default=None, description="Comma-separated topics"),
-    format: str = Query(default="parquet"),
-    sync: bool = Query(default=False),
+    format: str | None = Query(default=None, description="Output format; overrides preset"),
+    sync: bool | None = Query(default=None, description="Time-align before export; overrides preset"),
     output_dir: str = Query(default="./export", description="Output directory"),
+    preset: str | None = Query(default=None, description="Named export preset (lerobot, rlds, etc.)"),
+    downsample_hz: float | None = Query(default=None, description="Downsample rate; overrides preset"),
 ) -> dict[str, str]:
     """Run a synchronous bag export. Returns the output path on completion.
 
@@ -512,6 +554,10 @@ async def export_bag(
     so memory stays bounded. ``output_dir`` is validated against
     ``RESURRECTOR_ALLOWED_ROOTS`` to prevent writing outside trusted
     locations.
+
+    Pass ``preset`` to use a named bundle (LeRobot, RLDS, etc.); any
+    other query params override the preset's values. See
+    ``GET /api/export-presets`` for the available preset list.
 
     No async / job system: large exports block the request. A user
     cancel hangs up the connection but the server continues writing.
@@ -526,12 +572,18 @@ async def export_bag(
         from resurrector.core.bag_frame import BagFrame
         bf = BagFrame(bag["path"])
         topic_list = [t.strip() for t in topics.split(",")] if topics else None
-        output_path = bf.export(
-            topics=topic_list,
-            format=format,
-            output=str(validated_output),
-            sync=sync,
-        )
+        try:
+            output_path = bf.export(
+                topics=topic_list,
+                format=format,
+                output=str(validated_output),
+                sync=sync,
+                downsample_hz=downsample_hz,
+                preset=preset,
+            )
+        except ValueError as e:
+            # Unknown preset, etc. — surface as 400 not 500.
+            raise HTTPException(400, str(e))
         return {"status": "completed", "output_path": str(output_path)}
     finally:
         index.close()
