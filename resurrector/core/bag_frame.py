@@ -752,6 +752,8 @@ class BagFrame:
         sync_method: str | None = None,
         downsample_hz: float | None = None,
         preset: str | None = None,
+        split: dict[str, float] | None = None,
+        split_strategy: str = "time",
     ) -> Path:
         """Export bag data to ML-friendly formats — the main bulk-export entry point.
 
@@ -777,13 +779,24 @@ class BagFrame:
                 ``training-tabular``, ``camera-only``, ``multimodal``).
                 Fills in unset args with the preset's values; user-supplied
                 args always override. See ``resurrector.core.export.PRESETS``.
+            split: Optional dict like ``{"train": 0.8, "val": 0.1, "test": 0.1}``.
+                Ratios must sum to ~1.0. Each split writes to its own
+                subdirectory under ``output``. ``None`` (default) means no
+                splitting — single export under ``output``.
+            split_strategy: How to assign rows to splits when ``split`` is set.
+                ``"time"`` (default) — chronological; first 80% of time → train,
+                next 10% → val, last 10% → test. Best for time-series.
+                ``"random"`` — uniform random per row. Disregards temporal
+                locality; only use when row-level independence is OK.
+                ``"stratified"`` — not yet implemented (v0.6 candidate).
 
         Returns:
             ``Path`` to the output directory.
 
         Raises:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
-            ValueError: If ``preset`` is not a known preset name.
+            ValueError: If ``preset`` is not known, or ``split`` ratios don't
+                sum to ~1.0, or ``split_strategy`` is unknown.
 
         Example::
 
@@ -794,10 +807,14 @@ class BagFrame:
             # Use a preset (one line; LeRobot-format, time-synced 30 Hz)
             bf.export(preset="lerobot", output="./lerobot_data")
 
-            # Preset with override (LeRobot defaults, but at 60 Hz instead of 30)
-            bf.export(preset="lerobot", downsample_hz=60, output="./lerobot_60hz")
+            # Time-strategy split for ML training
+            bf.export(preset="training-tabular", output="./splits",
+                      split={"train": 0.8, "val": 0.1, "test": 0.1},
+                      split_strategy="time")
+            # Writes ./splits/train/, ./splits/val/, ./splits/test/
         """
         from resurrector.core.export import Exporter, apply_topic_filter, resolve_preset
+        from resurrector.core.splits import split_export, validate_split_ratios
 
         resolved = resolve_preset(
             preset_name=preset,
@@ -815,6 +832,21 @@ class BagFrame:
         else:
             topic_names = resolved["topics"]
             resolved.pop("topic_filter")
+
+        # Split path: compute splits, export each into its own subdir
+        if split is not None:
+            validate_split_ratios(split)
+            return split_export(
+                bag_frame=self,
+                topics=topic_names,
+                output=Path(output),
+                split=split,
+                strategy=split_strategy,
+                format=resolved["format"],
+                sync=resolved["sync"],
+                sync_method=resolved["sync_method"],
+                downsample_hz=resolved["downsample_hz"],
+            )
 
         exporter = Exporter()
         return exporter.export(

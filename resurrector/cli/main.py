@@ -351,6 +351,20 @@ def export(
         help="List available export presets and their settings, then exit. "
              "e.g. --list-presets",
     )] = False,
+    split: Annotated[Optional[list[str]], typer.Option("--split",
+        help="Train/val/test split spec. Pass multiple times: "
+             "--split train=0.8 --split val=0.1 --split test=0.1. "
+             "Each split writes to its own subdirectory under -o. "
+             "Ratios must sum to 1.0. "
+             "e.g. --split train=0.8 --split val=0.1 --split test=0.1",
+    )] = None,
+    split_strategy: Annotated[str, typer.Option("--split-strategy",
+        help="How to assign rows to splits when --split is set. "
+             "'time' (default) — chronological, best for time-series. "
+             "'random' — uniform random per row. 'stratified' is a "
+             "v0.6+ candidate (raises NotImplementedError). "
+             "e.g. --split-strategy random",
+    )] = "time",
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
@@ -414,6 +428,24 @@ def export(
     do_sync = sync is not None if preset is None else None  # let preset decide
     sync_method = sync if sync is not None else None
 
+    # Parse --split entries (each like "train=0.8") into a dict
+    split_dict: dict[str, float] | None = None
+    if split:
+        split_dict = {}
+        for item in split:
+            if "=" not in item:
+                console.print(
+                    f"[red]Invalid --split entry {item!r}; expected NAME=RATIO "
+                    f"(e.g. train=0.8)[/red]"
+                )
+                raise typer.Exit(2)
+            k, _, v = item.partition("=")
+            try:
+                split_dict[k.strip()] = float(v.strip())
+            except ValueError:
+                console.print(f"[red]--split {item!r}: ratio must be numeric[/red]")
+                raise typer.Exit(2)
+
     try:
         result_path = bf.export(
             topics=topics,
@@ -423,14 +455,22 @@ def export(
             sync_method=sync_method,
             downsample_hz=downsample,
             preset=preset,
+            split=split_dict,
+            split_strategy=split_strategy,
         )
     except ValueError as e:
         console.print(f"[red]Export failed: {e}[/red]")
+        raise typer.Exit(1)
+    except NotImplementedError as e:
+        console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Exported to {result_path}[/green]")
     if preset:
         console.print(f"[dim]Used preset: {preset}[/dim]")
+    if split_dict:
+        names = ", ".join(split_dict.keys())
+        console.print(f"[dim]Split ({split_strategy}): {names}[/dim]")
 
 
 @app.command()
