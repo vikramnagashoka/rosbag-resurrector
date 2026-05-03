@@ -86,6 +86,10 @@ marketing/
 docs/usability_review.md
 missing and enhancements.md
 
+# Local-only intermediate / build-notes / verification recipes
+# (any release's build-checkpoints doc — kept local, not for the public repo)
+docs/*_build_checkpoints.md
+
 # Tool-local state (Claude Code, exploratory scratch artifacts)
 .claude/
 _exploration_output/
