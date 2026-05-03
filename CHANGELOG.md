@@ -8,6 +8,50 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-02
+
+### What's new
+
+Three feature bundles ship together: **robot-learning data prep** (presets, dataset splits, real-data sample), **streaming workbench** (multi-bag playback, live recording, event markers, server-side filters), and the **3D scene panel** (TF tree, point clouds, time scrubbing). All three were planned as separate point releases and collapsed into one mega-release because the work composes cleanly at the API surface — no protocol versioning of the existing wire formats was required.
+
+### Robot-learning data prep
+
+- **`resurrector demo --download`** — fetches the HKU FAST-LIVO sample bag (~844 MB, CC-BY-NC-4.0) from HuggingFace so the dashboard's CLIP semantic search returns visually meaningful results instead of synthetic noise. Atomic-rename + size-bound sanity to reject HTML redirect pages without leaving partials. Idempotent unless `--force`.
+- **Export presets** — five named bundles (`lerobot`, `rlds`, `training-tabular`, `camera-only`, `multimodal`) cover the common ML data-prep workflows. Plumbed through the core layer (`BagFrame.export(preset=...)`), the CLI (`resurrector export --preset NAME` + `--list-presets`), and the dashboard backend (`GET /api/export-presets`, `?preset=NAME` on the export POST).
+- **Dataset splits** — `bf.export(split={"train": 0.8, "val": 0.1, "test": 0.1}, split_strategy="time"|"random")` writes per-split subdirectories + a `split_manifest.json`. CLI exposes `--split KEY=RATIO` (repeatable) and `--split-strategy`. `stratified` is reserved for v0.6+ with a clear `NotImplementedError`.
+- **Streaming HDF5 + Zarr exports** — the writers were already chunk-streaming; what was missing was OOM regression coverage for HDF5/Zarr/CSV (Parquet + NumPy were already covered). Three new tests in `test_streaming_oom.py` (slow tier).
+- **Zarr 3.x compatibility** — `_stream_zarr` was broken against modern zarr (3.0 removed `DirectoryStore` and `create_dataset`). Runtime-detected `LocalStore` / `create_array` path so the writer works on both 2.x and 3.x.
+- **ExportDialog preset dropdown** — auto-fills format / sync / downsample / topics when a preset is picked; user can still tweak any field after selection. Disables presets whose extras aren't installed.
+
+### Streaming workbench
+
+- **Multi-bag synchronized playback** — `MultiBagPlayback` wraps N `PlaybackEngine` instances behind one play/pause/stop/seek/set_speed surface. Per-bag wall-clock offsets stagger start times. Topics namespaced as `<bag_id>:<topic>` so PlotJuggler and the cross-bag overlay UI handle multi-bag streams with no protocol changes.
+- **Record-while-streaming** — `resurrector bridge playback bag.mcap --record out.mcap` writes every relayed message to a fresh MCAP in parallel with the WebSocket stream. Lazy file open, idempotent close, registers schemas + channels per topic.
+- **Time-anchored event markers** — `POST /api/events` broadcasts `{type:"event", topic, timestamp_ns, text, kind}` to every connected WS client via per-connection `asyncio.Queue`. Slow clients drop events on a full queue rather than backpressuring the broadcaster.
+- **Server-side filter language** — WS subscribe payload accepts `{filters: {topic: polars_expr_str}}`. Each expression is a Polars predicate (e.g. `"pl.col('linear_acceleration.x').abs() > 5"`) evaluated per-message. Sandbox enforced via AST allowlist (same as the dashboard's transform editor): `__import__`, attribute access on non-`pl` names, and `pl.<name>` outside the allowlist are rejected at subscribe time. Per-message runtime errors (column not found in THIS message) fail-closed silently.
+
+### 3D scene panel
+
+- **TF tree (`resurrector/core/scene.py`)** — accumulates `TransformStamped` records from `/tf` and `/tf_static`, resolves parent chains at any timestamp via lowest-common-ancestor walk + per-edge composition. Static-vs-dynamic precedence (static always wins for its child); bounded per-edge history (default 10k samples) to cap memory on long bags.
+- **PointCloud2 decoder** — `parse_pointcloud2_meta()` + `decode_pointcloud2_xyz()` parse CDR metadata and extract Nx3 float32 points with offset/stride reads, decimation, and NaN filtering. Other field types (intensity, RGB) return None for now rather than fabricating zeros.
+- **CDR dispatcher** — `tf2_msgs/msg/TFMessage` and `sensor_msgs/msg/PointCloud2` now route to the scene decoders so decoded transforms / point-cloud metadata appear in `Message.data` instead of the opaque `_unparsed` bucket.
+- **Three new dashboard endpoints** — `GET /api/bags/{id}/scene/topics` (categorize topics by 3D-relevance), `GET /api/bags/{id}/scene/tf-tree?time_ns=…` (resolved transforms at time T; defaults to bag end so the response includes every TF sample), `GET /api/bags/{id}/scene/pointcloud?topic=…&max_points=…` (decoded cloud, decimated, JSON).
+- **`<SceneViewer />` Explorer tab** — Plotly 3D scatter+line rendering of frame axes (red=X / green=Y / blue=Z) + an optional point-cloud snapshot at the scrubbed time. Time slider drives both TF resolution and point-cloud picker. Max-points selector for server-side decimation. Graceful empty state when bag has no /tf or PointCloud2.
+
+### Deferred to v0.6+
+
+Out of scope for v0.5.0 (tracked locally):
+- Stratified split strategy (placeholder raises `NotImplementedError`)
+- Three.js renderer + URDF / mesh visualization (Plotly 3D ships in v0.5.0)
+- Camera image overlay composited under the 3D canvas
+- Live-mode recording (needs live subscriber to populate `TopicInfo.schema_data`)
+- Async write queue for the recorder (currently synchronous fan-out)
+- Marker / MarkerArray decoding for `visualization_msgs`
+
+### Tests
+
+New tests across the release: 14 multi-bag playback, 11 recorder, 9 events, 14 filter, 28 scene unit, 10 scene API, plus 3 OOM regression tests for HDF5/Zarr/CSV. Total suite: 585 passed, 7 skipped (was 468 in v0.4.2).
+
 ## [0.4.2] — 2026-04-28
 
 ### What's new
