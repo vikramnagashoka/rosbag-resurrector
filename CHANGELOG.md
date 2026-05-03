@@ -38,16 +38,6 @@ Three feature bundles ship together: **robot-learning data prep** (presets, data
 - **Three new dashboard endpoints** — `GET /api/bags/{id}/scene/topics` (categorize topics by 3D-relevance), `GET /api/bags/{id}/scene/tf-tree?time_ns=…` (resolved transforms at time T; defaults to bag end so the response includes every TF sample), `GET /api/bags/{id}/scene/pointcloud?topic=…&max_points=…` (decoded cloud, decimated, JSON).
 - **`<SceneViewer />` Explorer tab** — Plotly 3D scatter+line rendering of frame axes (red=X / green=Y / blue=Z) + an optional point-cloud snapshot at the scrubbed time. Time slider drives both TF resolution and point-cloud picker. Max-points selector for server-side decimation. Graceful empty state when bag has no /tf or PointCloud2.
 
-### Deferred to v0.6+
-
-Out of scope for v0.5.0 (tracked locally):
-- Stratified split strategy (placeholder raises `NotImplementedError`)
-- Three.js renderer + URDF / mesh visualization (Plotly 3D ships in v0.5.0)
-- Camera image overlay composited under the 3D canvas
-- Live-mode recording (needs live subscriber to populate `TopicInfo.schema_data`)
-- Async write queue for the recorder (currently synchronous fan-out)
-- Marker / MarkerArray decoding for `visualization_msgs`
-
 ### Tests
 
 New tests across the release: 14 multi-bag playback, 11 recorder, 9 events, 14 filter, 28 scene unit, 10 scene API, plus 3 OOM regression tests for HDF5/Zarr/CSV. Total suite: 585 passed, 7 skipped (was 468 in v0.4.2).
