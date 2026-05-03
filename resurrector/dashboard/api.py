@@ -1737,6 +1737,179 @@ async def compare_topics_api(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # Serve static frontend files
+# ---------------------------------------------------------------------------
+# 3D scene endpoints (Option 3 / v0.5.0)
+# ---------------------------------------------------------------------------
+
+
+def _build_tf_tree(bag_path: str, time_ns: int | None = None):
+    """Read /tf and /tf_static from a bag and return a populated TFTree.
+
+    ``time_ns`` caps the dynamic TF samples loaded (so a long bag
+    doesn't read every frame for a single time-anchored query). Static
+    transforms are always loaded in full since they're typically tiny.
+    """
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.core.scene import TFTree, parse_tf_message
+
+    tree = TFTree()
+    bf = BagFrame(bag_path)
+    available = {ti.name for ti in bf.metadata.topics}
+    parser = bf._parser  # already constructed by BagFrame
+    for topic, is_static in (("/tf_static", True), ("/tf", False)):
+        if topic not in available:
+            continue
+        # MCAP's end_time is exclusive — bump by 1 ns so a query exactly
+        # at the bag's start time still captures the first TF sample.
+        end_time_ns = (
+            None if is_static or time_ns is None
+            else int(time_ns) + 1
+        )
+        for msg in parser.read_messages(
+            topics=[topic], end_time_ns=end_time_ns,
+        ):
+            if msg.raw_data is None:
+                continue
+            for tf in parse_tf_message(msg.raw_data, is_static=is_static):
+                tree.add(tf)
+    return tree
+
+
+@app.get("/api/bags/{bag_id}/scene/tf-tree")
+async def get_scene_tf_tree(
+    bag_id: int, time_ns: int | None = None,
+) -> dict[str, Any]:
+    """Resolve the TF tree at a given timestamp.
+
+    Returns frames, root frames, and one resolved transform per known
+    edge. ``time_ns`` defaults to the bag's end time so the response
+    includes every TF sample (most-recent state, suitable for an
+    initial render). Pass an explicit ``time_ns`` for time-anchored
+    scrubbing. Unknown bag → 404; bag with no /tf or /tf_static →
+    empty tree (200 OK).
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.bag_frame import BagFrame
+
+        if time_ns is None:
+            bf = BagFrame(bag["path"])
+            time_ns = bf.metadata.end_time_ns
+        tree = _build_tf_tree(bag["path"], time_ns=time_ns)
+        return tree.to_dict(int(time_ns))
+    finally:
+        index.close()
+
+
+@app.get("/api/bags/{bag_id}/scene/pointcloud")
+async def get_scene_pointcloud(
+    bag_id: int,
+    topic: str = Query(..., description="PointCloud2 topic name, e.g. /lidar/points"),
+    time_ns: int | None = None,
+    max_points: int = Query(default=20_000, ge=10, le=200_000),
+) -> dict[str, Any]:
+    """Return the decoded (x, y, z) points of one PointCloud2 message.
+
+    Picks the message nearest to ``time_ns`` (or the first message if
+    unspecified). Decimates to at most ``max_points`` to keep wire size
+    bounded — a 200k-point sweep at ~12 bytes/point is already 2.4 MB.
+
+    Returns ``{frame_id, time_ns, n_points, points: [[x,y,z],...]}``.
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.bag_frame import BagFrame
+        from resurrector.core.scene import (
+            decode_pointcloud2_xyz, parse_pointcloud2_meta,
+        )
+
+        bf = BagFrame(bag["path"])
+        if topic not in {ti.name for ti in bf.metadata.topics}:
+            raise HTTPException(404, f"Topic {topic!r} not found")
+
+        chosen_msg = None
+        chosen_dt = None
+        for msg in bf._parser.read_messages(topics=[topic]):
+            if msg.raw_data is None:
+                continue
+            if time_ns is None:
+                chosen_msg = msg
+                break
+            dt = abs(msg.timestamp_ns - int(time_ns))
+            if chosen_dt is None or dt < chosen_dt:
+                chosen_msg = msg
+                chosen_dt = dt
+            if msg.timestamp_ns > int(time_ns) and chosen_dt is not None:
+                # Past target with a candidate already — stop scanning
+                break
+        if chosen_msg is None or chosen_msg.raw_data is None:
+            raise HTTPException(404, f"No PointCloud2 messages on {topic!r}")
+        meta = parse_pointcloud2_meta(chosen_msg.raw_data)
+        if meta is None:
+            raise HTTPException(500, "Failed to parse PointCloud2 metadata")
+        pts = decode_pointcloud2_xyz(
+            chosen_msg.raw_data, meta, max_points=max_points,
+        )
+        if pts is None:
+            return {
+                "frame_id": meta.frame_id,
+                "time_ns": chosen_msg.timestamp_ns,
+                "n_points": 0,
+                "points": [],
+                "warning": "No xyz float32 fields found — non-standard layout",
+            }
+        return {
+            "frame_id": meta.frame_id,
+            "time_ns": chosen_msg.timestamp_ns,
+            "n_points": int(pts.shape[0]),
+            "points": pts.tolist(),
+        }
+    finally:
+        index.close()
+
+
+@app.get("/api/bags/{bag_id}/scene/topics")
+async def list_scene_topics(bag_id: int) -> dict[str, Any]:
+    """Categorize bag topics by their relevance to the 3D scene viewer.
+
+    Returns ``{tf, tf_static, pointclouds, images, markers}`` lists so
+    the frontend can show only the topics the viewer can actually
+    consume.
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        topics = bag.get("topics") or []
+        out: dict[str, list[str]] = {
+            "tf": [], "tf_static": [], "pointclouds": [],
+            "images": [], "markers": [],
+        }
+        for t in topics:
+            name = t["name"]
+            mtype = t.get("message_type", "")
+            if name == "/tf":
+                out["tf"].append(name)
+            elif name == "/tf_static":
+                out["tf_static"].append(name)
+            elif "PointCloud2" in mtype:
+                out["pointclouds"].append(name)
+            elif "Image" in mtype or "CompressedImage" in mtype:
+                out["images"].append(name)
+            elif "Marker" in mtype:
+                out["markers"].append(name)
+        return out
+    finally:
+        index.close()
+
+
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
     # SPA fallback: any path that isn't a real file in /static gets

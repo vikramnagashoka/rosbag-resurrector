@@ -269,6 +269,10 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
             result = _parse_laser_scan(buf)
         elif msg_type == "sensor_msgs/msg/CompressedImage":
             result = _parse_compressed_image(buf)
+        elif msg_type in ("tf2_msgs/msg/TFMessage",):
+            result = _parse_tf_message(data)  # uses raw including CDR header
+        elif msg_type in ("sensor_msgs/msg/PointCloud2",):
+            result = _parse_pointcloud2(data)
         else:
             logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
             result = {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
@@ -520,6 +524,51 @@ def get_compressed_image_array(msg: Message) -> np.ndarray | None:
     except Exception:
         logger.warning("Failed to decode CompressedImage (%s, %d bytes)", msg.data["format"], data_len)
         return None
+
+
+def _parse_tf_message(raw_data: bytes) -> dict[str, Any]:
+    """Parse a tf2_msgs/TFMessage CDR payload into the message dict.
+
+    Stores the decoded TransformStamped list under ``transforms``.
+    Each entry has parent_frame, child_frame, translation (xyz),
+    rotation (xyzw), timestamp_ns. The full ``raw_data`` is also kept
+    on the Message so the dashboard's TFTree builder can re-decode if
+    it needs the static-vs-dynamic distinction (which depends on
+    topic name, not payload).
+    """
+    from resurrector.core.scene import parse_tf_message
+
+    transforms = parse_tf_message(raw_data, is_static=False)
+    return {
+        "transforms": [t.to_dict() for t in transforms],
+        "_count": len(transforms),
+    }
+
+
+def _parse_pointcloud2(raw_data: bytes) -> dict[str, Any]:
+    """Parse PointCloud2 CDR header (metadata only — points stay in raw_data).
+
+    The frontend / API layer pulls the actual points via
+    ``decode_pointcloud2_xyz(msg.raw_data, meta)`` to avoid copying
+    the (potentially large) payload into the message dict during the
+    bag scan.
+    """
+    from resurrector.core.scene import parse_pointcloud2_meta
+
+    meta = parse_pointcloud2_meta(raw_data)
+    if meta is None:
+        return {"_parse_error": True, "_msg_type": "sensor_msgs/msg/PointCloud2"}
+    return {
+        "header": {"frame_id": meta.frame_id},
+        "height": meta.height,
+        "width": meta.width,
+        "point_step": meta.point_step,
+        "row_step": meta.row_step,
+        "is_bigendian": meta.is_bigendian,
+        "fields": meta.fields,
+        "_pointcloud_data_offset": meta.data_offset,
+        "_pointcloud_data_length": meta.data_length,
+    }
 
 
 def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
