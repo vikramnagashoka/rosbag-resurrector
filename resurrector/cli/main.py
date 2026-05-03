@@ -1315,6 +1315,13 @@ def bridge_playback(
              "window. Caps a 1 kHz topic at the given rate so the WebSocket "
              "doesn't saturate. e.g. --max-rate 100",
     )] = 50.0,
+    record: Annotated[Optional[Path], typer.Option("--record",
+        help="Write every relayed message to a fresh MCAP at this path "
+             "(in addition to streaming over WebSocket). Useful when the "
+             "bridge applies server-side filters/transforms and you want "
+             "to capture the post-processing stream. Parent dir is "
+             "created. e.g. --record session.mcap",
+    )] = None,
 ):
     """Stream a recorded bag over WebSocket — PlotJuggler-compatible.
 
@@ -1322,6 +1329,11 @@ def bridge_playback(
     The built-in HTML viewer at http://host:port/ shows a simple
     plot for sanity checks. PlotJuggler users connect via "WebSocket
     Client" → ws://host:port/ws.
+
+    Pass ``--record path.mcap`` to also write every relayed message to
+    a fresh MCAP file. The recording is closed cleanly on shutdown
+    (Ctrl+C); if the process dies hard, the file is still readable
+    but lacks a summary index.
     """
     import uvicorn
     from resurrector.bridge.server import create_bridge_app
@@ -1329,12 +1341,15 @@ def bridge_playback(
     bridge = create_bridge_app(
         mode="playback", bag_path=bag, speed=speed,
         topics=topics, loop_playback=loop, max_rate_hz=max_rate,
+        record_path=record,
     )
 
     console.print(f"[bold]Resurrector Bridge — Playback Mode[/bold]")
     console.print(f"  WebSocket: [cyan]ws://{host}:{port}/ws[/cyan]")
     console.print(f"  Viewer:    [cyan]http://{host}:{port}/[/cyan]")
     console.print(f"  PlotJuggler: connect WebSocket Client to ws://{host}:{port}/ws")
+    if record:
+        console.print(f"  Recording: [cyan]{record}[/cyan]")
     console.print(f"  Speed: {speed}x | Loop: {loop}")
     console.print()
 

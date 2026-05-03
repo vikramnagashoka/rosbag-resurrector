@@ -26,6 +26,7 @@ from resurrector.bridge.protocol import (
     encode_status_message,
     encode_topics_message,
 )
+from resurrector.bridge.recorder import BridgeRecorder
 from resurrector.ingest.parser import Message
 
 logger = logging.getLogger("resurrector.bridge.server")
@@ -43,6 +44,7 @@ class BridgeServer:
         max_rate_hz: float = 50.0,
         buffer_size: int = 10_000,
         loop_playback: bool = False,
+        record_path: Path | str | None = None,
     ):
         self.mode = mode
         self.bag_path = bag_path
@@ -50,6 +52,7 @@ class BridgeServer:
         self._buffer = RingBuffer(capacity=buffer_size)
         self._playback: PlaybackEngine | None = None
         self._live_subscriber = None
+        self._recorder: BridgeRecorder | None = None
 
         if mode == "playback" and bag_path:
             self._playback = PlaybackEngine(
@@ -60,8 +63,36 @@ class BridgeServer:
                 message_callback=self._on_message,
             )
 
+        # Optional record-while-streaming. Construct the recorder with the
+        # source bag's topic info so schemas are populated. For live mode
+        # the live_subscriber needs to surface a similar topic_info list
+        # (live wiring is a v0.6+ follow-up).
+        if record_path is not None and self._playback is not None:
+            from resurrector.ingest.parser import MCAPParser
+            parser = MCAPParser(bag_path)
+            metadata = parser.get_metadata()
+            self._recorder = BridgeRecorder(
+                output_path=record_path,
+                topic_info=metadata.topics,
+            )
+            logger.info("Bridge recording to %s", record_path)
+        elif record_path is not None:
+            logger.warning(
+                "record_path set but bridge mode is %r without a playback "
+                "source — recording is wired only for playback in v0.5.0. "
+                "Live-mode recording lands in v0.6+.", mode,
+            )
+
     def _on_message(self, msg: Message) -> None:
-        """Called by PlaybackEngine or LiveSubscriber for each message."""
+        """Called by PlaybackEngine or LiveSubscriber for each message.
+
+        Fans out to (a) the WebSocket buffer for client streaming, and
+        (b) the optional recorder for write-to-disk. Both fan-outs are
+        synchronous and cheap; recorder writes happen in this thread,
+        not on a background queue, so a slow disk DOES backpressure
+        the message callback — acceptable trade-off for v0.5 since
+        recording is opt-in.
+        """
         encoded = flatten_to_plotjuggler(msg.topic, msg.data, msg.timestamp_ns / 1e9)
         raw_json = json.dumps(encoded)
         self._buffer.put(BufferedMessage(
@@ -70,6 +101,24 @@ class BridgeServer:
             encoded=encoded,
             raw_json=raw_json,
         ))
+        if self._recorder is not None and msg.raw_data:
+            try:
+                self._recorder.record(msg.topic, msg.timestamp_ns, msg.raw_data)
+            except Exception as e:
+                # Never let a recorder error kill the streaming path
+                logger.error("Recorder write failed for %s: %s", msg.topic, e)
+
+    def close_recorder(self) -> None:
+        """Flush + close the recorder if one is attached. Idempotent.
+
+        Called from the FastAPI lifespan shutdown handler so the MCAP
+        finishes cleanly with a summary index. If the process is killed
+        before this runs, the file is still readable but won't have a
+        summary — readers iterate messages, ``get_summary()`` returns None.
+        """
+        if self._recorder is not None:
+            self._recorder.close()
+            self._recorder = None
 
     def create_app(self) -> FastAPI:
         """Build the FastAPI application with all routes."""
@@ -233,6 +282,12 @@ class BridgeServer:
                 bridge._buffer.unregister_consumer(client_id)
                 logger.info("Client %s disconnected", client_id[:8])
 
+        # --- Lifespan shutdown: flush + close the recorder cleanly ---
+        if bridge._recorder is not None:
+            @app.on_event("shutdown")
+            async def _flush_recorder() -> None:
+                bridge.close_recorder()
+
         # --- Serve web viewer ---
         web_dir = Path(__file__).parent / "web"
         if web_dir.exists() and (web_dir / "index.html").exists():
@@ -268,8 +323,16 @@ def create_bridge_app(
     max_rate_hz: float = 50.0,
     buffer_size: int = 10_000,
     loop_playback: bool = False,
+    record_path: Path | str | None = None,
 ) -> FastAPI:
-    """Factory function to create a configured bridge app."""
+    """Factory function to create a configured bridge app.
+
+    Args:
+        record_path: Optional MCAP destination — if set, every message
+            relayed by the bridge also gets written to this file. Only
+            wired for ``mode="playback"`` in v0.5.0; live-mode recording
+            arrives in v0.6+ once rclpy schema introspection lands.
+    """
     bridge = BridgeServer(
         mode=mode,
         bag_path=bag_path,
@@ -278,5 +341,6 @@ def create_bridge_app(
         max_rate_hz=max_rate_hz,
         buffer_size=buffer_size,
         loop_playback=loop_playback,
+        record_path=record_path,
     )
     return bridge.create_app()
