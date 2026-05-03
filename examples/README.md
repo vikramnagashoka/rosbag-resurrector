@@ -57,6 +57,16 @@ scripts reuse it.
 | 17 | `17_jupyter_export.py` | Parquet + Polars snippet | Writes a Parquet file plus a paste-ready snippet |
 | 18 | `18_polars_lazy_filter.py` | Lazy Polars query optimization | Lazy filter / projection vs eager comparison |
 
+### v0.5.0 features
+
+| # | Script | Feature | What you'll see |
+|---|--------|---------|-----------------|
+| 19 | `19_export_presets_and_splits.py` | Export presets + dataset splits | All 5 presets listed, then `training-tabular` exported with an 80/10/10 time split + a 70/30 random split, with manifests |
+| 20 | `20_multi_bag_playback.py` | `MultiBagPlayback` orchestration | Two bags played at 20× with one offset by 0.3s; per-bag delivery counts confirm the stagger |
+| 21 | `21_record_while_streaming.py` | `bridge playback --record` | Bridge subprocess records 4 wall-seconds of playback to a sidecar MCAP, then re-opens it to verify topics + counts |
+| 22 | `22_bridge_events_and_filters.py` | Server-side filter + event broadcast | Two WS clients subscribed to `/imu/data` — one unfiltered, one with a Polars predicate. POST one event marker, see fan-out to both clients |
+| 23 | `23_scene_tf_and_pointcloud.py` | `TFTree` + PointCloud2 decoder | Walk `/tf` + `/tf_static` from a synth scene bag, resolve `world ← base_link` at three timestamps, decode + decimate a 100-point cloud |
+
 ## Why these exist
 
 Reading docs about features is one thing; seeing them produce output
