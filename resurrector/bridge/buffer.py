@@ -27,6 +27,10 @@ class BufferedMessage:
     timestamp_sec: float
     encoded: dict[str, Any]
     raw_json: str  # Pre-serialized JSON
+    # Raw decoded message body, kept for downstream per-message filter
+    # evaluation. Optional so existing producers don't have to populate
+    # it; filtering a message with data=None always passes.
+    data: dict[str, Any] | None = None
 
 
 class RingBuffer:
