@@ -312,77 +312,165 @@ def list_bags(
 def export(
     path: Annotated[Path, typer.Argument(
         help="Path to a bag file (.mcap). "
-             "e.g. resurrector export experiment.mcap -t /imu/data -f parquet",
+             "e.g. resurrector export experiment.mcap --preset lerobot",
     )],
     topics: Annotated[Optional[list[str]], typer.Option("--topics", "-t",
         help="Topics to export. Pass --topics multiple times for multi-topic "
-             "exports. When omitted, every non-image topic is exported. "
+             "exports. When omitted, every topic is exported (or, with --preset, "
+             "the preset's topic filter applies). "
              "e.g. -t /imu/data -t /joint_states",
     )] = None,
-    format: Annotated[str, typer.Option("--format", "-f",
-        help="Output format. parquet (default, columnar, best for ML), "
-             "hdf5 (numerical workflows), csv (readable, large), "
-             "numpy (.npz, capped at 1 M rows per topic — refuses larger), "
-             "zarr (chunked, requires [all-exports]), "
-             "lerobot / rlds (training-ready, requires [all-exports]). "
+    format: Annotated[Optional[str], typer.Option("--format", "-f",
+        help="Output format. parquet (default), hdf5, csv, numpy "
+             "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
+             "lerobot / rlds (training-ready, needs [all-exports]). "
+             "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
-    )] = "parquet",
+    )] = None,
     output: Annotated[Path, typer.Option("--output", "-o",
-        help="Output directory. Created if missing. One file (or sub-directory "
-             "for multi-file formats) per exported topic. "
-             "e.g. -o ./training_data",
+        help="Output directory. Created if missing. e.g. -o ./training_data",
     )] = Path("./export"),
     sync: Annotated[Optional[str], typer.Option("--sync",
-        help="When set, all selected topics are time-aligned to one another "
-             "before export. Methods: 'nearest' (closest-in-time match), "
-             "'interpolate' (linear interp on numeric fields), "
-             "'sample_and_hold' (carry last value forward). Default: no sync; "
-             "each topic exported at its native rate. e.g. --sync nearest",
+        help="Sync method to time-align selected topics: 'nearest', "
+             "'interpolate', 'sample_and_hold'. Overrides the preset's "
+             "sync_method if --preset is set. e.g. --sync nearest",
     )] = None,
     downsample: Annotated[Optional[float], typer.Option("--downsample",
-        help="Resample exported topics to this rate in Hz before writing. "
-             "Useful for shrinking dataset size when full sensor rate is "
-             "more than your model needs. e.g. --downsample 50",
+        help="Resample to this rate in Hz before writing. Overrides the "
+             "preset's downsample_hz if --preset is set. e.g. --downsample 50",
     )] = None,
+    preset: Annotated[Optional[str], typer.Option("--preset",
+        help="Use a named export preset that bundles format + sync + "
+             "downsample for common workflows. Available: lerobot, rlds, "
+             "training-tabular, camera-only, multimodal. Run "
+             "`resurrector export --list-presets` to see details. Any "
+             "user-supplied flags override the preset's values. "
+             "e.g. --preset lerobot",
+    )] = None,
+    list_presets_flag: Annotated[bool, typer.Option("--list-presets",
+        help="List available export presets and their settings, then exit. "
+             "e.g. --list-presets",
+    )] = False,
+    split: Annotated[Optional[list[str]], typer.Option("--split",
+        help="Train/val/test split spec. Pass multiple times: "
+             "--split train=0.8 --split val=0.1 --split test=0.1. "
+             "Each split writes to its own subdirectory under -o. "
+             "Ratios must sum to 1.0. "
+             "e.g. --split train=0.8 --split val=0.1 --split test=0.1",
+    )] = None,
+    split_strategy: Annotated[str, typer.Option("--split-strategy",
+        help="How to assign rows to splits when --split is set. "
+             "'time' (default) — chronological, best for time-series. "
+             "'random' — uniform random per row. 'stratified' is a "
+             "v0.6+ candidate (raises NotImplementedError). "
+             "e.g. --split-strategy random",
+    )] = "time",
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
-    All chunk-streaming formats (Parquet, HDF5, CSV, Zarr, LeRobot, RLDS)
-    are memory-bounded by chunk size, not topic size — open a 100 GB bag
-    without OOMing. NumPy `.npz` is the exception: it materializes the
-    full topic and refuses topics over 1 M messages with a clear error
-    pointing at Parquet.
+    All chunk-streaming formats are memory-bounded by chunk size, not topic
+    size — open a 100 GB bag without OOMing. NumPy `.npz` is the exception:
+    it materializes the full topic and refuses topics over 1 M messages.
+
+    **Presets** (--preset NAME) bundle format/sync/downsample for common
+    workflows. User-supplied flags always override preset values, so a
+    preset is a baseline, not a constraint.
 
     Examples:
-      Quick Parquet export of two topics, native rates:
-          resurrector export bag.mcap -t /imu/data -t /joint_states
-
-      Time-synced export at 50 Hz for downstream ML training:
-          resurrector export bag.mcap -t /imu/data -t /joint_states \
+      Manual config:
+          resurrector export bag.mcap -t /imu/data -t /joint_states \\
               --sync nearest --downsample 50 --format hdf5 -o ./training
 
-      LeRobot-format dataset for direct use in robot-learning pipelines:
-          resurrector export bag.mcap --format lerobot -o ./lerobot_data
+      One-line LeRobot dataset (synced 30 Hz, all topics):
+          resurrector export bag.mcap --preset lerobot -o ./lerobot_data
 
-    Format support note: zarr/rlds need `pip install
-    'rosbag-resurrector[all-exports]'`. The export will fail with a
-    clear message if the extra isn't installed.
+      Preset with override (LeRobot defaults but at 60 Hz):
+          resurrector export bag.mcap --preset lerobot --downsample 60 \\
+              -o ./lerobot_60hz
+
+    Format support note: zarr/rlds (and the lerobot/rlds presets) need
+    `pip install 'rosbag-resurrector[all-exports]'`.
     """
+    from resurrector.core.export import PRESETS
+
+    # --list-presets short-circuits to a table dump and exits
+    if list_presets_flag:
+        from rich.table import Table
+        t = Table(title="Export presets", show_header=True, header_style="bold")
+        t.add_column("Name", style="cyan")
+        t.add_column("Format")
+        t.add_column("Sync")
+        t.add_column("Hz")
+        t.add_column("Topics")
+        t.add_column("Description", style="dim", max_width=44)
+        for p in PRESETS.values():
+            t.add_row(
+                p.name,
+                p.format,
+                f"{p.sync_method}" if p.sync else "—",
+                f"{p.downsample_hz:.0f}" if p.downsample_hz else "native",
+                p.topic_filter or "all",
+                p.description,
+            )
+        console.print(t)
+        if any(p.extras_required for p in PRESETS.values()):
+            console.print(
+                "\n[dim]Extras required for some presets — install via "
+                "`pip install 'rosbag-resurrector[all-exports]'`.[/dim]"
+            )
+        raise typer.Exit()
+
     from resurrector.core.bag_frame import BagFrame
 
     bf = BagFrame(path)
-    do_sync = sync is not None
-    sync_method = sync or "nearest"
+    # `sync` arg in CLI is the method string (or None); BagFrame.export
+    # takes a bool sync + str sync_method separately. Resolve here.
+    do_sync = sync is not None if preset is None else None  # let preset decide
+    sync_method = sync if sync is not None else None
 
-    result_path = bf.export(
-        topics=topics,
-        format=format,
-        output=str(output),
-        sync=do_sync,
-        sync_method=sync_method,
-        downsample_hz=downsample,
-    )
+    # Parse --split entries (each like "train=0.8") into a dict
+    split_dict: dict[str, float] | None = None
+    if split:
+        split_dict = {}
+        for item in split:
+            if "=" not in item:
+                console.print(
+                    f"[red]Invalid --split entry {item!r}; expected NAME=RATIO "
+                    f"(e.g. train=0.8)[/red]"
+                )
+                raise typer.Exit(2)
+            k, _, v = item.partition("=")
+            try:
+                split_dict[k.strip()] = float(v.strip())
+            except ValueError:
+                console.print(f"[red]--split {item!r}: ratio must be numeric[/red]")
+                raise typer.Exit(2)
+
+    try:
+        result_path = bf.export(
+            topics=topics,
+            format=format,
+            output=str(output),
+            sync=do_sync,
+            sync_method=sync_method,
+            downsample_hz=downsample,
+            preset=preset,
+            split=split_dict,
+            split_strategy=split_strategy,
+        )
+    except ValueError as e:
+        console.print(f"[red]Export failed: {e}[/red]")
+        raise typer.Exit(1)
+    except NotImplementedError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
     console.print(f"[green]Exported to {result_path}[/green]")
+    if preset:
+        console.print(f"[dim]Used preset: {preset}[/dim]")
+    if split_dict:
+        names = ", ".join(split_dict.keys())
+        console.print(f"[dim]Split ({split_strategy}): {names}[/dim]")
 
 
 @app.command()
@@ -1227,6 +1315,13 @@ def bridge_playback(
              "window. Caps a 1 kHz topic at the given rate so the WebSocket "
              "doesn't saturate. e.g. --max-rate 100",
     )] = 50.0,
+    record: Annotated[Optional[Path], typer.Option("--record",
+        help="Write every relayed message to a fresh MCAP at this path "
+             "(in addition to streaming over WebSocket). Useful when the "
+             "bridge applies server-side filters/transforms and you want "
+             "to capture the post-processing stream. Parent dir is "
+             "created. e.g. --record session.mcap",
+    )] = None,
 ):
     """Stream a recorded bag over WebSocket — PlotJuggler-compatible.
 
@@ -1234,6 +1329,11 @@ def bridge_playback(
     The built-in HTML viewer at http://host:port/ shows a simple
     plot for sanity checks. PlotJuggler users connect via "WebSocket
     Client" → ws://host:port/ws.
+
+    Pass ``--record path.mcap`` to also write every relayed message to
+    a fresh MCAP file. The recording is closed cleanly on shutdown
+    (Ctrl+C); if the process dies hard, the file is still readable
+    but lacks a summary index.
     """
     import uvicorn
     from resurrector.bridge.server import create_bridge_app
@@ -1241,12 +1341,15 @@ def bridge_playback(
     bridge = create_bridge_app(
         mode="playback", bag_path=bag, speed=speed,
         topics=topics, loop_playback=loop, max_rate_hz=max_rate,
+        record_path=record,
     )
 
     console.print(f"[bold]Resurrector Bridge — Playback Mode[/bold]")
     console.print(f"  WebSocket: [cyan]ws://{host}:{port}/ws[/cyan]")
     console.print(f"  Viewer:    [cyan]http://{host}:{port}/[/cyan]")
     console.print(f"  PlotJuggler: connect WebSocket Client to ws://{host}:{port}/ws")
+    if record:
+        console.print(f"  Recording: [cyan]{record}[/cyan]")
     console.print(f"  Speed: {speed}x | Loop: {loop}")
     console.print()
 
@@ -1390,27 +1493,65 @@ def demo(
     output: Annotated[Optional[Path], typer.Option(
         "--output", "-o",
         help="Where to write the sample bag. Defaults to "
-             "~/.resurrector/demo_sample.mcap. e.g. -o /tmp/demo.mcap",
+             "~/.resurrector/demo_sample.mcap (synth) or "
+             "~/.resurrector/samples/hku2.mcap (--download). "
+             "e.g. -o /tmp/demo.mcap",
     )] = None,
     run_full: Annotated[bool, typer.Option(
         "--full",
-        help="Also run scan + health + export on the generated bag, "
-             "showing the full pipeline end-to-end. e.g. --full",
+        help="Also run scan + health + export on the bag, showing the "
+             "full pipeline end-to-end. e.g. --full",
+    )] = False,
+    download: Annotated[bool, typer.Option(
+        "--download",
+        help="Download a real-data MCAP bag (HKU FAST-LIVO dataset, "
+             "~844 MB, CC-BY-NC-4.0) instead of generating the synthetic "
+             "sample. Real footage is needed for the dashboard's CLIP "
+             "semantic frame search to return visually meaningful results. "
+             "Idempotent — skips download if the file already exists. "
+             "e.g. --download",
+    )] = False,
+    download_url: Annotated[Optional[str], typer.Option(
+        "--download-url",
+        help="Override the default download URL (HKU FAST-LIVO hku2). "
+             "Use to fetch a different public sample bag. "
+             "e.g. --download-url https://example.com/sample.mcap",
+    )] = None,
+    force: Annotated[bool, typer.Option(
+        "--force",
+        help="Re-download (or re-generate) even if the target file already "
+             "exists. e.g. --force",
     )] = False,
 ):
-    """Generate a synthetic sample bag and walk through the basic workflow.
+    """Generate or download a sample bag and walk through the basic workflow.
 
-    Useful as a smoke test or to show what the tool can do without
-    needing your own data.
+    Default: generates a 5-second synthetic bag (fast, good for smoke tests
+    but cameras contain colored noise — bad for visual demos like CLIP
+    search). Pass --download to fetch a real-data MCAP bag with actual
+    camera footage instead.
+
+    Examples:
+      resurrector demo --full                          # synthetic + walkthrough
+      resurrector demo --download                      # fetch real-data sample
+      resurrector demo --download --full               # download + walkthrough
+      resurrector demo --download -o /data/sample.mcap # custom path
     """
+    if download:
+        _demo_download(output=output, run_full=run_full, url=download_url, force=force)
+        return
+
+    # Default path: generate synthetic bag
     from resurrector.demo.sample_bag import generate_bag, BagConfig
 
     output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
-    generate_bag(output, BagConfig(duration_sec=5.0))
-    console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
+    if output.exists() and not force:
+        console.print(f"[dim]Sample already exists at {output} (use --force to regenerate)[/dim]")
+    else:
+        console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
+        generate_bag(output, BagConfig(duration_sec=5.0))
+        console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
 
     console.print("[cyan]Opening with BagFrame...[/cyan]")
     from resurrector.core.bag_frame import BagFrame
@@ -1434,6 +1575,100 @@ def demo(
         f"  [cyan]resurrector scan {output.parent}[/cyan]       # index the bag\n"
         f"  [cyan]resurrector health {output}[/cyan]    # detailed health report\n"
         f"  [cyan]resurrector dashboard[/cyan]                   # open the web UI\n"
+    )
+
+
+def _demo_download(
+    output: Optional[Path],
+    run_full: bool,
+    url: Optional[str],
+    force: bool,
+) -> None:
+    """Implementation of `resurrector demo --download`."""
+    from resurrector.demo.download import (
+        DEFAULT_SAMPLE_URL,
+        LICENSE_NOTE,
+        download_sample,
+    )
+    from rich.progress import (
+        BarColumn, DownloadColumn, Progress, TextColumn,
+        TimeRemainingColumn, TransferSpeedColumn,
+    )
+
+    target = output  # may be None — download_sample handles default
+    download_url = url or DEFAULT_SAMPLE_URL
+
+    console.print(
+        f"[cyan]Downloading real-data sample bag (HKU FAST-LIVO, ~844 MB)...[/cyan]"
+    )
+    console.print(f"[dim]URL: {download_url}[/dim]")
+    if target:
+        console.print(f"[dim]Target: {target}[/dim]")
+    console.print()
+
+    progress = Progress(
+        TextColumn("[bold blue]hku2.mcap"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+
+    task_id = None
+    try:
+        with progress:
+            def cb(bytes_so_far: int, total: int) -> None:
+                nonlocal task_id
+                if task_id is None:
+                    # First chunk — set the bar's total now that we know it.
+                    # If server didn't send Content-Length (total=0), the bar
+                    # will show indeterminate spinner mode, which is fine.
+                    task_id = progress.add_task("download", total=total or None)
+                progress.update(task_id, completed=bytes_so_far)
+
+            result = download_sample(
+                target=target,
+                url=download_url,
+                progress_callback=cb,
+                force=force,
+            )
+    except Exception as e:
+        console.print(f"[red]Download failed: {type(e).__name__}: {e}[/red]")
+        raise typer.Exit(1)
+
+    if result.skipped:
+        size_mb = result.bytes_downloaded / (1024 * 1024)
+        console.print(
+            f"[green][OK] Already downloaded at {result.path} "
+            f"({size_mb:.0f} MB) — use --force to re-download[/green]\n"
+        )
+    else:
+        size_mb = result.bytes_downloaded / (1024 * 1024)
+        console.print(
+            f"[green][OK] Downloaded {size_mb:.0f} MB to {result.path}[/green]\n"
+        )
+
+    console.print(f"[yellow]{LICENSE_NOTE}[/yellow]\n")
+
+    console.print("[cyan]Opening with BagFrame...[/cyan]")
+    from resurrector.core.bag_frame import BagFrame
+    bf = BagFrame(result.path)
+    bf.info()
+    console.print()
+
+    if run_full:
+        console.print("[cyan]Running health check (real bags can take a moment)...[/cyan]")
+        report = bf.health_report()
+        console.print(f"Health score: [bold]{report.score}/100[/bold]")
+        console.print(f"Warnings: {len(report.warnings)}\n")
+
+    console.print(
+        "[dim]Next steps:[/dim]\n"
+        f"  [cyan]resurrector scan {result.path.parent}[/cyan]\n"
+        f"  [cyan]resurrector index-frames {result.path}[/cyan]    # build CLIP embeddings\n"
+        f"  [cyan]resurrector search-frames \"person walking\" --save ./hits[/cyan]\n"
+        f"  [cyan]resurrector dashboard[/cyan]                   # open localhost:8080\n"
     )
 
 

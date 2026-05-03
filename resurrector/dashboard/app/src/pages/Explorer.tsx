@@ -6,6 +6,7 @@ import HealthBadge from '../components/HealthBadge'
 import ExportDialog from '../components/ExportDialog'
 import SyncView from '../components/SyncView'
 import ImageViewer from '../components/ImageViewer'
+import SceneViewer from '../components/SceneViewer'
 import BookmarksPanel from '../components/BookmarksPanel'
 import DensityRibbon from '../components/DensityRibbon'
 import TransformEditor from '../components/TransformEditor'
@@ -57,7 +58,7 @@ function timestampsAndSeries(topicData: TopicDataResponse): {
   return { ts_ns, series, numericColumns }
 }
 
-type Tab = 'plot' | 'sync' | 'images'
+type Tab = 'plot' | 'sync' | 'images' | 'scene'
 
 export default function Explorer() {
   const { id } = useParams<{ id: string }>()
@@ -363,9 +364,9 @@ export default function Explorer() {
           ) : (
             <>
               <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                {(['plot', 'sync', 'images'] as Tab[]).map(t => {
+                {(['plot', 'sync', 'images', 'scene'] as Tab[]).map(t => {
                   const enabled =
-                    t === 'plot' || (t === 'sync' && true) || (t === 'images' && isImageTopic)
+                    t === 'plot' || (t === 'sync' && true) || (t === 'images' && isImageTopic) || t === 'scene'
                   return (
                     <button
                       key={t}
@@ -504,6 +505,14 @@ export default function Explorer() {
                   bagId={bagId}
                   topic={selectedTopic}
                   totalFrames={selectedTopicInfo!.message_count}
+                />
+              )}
+
+              {activeTab === 'scene' && (
+                <SceneViewer
+                  bagId={bagId}
+                  bagDurationSec={bag.duration_sec}
+                  bagStartNs={bag.start_time_ns ?? 0}
                 />
               )}
             </>

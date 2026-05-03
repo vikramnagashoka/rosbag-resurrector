@@ -67,6 +67,8 @@ export interface Bag {
   duration_sec: number
   size_bytes: number
   message_count: number
+  start_time_ns?: number
+  end_time_ns?: number
   health_score: number | null
   topics: { name: string; message_type: string; message_count: number }[]
   tags: { key: string; value: string }[]
@@ -130,6 +132,53 @@ export interface BridgeStatus {
   return_code?: number
 }
 
+// v0.5.0 — 3D scene types
+export interface SceneTopics {
+  tf: string[]
+  tf_static: string[]
+  pointclouds: string[]
+  images: string[]
+  markers: string[]
+}
+
+export interface SceneTfEdge {
+  parent_frame: string
+  child_frame: string
+  timestamp_ns: number
+  translation: [number, number, number]
+  rotation: [number, number, number, number]
+  is_static: boolean
+}
+
+export interface SceneTfTree {
+  time_ns: number
+  edges: SceneTfEdge[]
+  frames: string[]
+  roots: string[]
+  static_count: number
+  dynamic_count: number
+}
+
+export interface ScenePointCloud {
+  frame_id: string
+  time_ns: number
+  n_points: number
+  points: [number, number, number][]
+  warning?: string
+}
+
+export interface ExportPreset {
+  name: string
+  format: string
+  sync: boolean
+  sync_method: string
+  downsample_hz: number | null
+  topic_filter: string | null
+  description: string
+  extras_required: string[]
+  available: boolean
+}
+
 export interface FrameSearchResult {
   query: string
   mode: 'frames' | 'clips'
@@ -173,7 +222,15 @@ export const api = {
     }),
   exportBag: (
     bagId: number,
-    body: { topics: string[]; format: string; output_dir: string; sync?: boolean; sync_method?: string; downsample_hz?: number },
+    body: {
+      topics: string[]
+      format?: string
+      output_dir: string
+      sync?: boolean
+      sync_method?: string
+      downsample_hz?: number
+      preset?: string
+    },
   ) => request<{ output: string }>('POST', `/api/bags/${bagId}/export`, { body, query: {
     topics: body.topics.join(','),
     format: body.format,
@@ -181,7 +238,30 @@ export const api = {
     sync: body.sync,
     sync_method: body.sync_method,
     downsample_hz: body.downsample_hz,
+    preset: body.preset,
   } }),
+  // v0.5.0 — list named export presets for the ExportDialog dropdown
+  listExportPresets: () =>
+    request<ExportPreset[]>('GET', `/api/export-presets`),
+  // v0.5.0 — 3D scene endpoints (Option 3.1+3.2)
+  listSceneTopics: (bagId: number) =>
+    request<SceneTopics>('GET', `/api/bags/${bagId}/scene/topics`),
+  getSceneTfTree: (bagId: number, timeNs?: number) =>
+    request<SceneTfTree>('GET', `/api/bags/${bagId}/scene/tf-tree`, {
+      query: { time_ns: timeNs },
+    }),
+  getScenePointCloud: (
+    bagId: number,
+    topic: string,
+    opts?: { timeNs?: number; maxPoints?: number },
+  ) =>
+    request<ScenePointCloud>('GET', `/api/bags/${bagId}/scene/pointcloud`, {
+      query: {
+        topic,
+        time_ns: opts?.timeNs,
+        max_points: opts?.maxPoints,
+      },
+    }),
   frameUrl: (bagId: number, topic: string, frameIndex: number, width?: number) => {
     const t = topic.startsWith('/') ? topic.slice(1) : topic
     const w = width ? `?width=${width}` : ''

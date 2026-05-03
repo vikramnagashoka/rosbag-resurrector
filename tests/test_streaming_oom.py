@@ -167,6 +167,63 @@ def test_parquet_export_bounded(large_bag):
     assert delta_mb < 100, f"parquet export RSS delta {delta_mb:.1f} MB > 100 MB"
 
 
+def test_hdf5_export_bounded(large_bag):
+    """Streaming HDF5 export uses resizable datasets (append per chunk).
+
+    Peak RSS should stay near baseline like parquet. h5py's gzip
+    compression adds some allocator noise; budget is generous.
+    """
+    bf = BagFrame(large_bag)
+    with tempfile.TemporaryDirectory() as d:
+        delta_mb, _ = _peak_rss_delta_mb(
+            lambda: Exporter().export(
+                bag_frame=bf, topics=["/imu/data"], format="hdf5",
+                output_dir=str(d),
+            ),
+        )
+    assert delta_mb < 150, f"hdf5 export RSS delta {delta_mb:.1f} MB > 150 MB"
+
+
+def test_zarr_export_bounded(large_bag):
+    """Streaming Zarr export appends to chunked arrays per chunk.
+
+    Skips if zarr (in [all-exports]) isn't installed in this venv.
+    Zarr can't store variable-length strings (e.g. header.frame_id) so
+    we expect ExportError listing those columns — but the streaming
+    write itself must still be memory-bounded for the numeric ones.
+    """
+    pytest.importorskip("zarr")
+    from resurrector.core.export import ExportError
+    bf = BagFrame(large_bag)
+    def _do_zarr_export(d):
+        try:
+            Exporter().export(
+                bag_frame=bf, topics=["/imu/data"], format="zarr",
+                output_dir=str(d),
+            )
+        except ExportError:
+            # Expected — string columns can't go into zarr; the streaming
+            # writer correctly catches this per-column. Memory budget is
+            # the load-bearing assertion here.
+            pass
+    with tempfile.TemporaryDirectory() as d:
+        delta_mb, _ = _peak_rss_delta_mb(lambda: _do_zarr_export(d))
+    assert delta_mb < 150, f"zarr export RSS delta {delta_mb:.1f} MB > 150 MB"
+
+
+def test_csv_export_bounded(large_bag):
+    """Streaming CSV export writes per-chunk; only one chunk in memory at a time."""
+    bf = BagFrame(large_bag)
+    with tempfile.TemporaryDirectory() as d:
+        delta_mb, _ = _peak_rss_delta_mb(
+            lambda: Exporter().export(
+                bag_frame=bf, topics=["/imu/data"], format="csv",
+                output_dir=str(d),
+            ),
+        )
+    assert delta_mb < 100, f"csv export RSS delta {delta_mb:.1f} MB > 100 MB"
+
+
 def test_numpy_export_under_cap_bounded(large_bag):
     """NumPy export of a topic under NUMPY_HARD_CAP succeeds with reasonable
     memory. /imu at 200Hz × 100s = 20K rows, well under 1M."""

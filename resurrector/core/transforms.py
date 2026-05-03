@@ -274,29 +274,23 @@ _SAFE_PL_NAMES = {
 }
 
 
-def apply_polars_expression(
-    df: pl.DataFrame, expr_str: str, alias: str | None = None,
-) -> pl.Series:
-    """Evaluate a user-supplied Polars expression and return the result Series.
+def validate_polars_expression(expr_str: str):
+    """AST-walk a Polars expression string to enforce the sandbox.
 
-    The expression runs in a strict namespace exposing only ``pl`` (with
-    a name allowlist) — no builtins, no module access. Examples:
+    Raises ``ValueError`` for any sandbox violation (forbidden name,
+    attribute access on something other than ``pl``, import statement,
+    pl.* function not in the allowlist). Returns the parsed AST so
+    callers can avoid double-parsing.
 
-    .. code-block:: python
-
-        apply_polars_expression(df, 'pl.col("x") * 2')
-        apply_polars_expression(df, 'pl.col("x").rolling_mean(10)')
-        apply_polars_expression(df, '(pl.col("x").pow(2) + pl.col("y").pow(2)).sqrt()')
-
-    Raises ``ValueError`` if the expression uses a forbidden name or the
-    Polars evaluation fails. Never raises raw ``SyntaxError`` /
-    ``AttributeError`` — those are wrapped so the API can return clean
-    400 responses.
+    Use this directly when you want to validate a user-supplied
+    expression before applying it (e.g. at WS subscribe time, before
+    storing the filter). Don't use it as a one-shot check — also call
+    ``apply_polars_expression`` against a real DataFrame to catch
+    runtime problems (missing columns, type mismatches).
     """
     if not expr_str or not expr_str.strip():
         raise ValueError("expression cannot be empty")
 
-    # AST-walk to reject any name access not on our allowlist.
     import ast
 
     tree = ast.parse(expr_str, mode="eval")
@@ -333,6 +327,29 @@ def apply_polars_expression(
                     f"Allowed top-level Polars functions: {sorted(_SAFE_PL_NAMES)}. "
                     f"You can still chain methods on a pl.col(...) result."
                 )
+    return tree
+
+
+def apply_polars_expression(
+    df: pl.DataFrame, expr_str: str, alias: str | None = None,
+) -> pl.Series:
+    """Evaluate a user-supplied Polars expression and return the result Series.
+
+    The expression runs in a strict namespace exposing only ``pl`` (with
+    a name allowlist) — no builtins, no module access. Examples:
+
+    .. code-block:: python
+
+        apply_polars_expression(df, 'pl.col("x") * 2')
+        apply_polars_expression(df, 'pl.col("x").rolling_mean(10)')
+        apply_polars_expression(df, '(pl.col("x").pow(2) + pl.col("y").pow(2)).sqrt()')
+
+    Raises ``ValueError`` if the expression uses a forbidden name or the
+    Polars evaluation fails. Never raises raw ``SyntaxError`` /
+    ``AttributeError`` — those are wrapped so the API can return clean
+    400 responses.
+    """
+    tree = validate_polars_expression(expr_str)
 
     # Evaluate in a namespace that exposes only ``pl``.
     safe_globals = {"__builtins__": {}, "pl": pl}
@@ -350,3 +367,86 @@ def apply_polars_expression(
     if alias:
         series = series.alias(alias)
     return series
+
+
+def _flatten_for_filter(d: dict, out: dict, prefix: str = "") -> None:
+    """Flatten a nested message dict for filter evaluation.
+
+    Matches the dot-notation convention used by ``BagFrame.iter_chunks()``
+    so a filter expression like ``pl.col("linear_acceleration.x")`` works
+    against both streamed DataFrames and per-message filter contexts.
+    """
+    for key, value in d.items():
+        if key.startswith("_"):
+            continue
+        full_key = f"{prefix}{key}" if not prefix else f"{prefix}.{key}"
+        if isinstance(value, dict):
+            _flatten_for_filter(value, out, full_key)
+        elif isinstance(value, (int, float, bool, str)) or value is None:
+            out[full_key] = value
+        # Lists / arrays are skipped at the per-message level — filters
+        # operating on them are rare and would need a different codepath.
+
+
+def evaluate_message_filter(msg_data: dict, expr_str: str) -> bool:
+    """Apply a Polars-expression filter to a single message dict.
+
+    Used by the bridge's per-message filtering path: the WS subscribe
+    payload can include a per-topic filter expression; the server runs
+    it for each message and drops messages where the result is False.
+
+    The expression evaluates in the same sandbox as
+    :func:`apply_polars_expression` (AST allowlist, no builtins). The
+    message dict is flattened with dot notation
+    (``linear_acceleration.x`` etc.) so column references match
+    what users see in the dashboard's transform editor.
+
+    Args:
+        msg_data: The decoded message body (``Message.data``).
+        expr_str: A Polars expression that produces a boolean. e.g.
+            ``"pl.col('linear_acceleration.x').abs() > 5"``.
+
+    Returns:
+        True if the message passes the filter, False otherwise.
+        Filters that error (missing column, type mismatch) return False
+        — fail-closed so a malformed expression doesn't accidentally
+        forward everything.
+
+    Raises:
+        ValueError: For sandbox violations or invalid syntax (caller
+            should catch and turn into a 400 / WS error message).
+    """
+    if not expr_str or not expr_str.strip():
+        return True  # Empty filter = pass everything
+
+    # Validate AST first — sandbox violations (forbidden names, bad
+    # imports, syntax errors) raise ValueError regardless of message
+    # contents so the caller can reject the filter outright. We avoid
+    # using apply_polars_expression() here because it wraps ALL errors
+    # as ValueError, conflating sandbox violations with per-message
+    # runtime errors.
+    tree = validate_polars_expression(expr_str)
+
+    flat: dict = {}
+    _flatten_for_filter(msg_data, flat)
+    if not flat:
+        return False  # No fields to filter on; fail closed
+
+    safe_globals = {"__builtins__": {}, "pl": pl}
+    try:
+        df = pl.DataFrame([flat])
+        expr = eval(compile(tree, "<filter>", "eval"), safe_globals, {})
+        result_df = df.select(expr)
+    except Exception:
+        # Polars errors (column not found in this particular message,
+        # type mismatch, malformed input) → fail-closed for THIS
+        # message. Don't reject the filter — another message on the
+        # same topic might have the referenced column.
+        return False
+
+    if result_df.height == 0 or result_df.width == 0:
+        return False
+    val = result_df.to_series(0)[0]
+    if val is None:
+        return False
+    return bool(val)
