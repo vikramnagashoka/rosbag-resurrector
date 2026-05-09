@@ -1,0 +1,47 @@
+/* Card — v0.6.0 (Sub-feature C.3)
+ *
+ * The most-used surface pattern in the dashboard. Header / body /
+ * footer slots are optional; the bare <div className={styles.card}>
+ * works for a flat surface.
+ */
+
+.card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: border-color var(--duration-fast) var(--easing),
+              box-shadow var(--duration-fast) var(--easing),
+              transform var(--duration-base) var(--easing);
+}
+
+/* Optional hover lift — opt in via cardHoverable */
+.cardHoverable:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.header {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.body {
+  padding: var(--space-4);
+  color: var(--color-text);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+}
+
+.footer {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--color-bg-elevated);
+}

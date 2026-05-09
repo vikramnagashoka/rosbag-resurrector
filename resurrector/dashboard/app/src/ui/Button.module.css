@@ -1,0 +1,81 @@
+/* Button — v0.6.0 (Sub-feature C.3)
+ *
+ * Variants: primary | secondary | ghost | danger
+ * Sizes:    sm | md | lg
+ * States:   :hover | :active | :focus-visible | :disabled
+ */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--easing),
+              border-color var(--duration-fast) var(--easing),
+              color var(--duration-fast) var(--easing),
+              transform var(--duration-fast) var(--easing);
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* Sizes */
+.sm { padding: var(--space-1) var(--space-2); font-size: var(--text-sm); }
+.md { padding: var(--space-2) var(--space-3); font-size: var(--text-base); }
+.lg { padding: var(--space-3) var(--space-4); font-size: var(--text-md); }
+
+/* Primary — accent fill */
+.primary {
+  background: var(--color-accent);
+  color: var(--color-bg);
+  border-color: var(--color-accent);
+}
+.primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+/* Secondary — neutral surface */
+.secondary {
+  background: var(--color-bg-card);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+.secondary:hover:not(:disabled) {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-strong);
+}
+
+/* Ghost — transparent until hover */
+.ghost {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border-color: transparent;
+}
+.ghost:hover:not(:disabled) {
+  background: var(--color-accent-muted);
+  color: var(--color-text);
+}
+
+/* Danger — red surface, used for destructive actions */
+.danger {
+  background: var(--color-bg-card);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+.danger:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.1);
+}
