@@ -310,6 +310,9 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
   const [urdfStatus, setUrdfStatus] = useState<string | null>(null)
   const [markers, setMarkers] = useState<SceneMarkers | null>(null)
   const [selectedMarkerTopic, setSelectedMarkerTopic] = useState<string | null>(null)
+  const [selectedCameraTopic, setSelectedCameraTopic] = useState<string | null>(null)
+  const [cameraFrameUrl, setCameraFrameUrl] = useState<string | null>(null)
+  const [cameraFrameDt, setCameraFrameDt] = useState<number>(0)
   const inflightRef = useRef<number>(0)
 
   const timeNs = useMemo(
@@ -325,6 +328,9 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       }
       if (t.markers.length > 0) {
         setSelectedMarkerTopic(t.markers[0])
+      }
+      if (t.images.length > 0) {
+        setSelectedCameraTopic(t.images[0])
       }
     }).catch(e => {
       setError(e instanceof ApiError ? e.message : String(e))
@@ -371,6 +377,24 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       setMarkers(null)
     })
   }, [bagId, selectedMarkerTopic, timeNs])
+
+  // Camera-overlay: pick the frame index nearest to the scrubbed time
+  // and build the JPEG URL (cached at the existing endpoint).
+  useEffect(() => {
+    if (!selectedCameraTopic) {
+      setCameraFrameUrl(null)
+      return
+    }
+    api.getCameraFrameAt(bagId, selectedCameraTopic, Math.round(timeNs))
+      .then(r => {
+        setCameraFrameUrl(api.frameUrl(bagId, selectedCameraTopic, r.frame_index, 320))
+        setCameraFrameDt(r.dt_ns)
+      })
+      .catch(() => {
+        // Frame indexing can take a moment for unindexed bags; soft-fail
+        setCameraFrameUrl(null)
+      })
+  }, [bagId, selectedCameraTopic, timeNs])
 
   // Try once per bag to auto-load a URDF from /robot_description.
   // Soft-fail — most bags don't have one and that's fine.
@@ -464,6 +488,23 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
             </select>
           </label>
         )}
+        {topics.images.length > 0 && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            Camera:
+            <select
+              value={selectedCameraTopic ?? ''}
+              onChange={e =>
+                setSelectedCameraTopic(e.target.value || null)
+              }
+              style={{ padding: 4, background: '#0d1117', color: '#e1e4e8', border: '1px solid #30363d' }}
+            >
+              <option value="">(none)</option>
+              {topics.images.map(t => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </label>
+        )}
         {topics.markers.length > 0 && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             Markers:
@@ -547,7 +588,37 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
           </span>
         )}
       </div>
-      <div style={{ width: '100%', height: 600, background: '#0d1117', borderRadius: 6 }}>
+      <div
+        style={{
+          width: '100%', height: 600, background: '#0d1117',
+          borderRadius: 6, position: 'relative',
+        }}
+      >
+        {cameraFrameUrl && (
+          <div
+            style={{
+              position: 'absolute', bottom: 12, right: 12, zIndex: 5,
+              background: 'rgba(13,17,23,0.85)',
+              border: '1px solid #30363d', borderRadius: 4,
+              padding: 4, pointerEvents: 'none',
+            }}
+          >
+            <img
+              src={cameraFrameUrl}
+              alt="camera frame"
+              style={{
+                display: 'block', maxWidth: 320, maxHeight: 240,
+                borderRadius: 2,
+              }}
+            />
+            <div style={{
+              fontSize: 10, color: '#8b949e', fontFamily: 'monospace',
+              marginTop: 2, textAlign: 'right',
+            }}>
+              {selectedCameraTopic} · Δt = {(cameraFrameDt / 1e6).toFixed(1)} ms
+            </div>
+          </div>
+        )}
         <Canvas
           camera={{ position: [3, 3, 3], fov: 50, near: 0.01, far: 1000 }}
           gl={{ antialias: true }}

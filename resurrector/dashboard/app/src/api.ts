@@ -305,6 +305,12 @@ export const api = {
     request<SceneMarkers>('GET', `/api/bags/${bagId}/scene/markers`, {
       query: { topic, time_ns: opts?.timeNs },
     }),
+  // v0.6.0 — Camera frame at time
+  getCameraFrameAt: (bagId: number, topic: string, timeNs: number) =>
+    request<{ frame_index: number; frame_time_ns: number; dt_ns: number }>(
+      'GET', `/api/bags/${bagId}/scene/camera-frame-at`,
+      { query: { topic, time_ns: timeNs } },
+    ),
   frameUrl: (bagId: number, topic: string, frameIndex: number, width?: number) => {
     const t = topic.startsWith('/') ? topic.slice(1) : topic
     const w = width ? `?width=${width}` : ''

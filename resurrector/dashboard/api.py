@@ -1910,6 +1910,71 @@ async def list_scene_topics(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+@app.get("/api/bags/{bag_id}/scene/camera-frame-at")
+async def get_camera_frame_at(
+    bag_id: int,
+    topic: str = Query(..., description="Image topic name"),
+    time_ns: int = Query(..., description="Target timestamp ns"),
+) -> dict[str, Any]:
+    """Return the frame_index nearest to ``time_ns`` for an image topic.
+
+    Used by the SceneViewer's camera-image overlay to keep the displayed
+    frame synced to the time slider. Frontend then fetches the actual
+    image bytes via the existing ``/topics/{name}/frame/{idx}`` endpoint
+    so we don't double-pay the JPEG-encode cost when the frame is cached.
+
+    Returns ``{frame_index, frame_time_ns, dt_ns}`` (dt_ns = signed
+    difference frame_time - target_time, useful for "frame is N ms old"
+    UI hints).
+    """
+    from resurrector.ingest.frame_index import (
+        IMAGE_TOPIC_TYPES, build_frame_offsets,
+    )
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        topic_info = next(
+            (t for t in bag.get("topics", []) if t["name"] == topic), None,
+        )
+        if topic_info is None:
+            raise HTTPException(404, f"Topic {topic!r} not found")
+        if topic_info["message_type"] not in IMAGE_TOPIC_TYPES:
+            raise HTTPException(
+                400, f"Topic {topic!r} is not an image topic "
+                     f"(type: {topic_info['message_type']})",
+            )
+
+        # Lazy-build the frame offsets if not already indexed
+        if not index.has_frame_offsets(int(bag_id), topic):
+            build_frame_offsets(index, int(bag_id), bag["path"], topics=[topic])
+
+        # Direct DuckDB query: pick the row with smallest |timestamp - target|
+        with index._lock:
+            row = index.conn.execute(
+                """
+                SELECT frame_index, timestamp_ns
+                FROM frame_offsets
+                WHERE bag_id = ? AND topic = ?
+                ORDER BY ABS(timestamp_ns - ?) ASC
+                LIMIT 1
+                """,
+                [int(bag_id), topic, int(time_ns)],
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"No frames indexed for topic {topic!r}")
+        frame_index, frame_ts = row
+        return {
+            "frame_index": int(frame_index),
+            "frame_time_ns": int(frame_ts),
+            "dt_ns": int(frame_ts - int(time_ns)),
+        }
+    finally:
+        index.close()
+
+
 @app.get("/api/bags/{bag_id}/scene/markers")
 async def get_scene_markers(
     bag_id: int,
