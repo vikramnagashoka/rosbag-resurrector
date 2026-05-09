@@ -6,7 +6,7 @@ quality validation, multi-stream synchronization, ML-ready export,
 and an interactive web dashboard.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from resurrector.core.bag_frame import BagFrame
 from resurrector.ingest.scanner import scan
