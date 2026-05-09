@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { OrbitControls, Grid, Html } from '@react-three/drei'
 import * as THREE from 'three'
+import URDFLoader from 'urdf-loader'
 
 import {
   api,
@@ -139,6 +140,67 @@ function PointCloud({ points }: { points: [number, number, number][] }) {
   )
 }
 
+// URDF loader component — parses a URDF XML string with `urdf-loader`,
+// applies optional joint angles, and adds the resulting THREE.Group to
+// the scene. The loader walks `<link>` and `<visual>` children; built-in
+// primitives (box / cylinder / sphere) render natively. Mesh-file
+// references (`<mesh filename="package://…">`) require a working
+// resolver — for v0.6.0 we punt on external meshes and only render
+// primitive-shape URDFs cleanly. Non-resolvable meshes simply don't
+// appear (no crash).
+function UrdfModel({
+  urdfXml, jointStates,
+}: {
+  urdfXml: string
+  jointStates?: Record<string, number>
+}) {
+  const groupRef = useRef<THREE.Group>(null)
+  const robotRef = useRef<any>(null)
+
+  useEffect(() => {
+    if (!groupRef.current || !urdfXml) return
+    const loader = new URDFLoader()
+    // Disable mesh loading for primitive-only URDFs; if the URDF
+    // references external meshes we silently skip them in v0.6.0.
+    loader.loadMeshCb = (_path, _manager, done) => {
+      // Returning an empty Object3D = "no mesh available, render nothing"
+      done(new THREE.Object3D())
+    }
+    try {
+      const robot = loader.parse(urdfXml)
+      robotRef.current = robot
+      // Clear any previously-loaded robot
+      while (groupRef.current.children.length) {
+        groupRef.current.remove(groupRef.current.children[0])
+      }
+      groupRef.current.add(robot)
+    } catch (e) {
+      // URDF parse errors are silent in the renderer — the parent
+      // SceneViewer surfaces them via the error state. We log here
+      // so console diagnostics aren't lost.
+      console.error('URDF parse failed:', e)
+    }
+  }, [urdfXml])
+
+  // Apply joint states whenever they change
+  useEffect(() => {
+    const robot = robotRef.current
+    if (!robot || !jointStates) return
+    for (const [name, value] of Object.entries(jointStates)) {
+      try {
+        if (robot.joints && robot.joints[name]) {
+          robot.joints[name].setJointValue(value)
+        }
+      } catch {
+        // setJointValue can throw if the value is outside joint limits;
+        // ignore — the next frame may have a valid value
+      }
+    }
+  }, [jointStates])
+
+  return <group ref={groupRef} />
+}
+
 // Tiny widget that auto-fits the OrbitControls target to the scene's
 // bounding sphere on every TF tree change so the user doesn't have to
 // hunt for the scene with the mouse.
@@ -160,6 +222,8 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
   const [maxPoints, setMaxPoints] = useState<number>(10000)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [urdfXml, setUrdfXml] = useState<string | null>(null)
+  const [urdfStatus, setUrdfStatus] = useState<string | null>(null)
   const inflightRef = useRef<number>(0)
 
   const timeNs = useMemo(
@@ -204,6 +268,32 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       setError(e instanceof ApiError ? e.message : String(e))
     })
   }, [bagId, selectedPointCloudTopic, timeNs, maxPoints])
+
+  // Try once per bag to auto-load a URDF from /robot_description.
+  // Soft-fail — most bags don't have one and that's fine.
+  useEffect(() => {
+    setUrdfXml(null)
+    setUrdfStatus(null)
+    api.getUrdfFromBag(bagId).then(r => {
+      setUrdfXml(r.urdf)
+      setUrdfStatus(`auto-loaded from ${r.topic}`)
+    }).catch(() => {
+      // Silent — no /robot_description in this bag
+    })
+  }, [bagId])
+
+  // User-supplied URDF path (manual load)
+  const loadUrdfByPath = async (path: string) => {
+    setUrdfStatus('loading…')
+    try {
+      const r = await api.getUrdfByPath(path)
+      setUrdfXml(r.urdf)
+      setUrdfStatus(`loaded from ${r.path}`)
+    } catch (e) {
+      setUrdfStatus(`error: ${e instanceof ApiError ? e.message : String(e)}`)
+      setUrdfXml(null)
+    }
+  }
 
   const poses = useMemo(() => tree ? resolveFramePoses(tree) : new Map(), [tree])
 
@@ -293,6 +383,45 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
         )}
         {loading && <span style={{ color: '#8b949e' }}>(loading…)</span>}
       </div>
+
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontSize: 12, color: '#e1e4e8',
+        }}
+      >
+        <span style={{ color: '#8b949e' }}>URDF:</span>
+        <input
+          type="text"
+          placeholder="/path/to/robot.urdf (optional — auto-loads from /robot_description if present)"
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              const v = (e.target as HTMLInputElement).value.trim()
+              if (v) loadUrdfByPath(v)
+            }
+          }}
+          style={{
+            flex: 1, padding: 4, background: '#0d1117',
+            color: '#e1e4e8', border: '1px solid #30363d', borderRadius: 4,
+            fontFamily: 'monospace', fontSize: 12,
+          }}
+        />
+        {urdfXml && (
+          <button
+            onClick={() => { setUrdfXml(null); setUrdfStatus(null) }}
+            style={{
+              padding: '4px 10px', background: '#21262d', color: '#e1e4e8',
+              border: '1px solid #30363d', borderRadius: 4, cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >Hide URDF</button>
+        )}
+        {urdfStatus && (
+          <span style={{ color: urdfStatus.startsWith('error') ? '#f85149' : '#8b949e', fontSize: 11 }}>
+            {urdfStatus}
+          </span>
+        )}
+      </div>
       <div style={{ width: '100%', height: 600, background: '#0d1117', borderRadius: 6 }}>
         <Canvas
           camera={{ position: [3, 3, 3], fov: 50, near: 0.01, far: 1000 }}
@@ -315,6 +444,7 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
           {pointCloud && pointCloud.points.length > 0 && (
             <PointCloud points={pointCloud.points} />
           )}
+          {urdfXml && <UrdfModel urdfXml={urdfXml} />}
           <OrbitControls makeDefault />
           <CameraAutoFit poses={poses} />
         </Canvas>

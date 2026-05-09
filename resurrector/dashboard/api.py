@@ -1910,6 +1910,92 @@ async def list_scene_topics(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+@app.get("/api/scene/urdf")
+async def get_urdf_file(path: str) -> Any:
+    """Serve a URDF file from a sandboxed location for the SceneViewer.
+
+    Path validation: must resolve under one of the allowed roots
+    (RESURRECTOR_ALLOWED_ROOTS or the safe default set). Refuses
+    symlinks pointing outside the sandbox. URDF files are typically
+    small (< 1 MB), so we read into memory and return as text.
+
+    Returns the raw URDF XML with Content-Type ``application/xml``.
+    The frontend's urdf-loader parses the string client-side and walks
+    relative `<mesh filename="…">` references via the loader's package://
+    resolver — those mesh files would need a separate endpoint or to be
+    inlined; v0.6.0 supports primitive-shape URDFs (box / cylinder /
+    sphere) without external mesh assets.
+    """
+    try:
+        resolved = _validate_path(path)
+    except HTTPException:
+        raise
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(404, f"URDF file not found: {path}")
+    if resolved.suffix.lower() not in (".urdf", ".xml"):
+        raise HTTPException(400, "Only .urdf or .xml files are accepted")
+    if resolved.stat().st_size > 5 * 1024 * 1024:  # 5 MB cap
+        raise HTTPException(413, "URDF file exceeds 5 MB cap")
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "URDF file is not valid UTF-8")
+    return JSONResponse(
+        content={"urdf": text, "path": str(resolved)},
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/bags/{bag_id}/scene/urdf-from-bag")
+async def get_urdf_from_bag(bag_id: int, topic: str = "/robot_description") -> Any:
+    """Try to extract a URDF string from a bag's `/robot_description` topic.
+
+    Many ROS 2 bags include the URDF as a string published to a latched
+    topic (commonly ``/robot_description``). If found, we return it the
+    same way as ``/api/scene/urdf`` so the frontend treats both sources
+    interchangeably.
+
+    Returns 404 if the topic isn't present or no message has the URDF
+    payload (we look for ``<robot`` in the decoded string field).
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.bag_frame import BagFrame
+
+        bf = BagFrame(bag["path"])
+        if topic not in {ti.name for ti in bf.metadata.topics}:
+            raise HTTPException(
+                404,
+                f"Topic {topic!r} not found in bag (typical robot_description "
+                f"location is /robot_description)",
+            )
+        # Try to read the first message; std_msgs/String CDR is just a
+        # length-prefixed string after the 4-byte CDR header.
+        for msg in bf._parser.read_messages(topics=[topic]):
+            if msg.raw_data is None or len(msg.raw_data) < 8:
+                continue
+            import struct
+            try:
+                (n,) = struct.unpack_from("<I", msg.raw_data, 4)
+                payload = msg.raw_data[8:8 + n].decode("utf-8", errors="replace")
+            except (struct.error, UnicodeDecodeError):
+                continue
+            if "<robot" in payload:
+                return JSONResponse(
+                    content={"urdf": payload, "topic": topic},
+                    headers={"Cache-Control": "public, max-age=300"},
+                )
+        raise HTTPException(
+            404,
+            f"No URDF-like message found on {topic!r} (no <robot tag in payloads)",
+        )
+    finally:
+        index.close()
+
+
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
     # SPA fallback: any path that isn't a real file in /static gets

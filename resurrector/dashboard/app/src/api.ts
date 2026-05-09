@@ -262,6 +262,15 @@ export const api = {
         max_points: opts?.maxPoints,
       },
     }),
+  // v0.6.0 — URDF loading
+  getUrdfByPath: (path: string) =>
+    request<{ urdf: string; path: string }>('GET', `/api/scene/urdf`, {
+      query: { path },
+    }),
+  getUrdfFromBag: (bagId: number, topic: string = '/robot_description') =>
+    request<{ urdf: string; topic: string }>(
+      'GET', `/api/bags/${bagId}/scene/urdf-from-bag`, { query: { topic } },
+    ),
   frameUrl: (bagId: number, topic: string, frameIndex: number, width?: number) => {
     const t = topic.startsWith('/') ? topic.slice(1) : topic
     const w = width ? `?width=${width}` : ''
