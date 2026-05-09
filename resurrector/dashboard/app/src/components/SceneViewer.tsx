@@ -19,6 +19,8 @@ import URDFLoader from 'urdf-loader'
 import {
   api,
   ApiError,
+  SceneMarker,
+  SceneMarkers,
   ScenePointCloud,
   SceneTfTree,
   SceneTopics,
@@ -140,6 +142,88 @@ function PointCloud({ points }: { points: [number, number, number][] }) {
   )
 }
 
+// Render one marker as the appropriate Three.js primitive. v0.6.0 covers
+// CUBE / SPHERE / CYLINDER / ARROW; LINE_STRIP / LINE_LIST / POINTS /
+// MESH_RESOURCE / TEXT_VIEW_FACING / TRIANGLE_LIST are decoded but
+// rendered as a wireframe placeholder so they're visible without being
+// pretty. Frontend-only — no API surface depends on this.
+function MarkerMesh({ marker }: { marker: SceneMarker }) {
+  const position = marker.position
+  const q = marker.orientation
+  const scale = marker.scale
+  const color = marker.color
+
+  const quaternion = useMemo(
+    () => new THREE.Quaternion(q[0], q[1], q[2], q[3]),
+    [q],
+  )
+
+  // CUBE / CUBE_LIST — single cube at marker pose
+  if (marker.type === 1 || marker.type === 6) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // SPHERE / SPHERE_LIST
+  if (marker.type === 2 || marker.type === 7) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <sphereGeometry args={[0.5, 16, 12]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // CYLINDER
+  if (marker.type === 3) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <cylinderGeometry args={[0.5, 0.5, 1, 16]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // ARROW — render as a tapered cylinder for now
+  if (marker.type === 0) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <coneGeometry args={[0.3, 1, 12]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // POINTS / LINE_STRIP / LINE_LIST / MESH_RESOURCE / TEXT_VIEW_FACING / TRIANGLE_LIST
+  // — render a wireframe cube placeholder so the user sees something
+  return (
+    <mesh
+      position={position}
+      quaternion={quaternion}
+      scale={scale}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+      <meshBasicMaterial color={new THREE.Color(color[0], color[1], color[2])} wireframe transparent opacity={color[3]} />
+    </mesh>
+  )
+}
+
 // URDF loader component — parses a URDF XML string with `urdf-loader`,
 // applies optional joint angles, and adds the resulting THREE.Group to
 // the scene. The loader walks `<link>` and `<visual>` children; built-in
@@ -224,6 +308,8 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
   const [loading, setLoading] = useState(false)
   const [urdfXml, setUrdfXml] = useState<string | null>(null)
   const [urdfStatus, setUrdfStatus] = useState<string | null>(null)
+  const [markers, setMarkers] = useState<SceneMarkers | null>(null)
+  const [selectedMarkerTopic, setSelectedMarkerTopic] = useState<string | null>(null)
   const inflightRef = useRef<number>(0)
 
   const timeNs = useMemo(
@@ -236,6 +322,9 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       setTopics(t)
       if (t.pointclouds.length > 0) {
         setSelectedPointCloudTopic(t.pointclouds[0])
+      }
+      if (t.markers.length > 0) {
+        setSelectedMarkerTopic(t.markers[0])
       }
     }).catch(e => {
       setError(e instanceof ApiError ? e.message : String(e))
@@ -268,6 +357,20 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       setError(e instanceof ApiError ? e.message : String(e))
     })
   }, [bagId, selectedPointCloudTopic, timeNs, maxPoints])
+
+  useEffect(() => {
+    if (!selectedMarkerTopic) {
+      setMarkers(null)
+      return
+    }
+    api.getSceneMarkers(bagId, selectedMarkerTopic, {
+      timeNs: Math.round(timeNs),
+    }).then(setMarkers).catch(() => {
+      // Markers can be sparse; failure to find one at a specific time
+      // is not an error worth surfacing — just skip rendering.
+      setMarkers(null)
+    })
+  }, [bagId, selectedMarkerTopic, timeNs])
 
   // Try once per bag to auto-load a URDF from /robot_description.
   // Soft-fail — most bags don't have one and that's fine.
@@ -361,6 +464,28 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
             </select>
           </label>
         )}
+        {topics.markers.length > 0 && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            Markers:
+            <select
+              value={selectedMarkerTopic ?? ''}
+              onChange={e =>
+                setSelectedMarkerTopic(e.target.value || null)
+              }
+              style={{ padding: 4, background: '#0d1117', color: '#e1e4e8', border: '1px solid #30363d' }}
+            >
+              <option value="">(none)</option>
+              {topics.markers.map(t => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+            {markers && markers.n_markers > 0 && (
+              <span style={{ color: '#8b949e', fontSize: 11 }}>
+                {markers.n_markers} marker{markers.n_markers === 1 ? '' : 's'}
+              </span>
+            )}
+          </label>
+        )}
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           Max points:
           <select
@@ -445,6 +570,9 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
             <PointCloud points={pointCloud.points} />
           )}
           {urdfXml && <UrdfModel urdfXml={urdfXml} />}
+          {markers && markers.markers.map((m, i) => (
+            <MarkerMesh key={`${m.ns}-${m.id}-${i}`} marker={m} />
+          ))}
           <OrbitControls makeDefault />
           <CameraAutoFit poses={poses} />
         </Canvas>

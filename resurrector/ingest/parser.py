@@ -273,6 +273,10 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
             result = _parse_tf_message(data)  # uses raw including CDR header
         elif msg_type in ("sensor_msgs/msg/PointCloud2",):
             result = _parse_pointcloud2(data)
+        elif msg_type in ("visualization_msgs/msg/Marker",):
+            result = _parse_marker(data)
+        elif msg_type in ("visualization_msgs/msg/MarkerArray",):
+            result = _parse_marker_array(data)
         else:
             logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
             result = {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
@@ -543,6 +547,22 @@ def _parse_tf_message(raw_data: bytes) -> dict[str, Any]:
         "transforms": [t.to_dict() for t in transforms],
         "_count": len(transforms),
     }
+
+
+def _parse_marker(raw_data: bytes) -> dict[str, Any]:
+    """Parse a single visualization_msgs/Marker into the message dict."""
+    from resurrector.core.scene import parse_marker
+    m = parse_marker(raw_data)
+    if m is None:
+        return {"_parse_error": True, "_msg_type": "visualization_msgs/msg/Marker"}
+    return {"marker": m.to_dict()}
+
+
+def _parse_marker_array(raw_data: bytes) -> dict[str, Any]:
+    """Parse a visualization_msgs/MarkerArray into the message dict."""
+    from resurrector.core.scene import parse_marker_array
+    markers = parse_marker_array(raw_data)
+    return {"markers": [m.to_dict() for m in markers], "_count": len(markers)}
 
 
 def _parse_pointcloud2(raw_data: bytes) -> dict[str, Any]:

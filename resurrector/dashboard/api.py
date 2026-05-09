@@ -1910,6 +1910,69 @@ async def list_scene_topics(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+@app.get("/api/bags/{bag_id}/scene/markers")
+async def get_scene_markers(
+    bag_id: int,
+    topic: str = Query(..., description="Marker or MarkerArray topic name"),
+    time_ns: int | None = None,
+) -> dict[str, Any]:
+    """Return the decoded markers from one Marker / MarkerArray message.
+
+    Picks the message nearest to ``time_ns`` (or the first message if
+    unspecified). Auto-detects whether the topic is `Marker` (returns
+    a single-element list) or `MarkerArray` (returns the full list).
+
+    Returns ``{frame_id, time_ns, n_markers, markers: [...]}``.
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.bag_frame import BagFrame
+        from resurrector.core.scene import parse_marker, parse_marker_array
+
+        bf = BagFrame(bag["path"])
+        topic_info = next(
+            (ti for ti in bf.metadata.topics if ti.name == topic), None,
+        )
+        if topic_info is None:
+            raise HTTPException(404, f"Topic {topic!r} not found")
+        is_array = "MarkerArray" in topic_info.message_type
+
+        chosen_msg = None
+        chosen_dt = None
+        for msg in bf._parser.read_messages(topics=[topic]):
+            if msg.raw_data is None:
+                continue
+            if time_ns is None:
+                chosen_msg = msg
+                break
+            dt = abs(msg.timestamp_ns - int(time_ns))
+            if chosen_dt is None or dt < chosen_dt:
+                chosen_msg = msg
+                chosen_dt = dt
+            if msg.timestamp_ns > int(time_ns) and chosen_dt is not None:
+                break
+        if chosen_msg is None or chosen_msg.raw_data is None:
+            raise HTTPException(404, f"No marker messages on {topic!r}")
+
+        if is_array:
+            markers = parse_marker_array(chosen_msg.raw_data)
+        else:
+            single = parse_marker(chosen_msg.raw_data)
+            markers = [single] if single is not None else []
+
+        return {
+            "topic": topic,
+            "time_ns": chosen_msg.timestamp_ns,
+            "n_markers": len(markers),
+            "markers": [m.to_dict() for m in markers],
+        }
+    finally:
+        index.close()
+
+
 @app.get("/api/scene/urdf")
 async def get_urdf_file(path: str) -> Any:
     """Serve a URDF file from a sandboxed location for the SceneViewer.
