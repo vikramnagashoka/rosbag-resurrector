@@ -15,6 +15,9 @@ from resurrector.core.dataset import DatasetManager, BagRef, SyncConfig, Dataset
 from resurrector.ingest.parser import (
     register_decoder, unregister_decoder, list_decoders,
 )
+from resurrector.core.concatenated import (
+    ConcatenatedBagFrame, ConcatenatedTopicView, concatenate_bags,
+)
 
 __all__ = [
     "BagFrame",
