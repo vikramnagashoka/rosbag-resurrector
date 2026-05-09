@@ -12,6 +12,9 @@ from resurrector.core.bag_frame import BagFrame
 from resurrector.ingest.scanner import scan
 from resurrector.core.query import search
 from resurrector.core.dataset import DatasetManager, BagRef, SyncConfig, DatasetMetadata
+from resurrector.ingest.parser import (
+    register_decoder, unregister_decoder, list_decoders,
+)
 
 __all__ = [
     "BagFrame",
