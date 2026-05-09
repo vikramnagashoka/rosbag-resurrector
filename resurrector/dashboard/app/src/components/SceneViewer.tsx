@@ -1,17 +1,19 @@
-// 3D scene viewer (v0.5.0)
+// 3D scene viewer (v0.6.0)
 //
-// Renders the bag's TF tree (frame axes) and an optional PointCloud2
-// snapshot at a chosen timestamp. Backed by Plotly 3D scatter+line
-// traces — chosen over a full Three.js wrapper because:
-//   - already a dashboard dependency (no bundle bloat)
-//   - free pan/zoom/rotate camera
-//   - 5-10k points renders smoothly enough for a "pose at time T" view
+// Three.js / react-three-fiber renderer for the bag's TF tree and an
+// optional PointCloud2 snapshot at a chosen timestamp. Replaces the
+// Plotly 3D viewer that shipped in v0.5.0. Wires to the same backend
+// scene endpoints — no API changes.
 //
-// URDF + animated playback are deferred to v0.6+. Camera image overlays
-// would require a separate canvas composited under the 3D — also v0.6.
+// Why Three.js: Plotly 3D worked for v0.5.0 but tops out around 10-25k
+// points and can't load mesh / URDF assets. Three.js + react-three-fiber
+// gives us actual scene-graph composition and is the foundation for
+// URDF (A.2), markers (A.3), and camera-overlay (A.4) sub-features.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import Plot from 'react-plotly.js'
+import { Canvas, useFrame } from '@react-three/fiber'
+import { OrbitControls, Grid, Html } from '@react-three/drei'
+import * as THREE from 'three'
 
 import {
   api,
@@ -20,6 +22,7 @@ import {
   SceneTfTree,
   SceneTopics,
 } from '../api'
+import { resolveFramePoses, posesCentroid } from './sceneMath'
 
 interface Props {
   bagId: number
@@ -29,129 +32,123 @@ interface Props {
 
 const AXIS_LENGTH = 0.3 // meters — drawn for each frame's local x/y/z axes
 
-function quatToMatrix(q: [number, number, number, number]): number[][] {
-  const [qx, qy, qz, qw] = q
-  const norm = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw) || 1
-  const x = qx / norm, y = qy / norm, z = qz / norm, w = qw / norm
-  return [
-    [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-  ]
+// One frame's coordinate triad (red X / green Y / blue Z) + label.
+function FrameTriad({
+  pose, name,
+}: { pose: THREE.Matrix4; name: string }) {
+  const origin = useMemo(() => {
+    const v = new THREE.Vector3()
+    v.setFromMatrixPosition(pose)
+    return v
+  }, [pose])
+
+  const axisEnds = useMemo(() => {
+    const xLocal = new THREE.Vector3(AXIS_LENGTH, 0, 0).applyMatrix4(pose)
+    const yLocal = new THREE.Vector3(0, AXIS_LENGTH, 0).applyMatrix4(pose)
+    const zLocal = new THREE.Vector3(0, 0, AXIS_LENGTH).applyMatrix4(pose)
+    return { x: xLocal, y: yLocal, z: zLocal }
+  }, [pose])
+
+  return (
+    <group>
+      <Line start={origin} end={axisEnds.x} color="#ff5454" />
+      <Line start={origin} end={axisEnds.y} color="#54ff54" />
+      <Line start={origin} end={axisEnds.z} color="#5454ff" />
+      <mesh position={origin}>
+        <sphereGeometry args={[0.015, 12, 12]} />
+        <meshBasicMaterial color="#e1e4e8" />
+      </mesh>
+      <Html position={[origin.x, origin.y + 0.05, origin.z]} center>
+        <div style={{
+          color: '#e1e4e8',
+          fontSize: 11,
+          fontFamily: 'monospace',
+          background: 'rgba(13,17,23,0.7)',
+          padding: '1px 4px',
+          borderRadius: 2,
+          whiteSpace: 'nowrap',
+          pointerEvents: 'none',
+        }}>{name}</div>
+      </Html>
+    </group>
+  )
 }
 
-function applyTransform(
-  M: number[][],
-  t: [number, number, number],
-  p: [number, number, number],
-): [number, number, number] {
-  return [
-    M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2] + t[0],
-    M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2] + t[1],
-    M[2][0] * p[0] + M[2][1] * p[1] + M[2][2] * p[2] + t[2],
-  ]
+// Drei doesn't expose a simple <Line> for 3D segments out of the box in
+// the 9.x line, so we render a thin BufferGeometry segment manually.
+function Line({
+  start, end, color,
+}: { start: THREE.Vector3; end: THREE.Vector3; color: string }) {
+  const ref = useRef<THREE.BufferGeometry>(null)
+  useEffect(() => {
+    if (!ref.current) return
+    const positions = new Float32Array([
+      start.x, start.y, start.z,
+      end.x, end.y, end.z,
+    ])
+    ref.current.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions, 3),
+    )
+    ref.current.computeBoundingSphere()
+  }, [start, end])
+
+  return (
+    <line>
+      <bufferGeometry ref={ref} />
+      <lineBasicMaterial color={color} linewidth={2} />
+    </line>
+  )
 }
 
-// Walk the TF graph and return each frame's origin + axis endpoints in
-// the implicit world frame. Returns null if the graph has no root.
-function resolveFramePoses(tree: SceneTfTree): Map<string, {
-  origin: [number, number, number]
-  xAxis: [number, number, number]
-  yAxis: [number, number, number]
-  zAxis: [number, number, number]
-  parent: string | null
-}> {
-  const out = new Map<string, {
-    origin: [number, number, number]
-    xAxis: [number, number, number]
-    yAxis: [number, number, number]
-    zAxis: [number, number, number]
-    parent: string | null
-  }>()
-  // Pick the first root; if there are no edges yet, return empty map.
-  const root = tree.roots[0] || tree.frames[0]
-  if (!root) return out
-  out.set(root, {
-    origin: [0, 0, 0],
-    xAxis: [AXIS_LENGTH, 0, 0],
-    yAxis: [0, AXIS_LENGTH, 0],
-    zAxis: [0, 0, AXIS_LENGTH],
-    parent: null,
-  })
-  // Build child→edge map for an iterative walk
-  const childToEdge = new Map(tree.edges.map(e => [e.child_frame, e]))
-  let progress = true
-  let safety = tree.frames.length + 4
-  while (progress && safety-- > 0) {
-    progress = false
-    for (const e of tree.edges) {
-      if (out.has(e.child_frame) || !out.has(e.parent_frame)) continue
-      const parentPose = out.get(e.parent_frame)!
-      const M = quatToMatrix(e.rotation)
-      const trans = e.translation
-      // Compute the child's origin and the three axis endpoints in parent
-      // coords, then in WORLD coords by recursive composition. Since we
-      // only stored the parent's origin in world coords, we need to walk
-      // up; instead, accumulate from the parent's basis.
-      const parentBasis = {
-        x: [
-          parentPose.xAxis[0] - parentPose.origin[0],
-          parentPose.xAxis[1] - parentPose.origin[1],
-          parentPose.xAxis[2] - parentPose.origin[2],
-        ] as [number, number, number],
-        y: [
-          parentPose.yAxis[0] - parentPose.origin[0],
-          parentPose.yAxis[1] - parentPose.origin[1],
-          parentPose.yAxis[2] - parentPose.origin[2],
-        ] as [number, number, number],
-        z: [
-          parentPose.zAxis[0] - parentPose.origin[0],
-          parentPose.zAxis[1] - parentPose.origin[1],
-          parentPose.zAxis[2] - parentPose.origin[2],
-        ] as [number, number, number],
-      }
-      // Normalize parent basis vectors (length AXIS_LENGTH) for clean rotation
-      const norm = (v: [number, number, number]) => {
-        const n = Math.hypot(v[0], v[1], v[2]) || 1
-        return [v[0] / n, v[1] / n, v[2] / n] as [number, number, number]
-      }
-      const px = norm(parentBasis.x)
-      const py = norm(parentBasis.y)
-      const pz = norm(parentBasis.z)
-      // Construct parent→world rotation matrix from its basis vectors
-      const parentToWorld = [
-        [px[0], py[0], pz[0]],
-        [px[1], py[1], pz[1]],
-        [px[2], py[2], pz[2]],
-      ]
-      // Translation in parent's frame, expressed in world
-      const transWorld = applyTransform(parentToWorld, [0, 0, 0], trans)
-      const childOrigin: [number, number, number] = [
-        parentPose.origin[0] + transWorld[0],
-        parentPose.origin[1] + transWorld[1],
-        parentPose.origin[2] + transWorld[2],
-      ]
-      // Compose rotations: childAxisInParent = M @ unit; childAxisInWorld = parentToWorld @ that
-      const childInParent = (axis: [number, number, number]) =>
-        applyTransform(M, [0, 0, 0], axis)
-      const childInWorld = (axis: [number, number, number]) =>
-        applyTransform(parentToWorld, [0, 0, 0], axis)
-      const cx = childInWorld(childInParent([AXIS_LENGTH, 0, 0]))
-      const cy = childInWorld(childInParent([0, AXIS_LENGTH, 0]))
-      const cz = childInWorld(childInParent([0, 0, AXIS_LENGTH]))
-      out.set(e.child_frame, {
-        origin: childOrigin,
-        xAxis: [childOrigin[0] + cx[0], childOrigin[1] + cx[1], childOrigin[2] + cx[2]],
-        yAxis: [childOrigin[0] + cy[0], childOrigin[1] + cy[1], childOrigin[2] + cy[2]],
-        zAxis: [childOrigin[0] + cz[0], childOrigin[1] + cz[1], childOrigin[2] + cz[2]],
-        parent: e.parent_frame,
-      })
-      progress = true
+// Point cloud rendered as THREE.Points with z-color gradient.
+function PointCloud({ points }: { points: [number, number, number][] }) {
+  const geometry = useMemo(() => {
+    const geom = new THREE.BufferGeometry()
+    const positions = new Float32Array(points.length * 3)
+    const colors = new Float32Array(points.length * 3)
+
+    let zMin = Infinity, zMax = -Infinity
+    for (const [, , z] of points) {
+      if (z < zMin) zMin = z
+      if (z > zMax) zMax = z
     }
-  }
-  // Suppress unused-var warning for childToEdge — kept for future per-edge tooltips
-  void childToEdge
-  return out
+    const zRange = zMax - zMin || 1
+
+    for (let i = 0; i < points.length; i++) {
+      const [x, y, z] = points[i]
+      positions[i * 3] = x
+      positions[i * 3 + 1] = y
+      positions[i * 3 + 2] = z
+      // Viridis-ish: blue (low Z) → cyan → green → yellow (high Z)
+      const t = (z - zMin) / zRange
+      colors[i * 3] = Math.max(0, Math.min(1, t * 1.2))            // R rises with t
+      colors[i * 3 + 1] = Math.max(0, Math.min(1, 0.5 + t * 0.5))  // G high
+      colors[i * 3 + 2] = Math.max(0, Math.min(1, 1.0 - t))         // B falls with t
+    }
+
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    return geom
+  }, [points])
+
+  return (
+    <points geometry={geometry}>
+      <pointsMaterial size={0.025} vertexColors sizeAttenuation />
+    </points>
+  )
+}
+
+// Tiny widget that auto-fits the OrbitControls target to the scene's
+// bounding sphere on every TF tree change so the user doesn't have to
+// hunt for the scene with the mouse.
+function CameraAutoFit({ poses }: { poses: Map<string, THREE.Matrix4> }) {
+  useFrame((state) => {
+    const c = posesCentroid(poses)
+    if (!c) return
+    state.camera.lookAt(c.x, c.y, c.z)
+  })
+  return null
 }
 
 export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props) {
@@ -160,7 +157,7 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
   const [pointCloud, setPointCloud] = useState<ScenePointCloud | null>(null)
   const [selectedPointCloudTopic, setSelectedPointCloudTopic] = useState<string | null>(null)
   const [timeOffsetSec, setTimeOffsetSec] = useState<number>(bagDurationSec)
-  const [maxPoints, setMaxPoints] = useState<number>(5000)
+  const [maxPoints, setMaxPoints] = useState<number>(10000)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const inflightRef = useRef<number>(0)
@@ -170,7 +167,6 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     [bagStartNs, timeOffsetSec],
   )
 
-  // Fetch the topic list once
   useEffect(() => {
     api.listSceneTopics(bagId).then(t => {
       setTopics(t)
@@ -182,7 +178,6 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     })
   }, [bagId])
 
-  // Fetch the TF tree at the chosen timestamp
   useEffect(() => {
     setLoading(true)
     const reqId = ++inflightRef.current
@@ -197,7 +192,6 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     })
   }, [bagId, timeNs])
 
-  // Fetch the point cloud snapshot
   useEffect(() => {
     if (!selectedPointCloudTopic) {
       setPointCloud(null)
@@ -211,79 +205,7 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     })
   }, [bagId, selectedPointCloudTopic, timeNs, maxPoints])
 
-  // Build Plotly traces
-  const traces = useMemo(() => {
-    if (!tree) return []
-    const poses = resolveFramePoses(tree)
-    const out: any[] = []
-    // Frame axes — one trace per axis color so the legend is readable
-    const xLines: number[][] = [[], [], []]
-    const yLines: number[][] = [[], [], []]
-    const zLines: number[][] = [[], [], []]
-    poses.forEach((pose) => {
-      // X axis (red): origin → xAxis
-      xLines[0].push(pose.origin[0], pose.xAxis[0], NaN)
-      xLines[1].push(pose.origin[1], pose.xAxis[1], NaN)
-      xLines[2].push(pose.origin[2], pose.xAxis[2], NaN)
-      yLines[0].push(pose.origin[0], pose.yAxis[0], NaN)
-      yLines[1].push(pose.origin[1], pose.yAxis[1], NaN)
-      yLines[2].push(pose.origin[2], pose.yAxis[2], NaN)
-      zLines[0].push(pose.origin[0], pose.zAxis[0], NaN)
-      zLines[1].push(pose.origin[1], pose.zAxis[1], NaN)
-      zLines[2].push(pose.origin[2], pose.zAxis[2], NaN)
-    })
-    out.push({
-      type: 'scatter3d', mode: 'lines', name: 'X axis',
-      x: xLines[0], y: xLines[1], z: xLines[2],
-      line: { color: '#ff5454', width: 4 },
-    })
-    out.push({
-      type: 'scatter3d', mode: 'lines', name: 'Y axis',
-      x: yLines[0], y: yLines[1], z: yLines[2],
-      line: { color: '#54ff54', width: 4 },
-    })
-    out.push({
-      type: 'scatter3d', mode: 'lines', name: 'Z axis',
-      x: zLines[0], y: zLines[1], z: zLines[2],
-      line: { color: '#5454ff', width: 4 },
-    })
-    // Frame origin labels
-    const labelX: number[] = []
-    const labelY: number[] = []
-    const labelZ: number[] = []
-    const labels: string[] = []
-    poses.forEach((pose, frame) => {
-      labelX.push(pose.origin[0])
-      labelY.push(pose.origin[1])
-      labelZ.push(pose.origin[2])
-      labels.push(frame)
-    })
-    out.push({
-      type: 'scatter3d', mode: 'markers+text', name: 'Frames',
-      x: labelX, y: labelY, z: labelZ,
-      text: labels,
-      textposition: 'top center',
-      marker: { size: 4, color: '#e1e4e8' },
-      textfont: { size: 10, color: '#e1e4e8' },
-    })
-    if (pointCloud && pointCloud.points.length > 0) {
-      const px = pointCloud.points.map(p => p[0])
-      const py = pointCloud.points.map(p => p[1])
-      const pz = pointCloud.points.map(p => p[2])
-      out.push({
-        type: 'scatter3d', mode: 'markers',
-        name: `${selectedPointCloudTopic} (${pointCloud.n_points})`,
-        x: px, y: py, z: pz,
-        marker: {
-          size: 1.5,
-          color: pz,
-          colorscale: 'Viridis',
-          opacity: 0.7,
-        },
-      })
-    }
-    return out
-  }, [tree, pointCloud, selectedPointCloudTopic])
+  const poses = useMemo(() => tree ? resolveFramePoses(tree) : new Map(), [tree])
 
   if (error) {
     return (
@@ -314,7 +236,7 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       <div
         style={{
           display: 'flex', alignItems: 'center', gap: 16,
-          fontSize: 12, color: '#e1e4e8',
+          fontSize: 12, color: '#e1e4e8', flexWrap: 'wrap',
         }}
       >
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -360,6 +282,8 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
             <option value={5000}>5k</option>
             <option value={10000}>10k</option>
             <option value={25000}>25k</option>
+            <option value={50000}>50k</option>
+            <option value={100000}>100k</option>
           </select>
         </label>
         {tree && (
@@ -369,41 +293,32 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
         )}
         {loading && <span style={{ color: '#8b949e' }}>(loading…)</span>}
       </div>
-      <Plot
-        data={traces}
-        layout={{
-          autosize: true,
-          margin: { l: 0, r: 0, t: 0, b: 0 },
-          paper_bgcolor: '#0d1117',
-          plot_bgcolor: '#0d1117',
-          scene: {
-            aspectmode: 'data',
-            bgcolor: '#0d1117',
-            xaxis: {
-              gridcolor: '#30363d',
-              zerolinecolor: '#30363d',
-              color: '#8b949e',
-              title: { text: 'X (m)' },
-            },
-            yaxis: {
-              gridcolor: '#30363d',
-              zerolinecolor: '#30363d',
-              color: '#8b949e',
-              title: { text: 'Y (m)' },
-            },
-            zaxis: {
-              gridcolor: '#30363d',
-              zerolinecolor: '#30363d',
-              color: '#8b949e',
-              title: { text: 'Z (m)' },
-            },
-          },
-          legend: { font: { color: '#e1e4e8' }, bgcolor: 'rgba(0,0,0,0)' },
-          height: 600,
-        }}
-        config={{ displayModeBar: true, responsive: true }}
-        style={{ width: '100%' }}
-      />
+      <div style={{ width: '100%', height: 600, background: '#0d1117', borderRadius: 6 }}>
+        <Canvas
+          camera={{ position: [3, 3, 3], fov: 50, near: 0.01, far: 1000 }}
+          gl={{ antialias: true }}
+        >
+          <color attach="background" args={['#0d1117']} />
+          <ambientLight intensity={0.5} />
+          <directionalLight position={[5, 10, 5]} intensity={0.8} />
+          <Grid
+            args={[20, 20]}
+            cellColor="#30363d"
+            sectionColor="#484f58"
+            sectionSize={5}
+            fadeDistance={30}
+            infiniteGrid
+          />
+          {tree && Array.from(poses.entries()).map(([frame, pose]) => (
+            <FrameTriad key={frame} pose={pose} name={frame} />
+          ))}
+          {pointCloud && pointCloud.points.length > 0 && (
+            <PointCloud points={pointCloud.points} />
+          )}
+          <OrbitControls makeDefault />
+          <CameraAutoFit poses={poses} />
+        </Canvas>
+      </div>
     </div>
   )
 }
