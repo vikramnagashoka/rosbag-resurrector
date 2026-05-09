@@ -69,10 +69,12 @@ class BridgeServer:
                 message_callback=self._on_message,
             )
 
-        # Optional record-while-streaming. Construct the recorder with the
-        # source bag's topic info so schemas are populated. For live mode
-        # the live_subscriber needs to surface a similar topic_info list
-        # (live wiring is a v0.6+ follow-up).
+        # Optional record-while-streaming. Two paths:
+        # - playback mode: source bag's topic info pre-populates the
+        #   recorder so schemas are known up front
+        # - live mode: recorder starts with empty topic_info; the
+        #   LiveSubscriber's on_topic_discovered callback feeds
+        #   register_topic_info as messages arrive
         if record_path is not None and self._playback is not None:
             from resurrector.ingest.parser import MCAPParser
             parser = MCAPParser(bag_path)
@@ -81,13 +83,13 @@ class BridgeServer:
                 output_path=record_path,
                 topic_info=metadata.topics,
             )
-            logger.info("Bridge recording to %s", record_path)
-        elif record_path is not None:
-            logger.warning(
-                "record_path set but bridge mode is %r without a playback "
-                "source — recording is wired only for playback in v0.5.0. "
-                "Live-mode recording lands in v0.6+.", mode,
+            logger.info("Bridge recording to %s (playback mode)", record_path)
+        elif record_path is not None and mode == "live":
+            self._recorder = BridgeRecorder(
+                output_path=record_path,
+                topic_info=[],  # populated lazily as topics arrive
             )
+            logger.info("Bridge recording to %s (live mode)", record_path)
 
     def _on_message(self, msg: Message) -> None:
         """Called by PlaybackEngine or LiveSubscriber for each message.

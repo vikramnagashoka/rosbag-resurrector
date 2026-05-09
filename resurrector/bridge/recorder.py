@@ -94,6 +94,22 @@ class BridgeRecorder:
     def messages_written(self) -> int:
         return self._messages_written
 
+    def register_topic_info(self, info: TopicInfo) -> None:
+        """Add or update a topic's metadata after construction.
+
+        Used by live mode where topics are discovered as messages arrive
+        — the LiveSubscriber introspects the rclpy message class and
+        calls this so the recorder can register the topic's MCAP schema
+        + channel on the next ``record()`` call. Idempotent: re-registering
+        the same topic with new info just updates the cached entry.
+
+        If the topic was previously marked as un-recordable (e.g. seen
+        without a schema), this clears that mark so it gets re-tried.
+        """
+        self._topic_info_by_name[info.name] = info
+        self._schema_id_by_topic.pop(info.name, None)
+        self._channel_id_by_topic.pop(info.name, None)
+
     def _open(self) -> None:
         """Lazy-init the file + Writer on first record() call."""
         from mcap.writer import Writer

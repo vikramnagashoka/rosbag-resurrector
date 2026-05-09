@@ -36,7 +36,19 @@ class LiveSubscriber:
         self,
         topics: list[str] | None = None,
         message_callback: Callable | None = None,
+        on_topic_discovered: Callable | None = None,
     ):
+        """Construct a live subscriber.
+
+        Args:
+            topics: Topics to subscribe to on start().
+            message_callback: Called for each incoming message
+                (Message dict — raw_data is populated as of v0.6).
+            on_topic_discovered: Called once per unique topic with a
+                TopicInfo describing the topic's schema. Used by the
+                bridge to feed BridgeRecorder.register_topic_info so
+                live-mode recording works.
+        """
         if not is_rclpy_available():
             raise ImportError(
                 "Live mode requires rclpy (ROS2 Python client). "
@@ -47,8 +59,10 @@ class LiveSubscriber:
         from rclpy.node import Node
 
         self._callback = message_callback
+        self._on_topic_discovered = on_topic_discovered
         self._requested_topics = topics or []
         self._subscriptions: dict[str, Any] = {}
+        self._discovered_topics: set[str] = set()
         self._spin_thread: threading.Thread | None = None
         self._running = False
 
@@ -150,10 +164,37 @@ class LiveSubscriber:
             rclpy.spin_once(self._node, timeout_sec=0.1)
 
     def _on_typed_message(self, topic: str, msg_type: str, msg: Any) -> None:
-        """Handle a typed ROS2 message — convert to Resurrector Message format."""
+        """Handle a typed ROS2 message — convert to Resurrector Message format.
+
+        v0.6.0: re-serializes the message to CDR via
+        ``rclpy.serialization.serialize_message`` so ``raw_data`` is
+        populated, allowing the bridge's recorder to write live-relayed
+        messages to MCAP. Also lazily discovers the topic's schema and
+        notifies any registered topic-info-discovery callback (used by
+        the bridge to feed BridgeRecorder.register_topic_info).
+        """
         from resurrector.ingest.parser import Message
 
-        # Convert ROS2 message to dict
+        # Re-serialize to CDR — required so the recorder has bytes to write
+        raw_data = None
+        try:
+            from rclpy.serialization import serialize_message
+            raw_data = serialize_message(msg)
+        except Exception as e:
+            logger.debug("serialize_message failed for %s: %s", topic, e)
+
+        # Lazy schema discovery — first message on each topic triggers the
+        # topic_info callback so downstream consumers (the recorder) can
+        # register the channel.
+        if topic not in self._discovered_topics:
+            self._discovered_topics.add(topic)
+            try:
+                topic_info = self._build_topic_info(topic, msg_type, msg)
+                if topic_info is not None and self._on_topic_discovered:
+                    self._on_topic_discovered(topic_info)
+            except Exception as e:
+                logger.debug("topic-info introspection failed for %s: %s", topic, e)
+
         data = self._msg_to_dict(msg)
         timestamp_ns = self._get_timestamp_ns(msg)
 
@@ -161,12 +202,44 @@ class LiveSubscriber:
             topic=topic,
             timestamp_ns=timestamp_ns,
             data=data,
-            raw_data=None,
+            raw_data=raw_data,
             sequence=0,
         )
 
         if self._callback:
             self._callback(resurrector_msg)
+
+    def _build_topic_info(self, topic: str, msg_type: str, sample_msg: Any) -> Any:
+        """Construct a TopicInfo for newly-discovered topic.
+
+        For schema_data we try to grab the message class's docstring
+        (rclpy auto-generates one in approximately .msg syntax). If that's
+        empty we fall back to a minimal placeholder — the recorded MCAP
+        is still readable; downstream type introspection is just thinner.
+        """
+        from resurrector.ingest.parser import TopicInfo
+
+        msg_class = type(sample_msg)
+        # Prefer the IDL string from get_fields_and_field_types for a
+        # machine-parseable schema; fall back to the class docstring.
+        schema_data = ""
+        try:
+            fields = sample_msg.get_fields_and_field_types()
+            schema_data = "\n".join(f"{t} {n}" for n, t in fields.items())
+        except AttributeError:
+            schema_data = (msg_class.__doc__ or "").strip()
+
+        if not schema_data:
+            schema_data = f"# Placeholder schema for {msg_type}"
+
+        return TopicInfo(
+            name=topic,
+            message_type=msg_type,
+            message_count=0,  # unknown for live; recorder doesn't use this field
+            frequency_hz=None,
+            schema_encoding="ros2msg",
+            schema_data=schema_data,
+        )
 
     def _msg_to_dict(self, msg: Any) -> dict[str, Any]:
         """Convert a ROS2 message to a nested dict."""
