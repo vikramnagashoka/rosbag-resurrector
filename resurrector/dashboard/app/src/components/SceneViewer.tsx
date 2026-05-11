@@ -16,6 +16,52 @@ import { OrbitControls, Grid, Html } from '@react-three/drei'
 import * as THREE from 'three'
 import URDFLoader from 'urdf-loader'
 
+/**
+ * Synchronous Three.js WebGL availability check. Runs once on first import.
+ *
+ * @react-three/fiber's <Canvas> throws "Error creating WebGL context"
+ * asynchronously when Three.js's WebGLRenderer can't initialize, and
+ * the error bypasses React error boundaries (fiber v8 internal portal
+ * quirk). The fix is to detect availability up-front and skip mounting
+ * the Canvas entirely when it's not supported — the user sees a
+ * friendly fallback instead of a blank page.
+ *
+ * We probe exactly what fiber will do later: instantiate a
+ * THREE.WebGLRenderer. A naive `getContext('webgl')` check is not
+ * sufficient — some headless / software-rasterizer environments
+ * (e.g. SwiftShader) return a non-null GL context but fail at the
+ * actual renderer setup, blanking the page anyway.
+ *
+ * Returns true if Three.js can actually create a renderer, false otherwise.
+ */
+function detectWebGL(): boolean {
+  if (typeof document === 'undefined') return false  // SSR safety
+  try {
+    const c = document.createElement('canvas')
+    c.width = 1; c.height = 1
+    // Fast-path: bail if even a raw context fails to create. Some
+    // privacy extensions, GPU driver issues, and locked-down corporate
+    // browsers refuse all WebGL contexts.
+    const gl = c.getContext('webgl2') || c.getContext('webgl')
+    if (!gl) return false
+    // Deeper check: can Three.js actually instantiate AND render with a
+    // renderer? Construction alone passes in some software-rasterizer
+    // headless environments (SwiftShader / ANGLE fallback) where actual
+    // rendering then fails. Force a 1x1 clear() to exercise the GL
+    // pipeline so we catch this failure mode synchronously instead of
+    // having fiber blank the page later.
+    const renderer = new THREE.WebGLRenderer({ canvas: c, antialias: false })
+    renderer.setSize(1, 1, false)
+    renderer.clear()
+    renderer.dispose()
+    return true
+  } catch {
+    return false
+  }
+}
+
+const WEBGL_AVAILABLE = detectWebGL()
+
 import {
   api,
   ApiError,
@@ -424,6 +470,41 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
 
   const poses = useMemo(() => tree ? resolveFramePoses(tree) : new Map(), [tree])
 
+  // WebGL availability gate — must run BEFORE any <Canvas> mounts.
+  // @react-three/fiber v8's WebGL error bypasses React error boundaries
+  // (internal portal quirk), so synchronous detection up-front is the
+  // only reliable way to avoid blanking the parent React tree.
+  if (!WEBGL_AVAILABLE) {
+    return (
+      <div
+        style={{
+          padding: 'var(--space-5)',
+          background: 'var(--color-bg-card)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-lg)',
+          color: 'var(--color-text)',
+          textAlign: 'center',
+        }}
+        role="alert"
+      >
+        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
+          3D scene viewer unavailable
+        </div>
+        <div
+          style={{
+            color: 'var(--color-text-secondary)',
+            fontSize: 'var(--text-base)',
+            maxWidth: 560,
+            margin: '0 auto',
+          }}
+        >
+          WebGL is not available in this browser. The 3D scene viewer needs it
+          for rendering. Try enabling hardware acceleration, updating your GPU
+          driver, or using a different browser. The other Explorer tabs still work.
+        </div>
+      </div>
+    )
+  }
   if (error) {
     return (
       <div style={{ color: '#f85149', padding: 24, fontFamily: 'monospace' }}>

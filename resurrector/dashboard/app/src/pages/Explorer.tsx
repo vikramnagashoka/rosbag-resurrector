@@ -7,6 +7,7 @@ import ExportDialog from '../components/ExportDialog'
 import SyncView from '../components/SyncView'
 import ImageViewer from '../components/ImageViewer'
 import SceneViewer from '../components/SceneViewer'
+import ErrorBoundary from '../components/ErrorBoundary'
 import BookmarksPanel from '../components/BookmarksPanel'
 import DensityRibbon from '../components/DensityRibbon'
 import TransformEditor from '../components/TransformEditor'
@@ -509,11 +510,69 @@ export default function Explorer() {
               )}
 
               {activeTab === 'scene' && (
-                <SceneViewer
-                  bagId={bagId}
-                  bagDurationSec={bag.duration_sec}
-                  bagStartNs={bag.start_time_ns ?? 0}
-                />
+                // Three.js can throw "Error creating WebGL context" on
+                // browsers/systems without WebGL. Without this boundary
+                // the exception unmounts the entire Explorer tree (caught
+                // by /qa in v0.6 — ISSUE-001). Boundary contains the
+                // failure to just the Scene tab and lets the user
+                // navigate to other tabs without reloading.
+                <ErrorBoundary
+                  fallback={(error, reset) => {
+                    const isWebGL = /WebGL/i.test(error.message)
+                    return (
+                      <div
+                        style={{
+                          padding: 'var(--space-5)',
+                          background: 'var(--color-bg-card)',
+                          border: '1px solid var(--color-border)',
+                          borderRadius: 'var(--radius-lg)',
+                          color: 'var(--color-text)',
+                          textAlign: 'center',
+                        }}
+                        role="alert"
+                      >
+                        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
+                          {isWebGL
+                            ? '3D scene viewer unavailable'
+                            : 'Scene viewer error'}
+                        </div>
+                        <div
+                          style={{
+                            color: 'var(--color-text-secondary)',
+                            fontSize: 'var(--text-base)',
+                            marginBottom: 'var(--space-4)',
+                            maxWidth: 560,
+                            margin: '0 auto var(--space-4)',
+                          }}
+                        >
+                          {isWebGL
+                            ? 'WebGL is not available in this browser. The 3D scene viewer needs it for rendering. Try enabling hardware acceleration, updating your GPU driver, or using a different browser. The other Explorer tabs still work.'
+                            : error.message}
+                        </div>
+                        <button
+                          onClick={reset}
+                          style={{
+                            padding: 'var(--space-2) var(--space-4)',
+                            background: 'var(--color-bg-elevated)',
+                            color: 'var(--color-text)',
+                            border: '1px solid var(--color-border)',
+                            borderRadius: 'var(--radius-md)',
+                            cursor: 'pointer',
+                            fontSize: 'var(--text-base)',
+                          }}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    )
+                  }}
+                >
+                  <SceneViewer
+                    bagId={bagId}
+                    bagDurationSec={bag.duration_sec}
+                    bagStartNs={bag.start_time_ns ?? 0}
+                  />
+                </ErrorBoundary>
               )}
             </>
           )}
