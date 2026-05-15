@@ -167,6 +167,33 @@ export interface ScenePointCloud {
   warning?: string
 }
 
+// v0.6.0 — Marker types
+export interface SceneMarker {
+  frame_id: string
+  timestamp_ns: number
+  ns: string
+  id: number
+  type: number
+  type_name: string
+  action: number
+  action_name: string
+  position: [number, number, number]
+  orientation: [number, number, number, number]
+  scale: [number, number, number]
+  color: [number, number, number, number]
+  lifetime_sec: number
+  frame_locked: boolean
+  text: string
+  mesh_resource: string
+}
+
+export interface SceneMarkers {
+  topic: string
+  time_ns: number
+  n_markers: number
+  markers: SceneMarker[]
+}
+
 export interface ExportPreset {
   name: string
   format: string
@@ -262,6 +289,28 @@ export const api = {
         max_points: opts?.maxPoints,
       },
     }),
+  // v0.6.0 — URDF loading
+  getUrdfByPath: (path: string) =>
+    request<{ urdf: string; path: string }>('GET', `/api/scene/urdf`, {
+      query: { path },
+    }),
+  getUrdfFromBag: (bagId: number, topic: string = '/robot_description') =>
+    request<{ urdf: string; topic: string }>(
+      'GET', `/api/bags/${bagId}/scene/urdf-from-bag`, { query: { topic } },
+    ),
+  // v0.6.0 — Markers
+  getSceneMarkers: (
+    bagId: number, topic: string, opts?: { timeNs?: number },
+  ) =>
+    request<SceneMarkers>('GET', `/api/bags/${bagId}/scene/markers`, {
+      query: { topic, time_ns: opts?.timeNs },
+    }),
+  // v0.6.0 — Camera frame at time
+  getCameraFrameAt: (bagId: number, topic: string, timeNs: number) =>
+    request<{ frame_index: number; frame_time_ns: number; dt_ns: number }>(
+      'GET', `/api/bags/${bagId}/scene/camera-frame-at`,
+      { query: { topic, time_ns: timeNs } },
+    ),
   frameUrl: (bagId: number, topic: string, frameIndex: number, width?: number) => {
     const t = topic.startsWith('/') ? topic.slice(1) : topic
     const w = width ? `?width=${width}` : ''

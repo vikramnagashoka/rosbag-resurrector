@@ -1,25 +1,77 @@
-// 3D scene viewer (v0.5.0)
+// 3D scene viewer (v0.6.0)
 //
-// Renders the bag's TF tree (frame axes) and an optional PointCloud2
-// snapshot at a chosen timestamp. Backed by Plotly 3D scatter+line
-// traces — chosen over a full Three.js wrapper because:
-//   - already a dashboard dependency (no bundle bloat)
-//   - free pan/zoom/rotate camera
-//   - 5-10k points renders smoothly enough for a "pose at time T" view
+// Three.js / react-three-fiber renderer for the bag's TF tree and an
+// optional PointCloud2 snapshot at a chosen timestamp. Replaces the
+// Plotly 3D viewer that shipped in v0.5.0. Wires to the same backend
+// scene endpoints — no API changes.
 //
-// URDF + animated playback are deferred to v0.6+. Camera image overlays
-// would require a separate canvas composited under the 3D — also v0.6.
+// Why Three.js: Plotly 3D worked for v0.5.0 but tops out around 10-25k
+// points and can't load mesh / URDF assets. Three.js + react-three-fiber
+// gives us actual scene-graph composition and is the foundation for
+// URDF (A.2), markers (A.3), and camera-overlay (A.4) sub-features.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import Plot from 'react-plotly.js'
+import { Canvas, useFrame } from '@react-three/fiber'
+import { OrbitControls, Grid, Html } from '@react-three/drei'
+import * as THREE from 'three'
+import URDFLoader from 'urdf-loader'
+
+/**
+ * Synchronous Three.js WebGL availability check. Runs once on first import.
+ *
+ * @react-three/fiber's <Canvas> throws "Error creating WebGL context"
+ * asynchronously when Three.js's WebGLRenderer can't initialize, and
+ * the error bypasses React error boundaries (fiber v8 internal portal
+ * quirk). The fix is to detect availability up-front and skip mounting
+ * the Canvas entirely when it's not supported — the user sees a
+ * friendly fallback instead of a blank page.
+ *
+ * We probe exactly what fiber will do later: instantiate a
+ * THREE.WebGLRenderer. A naive `getContext('webgl')` check is not
+ * sufficient — some headless / software-rasterizer environments
+ * (e.g. SwiftShader) return a non-null GL context but fail at the
+ * actual renderer setup, blanking the page anyway.
+ *
+ * Returns true if Three.js can actually create a renderer, false otherwise.
+ */
+function detectWebGL(): boolean {
+  if (typeof document === 'undefined') return false  // SSR safety
+  try {
+    const c = document.createElement('canvas')
+    c.width = 1; c.height = 1
+    // Fast-path: bail if even a raw context fails to create. Some
+    // privacy extensions, GPU driver issues, and locked-down corporate
+    // browsers refuse all WebGL contexts.
+    const gl = c.getContext('webgl2') || c.getContext('webgl')
+    if (!gl) return false
+    // Deeper check: can Three.js actually instantiate AND render with a
+    // renderer? Construction alone passes in some software-rasterizer
+    // headless environments (SwiftShader / ANGLE fallback) where actual
+    // rendering then fails. Force a 1x1 clear() to exercise the GL
+    // pipeline so we catch this failure mode synchronously instead of
+    // having fiber blank the page later.
+    const renderer = new THREE.WebGLRenderer({ canvas: c, antialias: false })
+    renderer.setSize(1, 1, false)
+    renderer.clear()
+    renderer.dispose()
+    return true
+  } catch {
+    return false
+  }
+}
+
+const WEBGL_AVAILABLE = detectWebGL()
 
 import {
   api,
   ApiError,
+  SceneMarker,
+  SceneMarkers,
   ScenePointCloud,
   SceneTfTree,
   SceneTopics,
 } from '../api'
+import { resolveFramePoses, posesCentroid } from './sceneMath'
 
 interface Props {
   bagId: number
@@ -29,129 +81,266 @@ interface Props {
 
 const AXIS_LENGTH = 0.3 // meters — drawn for each frame's local x/y/z axes
 
-function quatToMatrix(q: [number, number, number, number]): number[][] {
-  const [qx, qy, qz, qw] = q
-  const norm = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw) || 1
-  const x = qx / norm, y = qy / norm, z = qz / norm, w = qw / norm
-  return [
-    [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-  ]
+// One frame's coordinate triad (red X / green Y / blue Z) + label.
+function FrameTriad({
+  pose, name,
+}: { pose: THREE.Matrix4; name: string }) {
+  const origin = useMemo(() => {
+    const v = new THREE.Vector3()
+    v.setFromMatrixPosition(pose)
+    return v
+  }, [pose])
+
+  const axisEnds = useMemo(() => {
+    const xLocal = new THREE.Vector3(AXIS_LENGTH, 0, 0).applyMatrix4(pose)
+    const yLocal = new THREE.Vector3(0, AXIS_LENGTH, 0).applyMatrix4(pose)
+    const zLocal = new THREE.Vector3(0, 0, AXIS_LENGTH).applyMatrix4(pose)
+    return { x: xLocal, y: yLocal, z: zLocal }
+  }, [pose])
+
+  return (
+    <group>
+      <Line start={origin} end={axisEnds.x} color="#ff5454" />
+      <Line start={origin} end={axisEnds.y} color="#54ff54" />
+      <Line start={origin} end={axisEnds.z} color="#5454ff" />
+      <mesh position={origin}>
+        <sphereGeometry args={[0.015, 12, 12]} />
+        <meshBasicMaterial color="#e1e4e8" />
+      </mesh>
+      <Html position={[origin.x, origin.y + 0.05, origin.z]} center>
+        <div style={{
+          color: '#e1e4e8',
+          fontSize: 11,
+          fontFamily: 'monospace',
+          background: 'rgba(13,17,23,0.7)',
+          padding: '1px 4px',
+          borderRadius: 2,
+          whiteSpace: 'nowrap',
+          pointerEvents: 'none',
+        }}>{name}</div>
+      </Html>
+    </group>
+  )
 }
 
-function applyTransform(
-  M: number[][],
-  t: [number, number, number],
-  p: [number, number, number],
-): [number, number, number] {
-  return [
-    M[0][0] * p[0] + M[0][1] * p[1] + M[0][2] * p[2] + t[0],
-    M[1][0] * p[0] + M[1][1] * p[1] + M[1][2] * p[2] + t[1],
-    M[2][0] * p[0] + M[2][1] * p[1] + M[2][2] * p[2] + t[2],
-  ]
+// Drei doesn't expose a simple <Line> for 3D segments out of the box in
+// the 9.x line, so we render a thin BufferGeometry segment manually.
+function Line({
+  start, end, color,
+}: { start: THREE.Vector3; end: THREE.Vector3; color: string }) {
+  const ref = useRef<THREE.BufferGeometry>(null)
+  useEffect(() => {
+    if (!ref.current) return
+    const positions = new Float32Array([
+      start.x, start.y, start.z,
+      end.x, end.y, end.z,
+    ])
+    ref.current.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions, 3),
+    )
+    ref.current.computeBoundingSphere()
+  }, [start, end])
+
+  return (
+    <line>
+      <bufferGeometry ref={ref} />
+      <lineBasicMaterial color={color} linewidth={2} />
+    </line>
+  )
 }
 
-// Walk the TF graph and return each frame's origin + axis endpoints in
-// the implicit world frame. Returns null if the graph has no root.
-function resolveFramePoses(tree: SceneTfTree): Map<string, {
-  origin: [number, number, number]
-  xAxis: [number, number, number]
-  yAxis: [number, number, number]
-  zAxis: [number, number, number]
-  parent: string | null
-}> {
-  const out = new Map<string, {
-    origin: [number, number, number]
-    xAxis: [number, number, number]
-    yAxis: [number, number, number]
-    zAxis: [number, number, number]
-    parent: string | null
-  }>()
-  // Pick the first root; if there are no edges yet, return empty map.
-  const root = tree.roots[0] || tree.frames[0]
-  if (!root) return out
-  out.set(root, {
-    origin: [0, 0, 0],
-    xAxis: [AXIS_LENGTH, 0, 0],
-    yAxis: [0, AXIS_LENGTH, 0],
-    zAxis: [0, 0, AXIS_LENGTH],
-    parent: null,
-  })
-  // Build child→edge map for an iterative walk
-  const childToEdge = new Map(tree.edges.map(e => [e.child_frame, e]))
-  let progress = true
-  let safety = tree.frames.length + 4
-  while (progress && safety-- > 0) {
-    progress = false
-    for (const e of tree.edges) {
-      if (out.has(e.child_frame) || !out.has(e.parent_frame)) continue
-      const parentPose = out.get(e.parent_frame)!
-      const M = quatToMatrix(e.rotation)
-      const trans = e.translation
-      // Compute the child's origin and the three axis endpoints in parent
-      // coords, then in WORLD coords by recursive composition. Since we
-      // only stored the parent's origin in world coords, we need to walk
-      // up; instead, accumulate from the parent's basis.
-      const parentBasis = {
-        x: [
-          parentPose.xAxis[0] - parentPose.origin[0],
-          parentPose.xAxis[1] - parentPose.origin[1],
-          parentPose.xAxis[2] - parentPose.origin[2],
-        ] as [number, number, number],
-        y: [
-          parentPose.yAxis[0] - parentPose.origin[0],
-          parentPose.yAxis[1] - parentPose.origin[1],
-          parentPose.yAxis[2] - parentPose.origin[2],
-        ] as [number, number, number],
-        z: [
-          parentPose.zAxis[0] - parentPose.origin[0],
-          parentPose.zAxis[1] - parentPose.origin[1],
-          parentPose.zAxis[2] - parentPose.origin[2],
-        ] as [number, number, number],
-      }
-      // Normalize parent basis vectors (length AXIS_LENGTH) for clean rotation
-      const norm = (v: [number, number, number]) => {
-        const n = Math.hypot(v[0], v[1], v[2]) || 1
-        return [v[0] / n, v[1] / n, v[2] / n] as [number, number, number]
-      }
-      const px = norm(parentBasis.x)
-      const py = norm(parentBasis.y)
-      const pz = norm(parentBasis.z)
-      // Construct parent→world rotation matrix from its basis vectors
-      const parentToWorld = [
-        [px[0], py[0], pz[0]],
-        [px[1], py[1], pz[1]],
-        [px[2], py[2], pz[2]],
-      ]
-      // Translation in parent's frame, expressed in world
-      const transWorld = applyTransform(parentToWorld, [0, 0, 0], trans)
-      const childOrigin: [number, number, number] = [
-        parentPose.origin[0] + transWorld[0],
-        parentPose.origin[1] + transWorld[1],
-        parentPose.origin[2] + transWorld[2],
-      ]
-      // Compose rotations: childAxisInParent = M @ unit; childAxisInWorld = parentToWorld @ that
-      const childInParent = (axis: [number, number, number]) =>
-        applyTransform(M, [0, 0, 0], axis)
-      const childInWorld = (axis: [number, number, number]) =>
-        applyTransform(parentToWorld, [0, 0, 0], axis)
-      const cx = childInWorld(childInParent([AXIS_LENGTH, 0, 0]))
-      const cy = childInWorld(childInParent([0, AXIS_LENGTH, 0]))
-      const cz = childInWorld(childInParent([0, 0, AXIS_LENGTH]))
-      out.set(e.child_frame, {
-        origin: childOrigin,
-        xAxis: [childOrigin[0] + cx[0], childOrigin[1] + cx[1], childOrigin[2] + cx[2]],
-        yAxis: [childOrigin[0] + cy[0], childOrigin[1] + cy[1], childOrigin[2] + cy[2]],
-        zAxis: [childOrigin[0] + cz[0], childOrigin[1] + cz[1], childOrigin[2] + cz[2]],
-        parent: e.parent_frame,
-      })
-      progress = true
+// Point cloud rendered as THREE.Points with z-color gradient.
+function PointCloud({ points }: { points: [number, number, number][] }) {
+  const geometry = useMemo(() => {
+    const geom = new THREE.BufferGeometry()
+    const positions = new Float32Array(points.length * 3)
+    const colors = new Float32Array(points.length * 3)
+
+    let zMin = Infinity, zMax = -Infinity
+    for (const [, , z] of points) {
+      if (z < zMin) zMin = z
+      if (z > zMax) zMax = z
     }
+    const zRange = zMax - zMin || 1
+
+    for (let i = 0; i < points.length; i++) {
+      const [x, y, z] = points[i]
+      positions[i * 3] = x
+      positions[i * 3 + 1] = y
+      positions[i * 3 + 2] = z
+      // Viridis-ish: blue (low Z) → cyan → green → yellow (high Z)
+      const t = (z - zMin) / zRange
+      colors[i * 3] = Math.max(0, Math.min(1, t * 1.2))            // R rises with t
+      colors[i * 3 + 1] = Math.max(0, Math.min(1, 0.5 + t * 0.5))  // G high
+      colors[i * 3 + 2] = Math.max(0, Math.min(1, 1.0 - t))         // B falls with t
+    }
+
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    return geom
+  }, [points])
+
+  return (
+    <points geometry={geometry}>
+      <pointsMaterial size={0.025} vertexColors sizeAttenuation />
+    </points>
+  )
+}
+
+// Render one marker as the appropriate Three.js primitive. v0.6.0 covers
+// CUBE / SPHERE / CYLINDER / ARROW; LINE_STRIP / LINE_LIST / POINTS /
+// MESH_RESOURCE / TEXT_VIEW_FACING / TRIANGLE_LIST are decoded but
+// rendered as a wireframe placeholder so they're visible without being
+// pretty. Frontend-only — no API surface depends on this.
+function MarkerMesh({ marker }: { marker: SceneMarker }) {
+  const position = marker.position
+  const q = marker.orientation
+  const scale = marker.scale
+  const color = marker.color
+
+  const quaternion = useMemo(
+    () => new THREE.Quaternion(q[0], q[1], q[2], q[3]),
+    [q],
+  )
+
+  // CUBE / CUBE_LIST — single cube at marker pose
+  if (marker.type === 1 || marker.type === 6) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
   }
-  // Suppress unused-var warning for childToEdge — kept for future per-edge tooltips
-  void childToEdge
-  return out
+  // SPHERE / SPHERE_LIST
+  if (marker.type === 2 || marker.type === 7) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <sphereGeometry args={[0.5, 16, 12]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // CYLINDER
+  if (marker.type === 3) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <cylinderGeometry args={[0.5, 0.5, 1, 16]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // ARROW — render as a tapered cylinder for now
+  if (marker.type === 0) {
+    return (
+      <mesh
+        position={position}
+        quaternion={quaternion}
+        scale={scale}
+      >
+        <coneGeometry args={[0.3, 1, 12]} />
+        <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} transparent opacity={color[3]} />
+      </mesh>
+    )
+  }
+  // POINTS / LINE_STRIP / LINE_LIST / MESH_RESOURCE / TEXT_VIEW_FACING / TRIANGLE_LIST
+  // — render a wireframe cube placeholder so the user sees something
+  return (
+    <mesh
+      position={position}
+      quaternion={quaternion}
+      scale={scale}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+      <meshBasicMaterial color={new THREE.Color(color[0], color[1], color[2])} wireframe transparent opacity={color[3]} />
+    </mesh>
+  )
+}
+
+// URDF loader component — parses a URDF XML string with `urdf-loader`,
+// applies optional joint angles, and adds the resulting THREE.Group to
+// the scene. The loader walks `<link>` and `<visual>` children; built-in
+// primitives (box / cylinder / sphere) render natively. Mesh-file
+// references (`<mesh filename="package://…">`) require a working
+// resolver — for v0.6.0 we punt on external meshes and only render
+// primitive-shape URDFs cleanly. Non-resolvable meshes simply don't
+// appear (no crash).
+function UrdfModel({
+  urdfXml, jointStates,
+}: {
+  urdfXml: string
+  jointStates?: Record<string, number>
+}) {
+  const groupRef = useRef<THREE.Group>(null)
+  const robotRef = useRef<any>(null)
+
+  useEffect(() => {
+    if (!groupRef.current || !urdfXml) return
+    const loader = new URDFLoader()
+    // Disable mesh loading for primitive-only URDFs; if the URDF
+    // references external meshes we silently skip them in v0.6.0.
+    loader.loadMeshCb = (_path, _manager, done) => {
+      // Returning an empty Object3D = "no mesh available, render nothing"
+      done(new THREE.Object3D())
+    }
+    try {
+      const robot = loader.parse(urdfXml)
+      robotRef.current = robot
+      // Clear any previously-loaded robot
+      while (groupRef.current.children.length) {
+        groupRef.current.remove(groupRef.current.children[0])
+      }
+      groupRef.current.add(robot)
+    } catch (e) {
+      // URDF parse errors are silent in the renderer — the parent
+      // SceneViewer surfaces them via the error state. We log here
+      // so console diagnostics aren't lost.
+      console.error('URDF parse failed:', e)
+    }
+  }, [urdfXml])
+
+  // Apply joint states whenever they change
+  useEffect(() => {
+    const robot = robotRef.current
+    if (!robot || !jointStates) return
+    for (const [name, value] of Object.entries(jointStates)) {
+      try {
+        if (robot.joints && robot.joints[name]) {
+          robot.joints[name].setJointValue(value)
+        }
+      } catch {
+        // setJointValue can throw if the value is outside joint limits;
+        // ignore — the next frame may have a valid value
+      }
+    }
+  }, [jointStates])
+
+  return <group ref={groupRef} />
+}
+
+// Tiny widget that auto-fits the OrbitControls target to the scene's
+// bounding sphere on every TF tree change so the user doesn't have to
+// hunt for the scene with the mouse.
+function CameraAutoFit({ poses }: { poses: Map<string, THREE.Matrix4> }) {
+  useFrame((state) => {
+    const c = posesCentroid(poses)
+    if (!c) return
+    state.camera.lookAt(c.x, c.y, c.z)
+  })
+  return null
 }
 
 export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props) {
@@ -160,9 +349,16 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
   const [pointCloud, setPointCloud] = useState<ScenePointCloud | null>(null)
   const [selectedPointCloudTopic, setSelectedPointCloudTopic] = useState<string | null>(null)
   const [timeOffsetSec, setTimeOffsetSec] = useState<number>(bagDurationSec)
-  const [maxPoints, setMaxPoints] = useState<number>(5000)
+  const [maxPoints, setMaxPoints] = useState<number>(10000)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [urdfXml, setUrdfXml] = useState<string | null>(null)
+  const [urdfStatus, setUrdfStatus] = useState<string | null>(null)
+  const [markers, setMarkers] = useState<SceneMarkers | null>(null)
+  const [selectedMarkerTopic, setSelectedMarkerTopic] = useState<string | null>(null)
+  const [selectedCameraTopic, setSelectedCameraTopic] = useState<string | null>(null)
+  const [cameraFrameUrl, setCameraFrameUrl] = useState<string | null>(null)
+  const [cameraFrameDt, setCameraFrameDt] = useState<number>(0)
   const inflightRef = useRef<number>(0)
 
   const timeNs = useMemo(
@@ -170,19 +366,23 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     [bagStartNs, timeOffsetSec],
   )
 
-  // Fetch the topic list once
   useEffect(() => {
     api.listSceneTopics(bagId).then(t => {
       setTopics(t)
       if (t.pointclouds.length > 0) {
         setSelectedPointCloudTopic(t.pointclouds[0])
       }
+      if (t.markers.length > 0) {
+        setSelectedMarkerTopic(t.markers[0])
+      }
+      if (t.images.length > 0) {
+        setSelectedCameraTopic(t.images[0])
+      }
     }).catch(e => {
       setError(e instanceof ApiError ? e.message : String(e))
     })
   }, [bagId])
 
-  // Fetch the TF tree at the chosen timestamp
   useEffect(() => {
     setLoading(true)
     const reqId = ++inflightRef.current
@@ -197,7 +397,6 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     })
   }, [bagId, timeNs])
 
-  // Fetch the point cloud snapshot
   useEffect(() => {
     if (!selectedPointCloudTopic) {
       setPointCloud(null)
@@ -211,80 +410,101 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
     })
   }, [bagId, selectedPointCloudTopic, timeNs, maxPoints])
 
-  // Build Plotly traces
-  const traces = useMemo(() => {
-    if (!tree) return []
-    const poses = resolveFramePoses(tree)
-    const out: any[] = []
-    // Frame axes — one trace per axis color so the legend is readable
-    const xLines: number[][] = [[], [], []]
-    const yLines: number[][] = [[], [], []]
-    const zLines: number[][] = [[], [], []]
-    poses.forEach((pose) => {
-      // X axis (red): origin → xAxis
-      xLines[0].push(pose.origin[0], pose.xAxis[0], NaN)
-      xLines[1].push(pose.origin[1], pose.xAxis[1], NaN)
-      xLines[2].push(pose.origin[2], pose.xAxis[2], NaN)
-      yLines[0].push(pose.origin[0], pose.yAxis[0], NaN)
-      yLines[1].push(pose.origin[1], pose.yAxis[1], NaN)
-      yLines[2].push(pose.origin[2], pose.yAxis[2], NaN)
-      zLines[0].push(pose.origin[0], pose.zAxis[0], NaN)
-      zLines[1].push(pose.origin[1], pose.zAxis[1], NaN)
-      zLines[2].push(pose.origin[2], pose.zAxis[2], NaN)
-    })
-    out.push({
-      type: 'scatter3d', mode: 'lines', name: 'X axis',
-      x: xLines[0], y: xLines[1], z: xLines[2],
-      line: { color: '#ff5454', width: 4 },
-    })
-    out.push({
-      type: 'scatter3d', mode: 'lines', name: 'Y axis',
-      x: yLines[0], y: yLines[1], z: yLines[2],
-      line: { color: '#54ff54', width: 4 },
-    })
-    out.push({
-      type: 'scatter3d', mode: 'lines', name: 'Z axis',
-      x: zLines[0], y: zLines[1], z: zLines[2],
-      line: { color: '#5454ff', width: 4 },
-    })
-    // Frame origin labels
-    const labelX: number[] = []
-    const labelY: number[] = []
-    const labelZ: number[] = []
-    const labels: string[] = []
-    poses.forEach((pose, frame) => {
-      labelX.push(pose.origin[0])
-      labelY.push(pose.origin[1])
-      labelZ.push(pose.origin[2])
-      labels.push(frame)
-    })
-    out.push({
-      type: 'scatter3d', mode: 'markers+text', name: 'Frames',
-      x: labelX, y: labelY, z: labelZ,
-      text: labels,
-      textposition: 'top center',
-      marker: { size: 4, color: '#e1e4e8' },
-      textfont: { size: 10, color: '#e1e4e8' },
-    })
-    if (pointCloud && pointCloud.points.length > 0) {
-      const px = pointCloud.points.map(p => p[0])
-      const py = pointCloud.points.map(p => p[1])
-      const pz = pointCloud.points.map(p => p[2])
-      out.push({
-        type: 'scatter3d', mode: 'markers',
-        name: `${selectedPointCloudTopic} (${pointCloud.n_points})`,
-        x: px, y: py, z: pz,
-        marker: {
-          size: 1.5,
-          color: pz,
-          colorscale: 'Viridis',
-          opacity: 0.7,
-        },
-      })
+  useEffect(() => {
+    if (!selectedMarkerTopic) {
+      setMarkers(null)
+      return
     }
-    return out
-  }, [tree, pointCloud, selectedPointCloudTopic])
+    api.getSceneMarkers(bagId, selectedMarkerTopic, {
+      timeNs: Math.round(timeNs),
+    }).then(setMarkers).catch(() => {
+      // Markers can be sparse; failure to find one at a specific time
+      // is not an error worth surfacing — just skip rendering.
+      setMarkers(null)
+    })
+  }, [bagId, selectedMarkerTopic, timeNs])
 
+  // Camera-overlay: pick the frame index nearest to the scrubbed time
+  // and build the JPEG URL (cached at the existing endpoint).
+  useEffect(() => {
+    if (!selectedCameraTopic) {
+      setCameraFrameUrl(null)
+      return
+    }
+    api.getCameraFrameAt(bagId, selectedCameraTopic, Math.round(timeNs))
+      .then(r => {
+        setCameraFrameUrl(api.frameUrl(bagId, selectedCameraTopic, r.frame_index, 320))
+        setCameraFrameDt(r.dt_ns)
+      })
+      .catch(() => {
+        // Frame indexing can take a moment for unindexed bags; soft-fail
+        setCameraFrameUrl(null)
+      })
+  }, [bagId, selectedCameraTopic, timeNs])
+
+  // Try once per bag to auto-load a URDF from /robot_description.
+  // Soft-fail — most bags don't have one and that's fine.
+  useEffect(() => {
+    setUrdfXml(null)
+    setUrdfStatus(null)
+    api.getUrdfFromBag(bagId).then(r => {
+      setUrdfXml(r.urdf)
+      setUrdfStatus(`auto-loaded from ${r.topic}`)
+    }).catch(() => {
+      // Silent — no /robot_description in this bag
+    })
+  }, [bagId])
+
+  // User-supplied URDF path (manual load)
+  const loadUrdfByPath = async (path: string) => {
+    setUrdfStatus('loading…')
+    try {
+      const r = await api.getUrdfByPath(path)
+      setUrdfXml(r.urdf)
+      setUrdfStatus(`loaded from ${r.path}`)
+    } catch (e) {
+      setUrdfStatus(`error: ${e instanceof ApiError ? e.message : String(e)}`)
+      setUrdfXml(null)
+    }
+  }
+
+  const poses = useMemo(() => tree ? resolveFramePoses(tree) : new Map(), [tree])
+
+  // WebGL availability gate — must run BEFORE any <Canvas> mounts.
+  // @react-three/fiber v8's WebGL error bypasses React error boundaries
+  // (internal portal quirk), so synchronous detection up-front is the
+  // only reliable way to avoid blanking the parent React tree.
+  if (!WEBGL_AVAILABLE) {
+    return (
+      <div
+        style={{
+          padding: 'var(--space-5)',
+          background: 'var(--color-bg-card)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-lg)',
+          color: 'var(--color-text)',
+          textAlign: 'center',
+        }}
+        role="alert"
+      >
+        <div style={{ fontSize: 'var(--text-xl)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
+          3D scene viewer unavailable
+        </div>
+        <div
+          style={{
+            color: 'var(--color-text-secondary)',
+            fontSize: 'var(--text-base)',
+            maxWidth: 560,
+            margin: '0 auto',
+          }}
+        >
+          WebGL is not available in this browser. The 3D scene viewer needs it
+          for rendering. Try enabling hardware acceleration, updating your GPU
+          driver, or using a different browser. The other Explorer tabs still work.
+        </div>
+      </div>
+    )
+  }
   if (error) {
     return (
       <div style={{ color: '#f85149', padding: 24, fontFamily: 'monospace' }}>
@@ -314,7 +534,7 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
       <div
         style={{
           display: 'flex', alignItems: 'center', gap: 16,
-          fontSize: 12, color: '#e1e4e8',
+          fontSize: 12, color: '#e1e4e8', flexWrap: 'wrap',
         }}
       >
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -349,6 +569,45 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
             </select>
           </label>
         )}
+        {topics.images.length > 0 && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            Camera:
+            <select
+              value={selectedCameraTopic ?? ''}
+              onChange={e =>
+                setSelectedCameraTopic(e.target.value || null)
+              }
+              style={{ padding: 4, background: '#0d1117', color: '#e1e4e8', border: '1px solid #30363d' }}
+            >
+              <option value="">(none)</option>
+              {topics.images.map(t => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {topics.markers.length > 0 && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            Markers:
+            <select
+              value={selectedMarkerTopic ?? ''}
+              onChange={e =>
+                setSelectedMarkerTopic(e.target.value || null)
+              }
+              style={{ padding: 4, background: '#0d1117', color: '#e1e4e8', border: '1px solid #30363d' }}
+            >
+              <option value="">(none)</option>
+              {topics.markers.map(t => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+            {markers && markers.n_markers > 0 && (
+              <span style={{ color: '#8b949e', fontSize: 11 }}>
+                {markers.n_markers} marker{markers.n_markers === 1 ? '' : 's'}
+              </span>
+            )}
+          </label>
+        )}
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           Max points:
           <select
@@ -360,6 +619,8 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
             <option value={5000}>5k</option>
             <option value={10000}>10k</option>
             <option value={25000}>25k</option>
+            <option value={50000}>50k</option>
+            <option value={100000}>100k</option>
           </select>
         </label>
         {tree && (
@@ -369,41 +630,105 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
         )}
         {loading && <span style={{ color: '#8b949e' }}>(loading…)</span>}
       </div>
-      <Plot
-        data={traces}
-        layout={{
-          autosize: true,
-          margin: { l: 0, r: 0, t: 0, b: 0 },
-          paper_bgcolor: '#0d1117',
-          plot_bgcolor: '#0d1117',
-          scene: {
-            aspectmode: 'data',
-            bgcolor: '#0d1117',
-            xaxis: {
-              gridcolor: '#30363d',
-              zerolinecolor: '#30363d',
-              color: '#8b949e',
-              title: { text: 'X (m)' },
-            },
-            yaxis: {
-              gridcolor: '#30363d',
-              zerolinecolor: '#30363d',
-              color: '#8b949e',
-              title: { text: 'Y (m)' },
-            },
-            zaxis: {
-              gridcolor: '#30363d',
-              zerolinecolor: '#30363d',
-              color: '#8b949e',
-              title: { text: 'Z (m)' },
-            },
-          },
-          legend: { font: { color: '#e1e4e8' }, bgcolor: 'rgba(0,0,0,0)' },
-          height: 600,
+
+      <div
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontSize: 12, color: '#e1e4e8',
         }}
-        config={{ displayModeBar: true, responsive: true }}
-        style={{ width: '100%' }}
-      />
+      >
+        <span style={{ color: '#8b949e' }}>URDF:</span>
+        <input
+          type="text"
+          placeholder="/path/to/robot.urdf (optional — auto-loads from /robot_description if present)"
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              const v = (e.target as HTMLInputElement).value.trim()
+              if (v) loadUrdfByPath(v)
+            }
+          }}
+          style={{
+            flex: 1, padding: 4, background: '#0d1117',
+            color: '#e1e4e8', border: '1px solid #30363d', borderRadius: 4,
+            fontFamily: 'monospace', fontSize: 12,
+          }}
+        />
+        {urdfXml && (
+          <button
+            onClick={() => { setUrdfXml(null); setUrdfStatus(null) }}
+            style={{
+              padding: '4px 10px', background: '#21262d', color: '#e1e4e8',
+              border: '1px solid #30363d', borderRadius: 4, cursor: 'pointer',
+              fontSize: 12,
+            }}
+          >Hide URDF</button>
+        )}
+        {urdfStatus && (
+          <span style={{ color: urdfStatus.startsWith('error') ? '#f85149' : '#8b949e', fontSize: 11 }}>
+            {urdfStatus}
+          </span>
+        )}
+      </div>
+      <div
+        style={{
+          width: '100%', height: 600, background: '#0d1117',
+          borderRadius: 6, position: 'relative',
+        }}
+      >
+        {cameraFrameUrl && (
+          <div
+            style={{
+              position: 'absolute', bottom: 12, right: 12, zIndex: 5,
+              background: 'rgba(13,17,23,0.85)',
+              border: '1px solid #30363d', borderRadius: 4,
+              padding: 4, pointerEvents: 'none',
+            }}
+          >
+            <img
+              src={cameraFrameUrl}
+              alt="camera frame"
+              style={{
+                display: 'block', maxWidth: 320, maxHeight: 240,
+                borderRadius: 2,
+              }}
+            />
+            <div style={{
+              fontSize: 10, color: '#8b949e', fontFamily: 'monospace',
+              marginTop: 2, textAlign: 'right',
+            }}>
+              {selectedCameraTopic} · Δt = {(cameraFrameDt / 1e6).toFixed(1)} ms
+            </div>
+          </div>
+        )}
+        <Canvas
+          camera={{ position: [3, 3, 3], fov: 50, near: 0.01, far: 1000 }}
+          gl={{ antialias: true }}
+        >
+          <color attach="background" args={['#0d1117']} />
+          <ambientLight intensity={0.5} />
+          <directionalLight position={[5, 10, 5]} intensity={0.8} />
+          <Grid
+            args={[20, 20]}
+            cellColor="#30363d"
+            sectionColor="#484f58"
+            sectionSize={5}
+            fadeDistance={30}
+            infiniteGrid
+          />
+          {tree && Array.from(poses.entries()).map(([frame, pose]) => (
+            <FrameTriad key={frame} pose={pose} name={frame} />
+          ))}
+          {pointCloud && pointCloud.points.length > 0 && (
+            <PointCloud points={pointCloud.points} />
+          )}
+          {urdfXml && <UrdfModel urdfXml={urdfXml} />}
+          {markers && markers.markers.map((m, i) => (
+            <MarkerMesh key={`${m.ns}-${m.id}-${i}`} marker={m} />
+          ))}
+          <OrbitControls makeDefault />
+          <CameraAutoFit poses={poses} />
+        </Canvas>
+      </div>
     </div>
   )
 }

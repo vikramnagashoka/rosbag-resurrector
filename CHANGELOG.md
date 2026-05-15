@@ -8,6 +8,38 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-09
+
+### What's new
+
+Three feature bundles ship together: **3D Complete** (Three.js renderer + URDF + markers + camera overlay + live-mode recording infrastructure), **Custom-Type Ready** (pluggable CDR decoders + N-bag concatenation API + bag-side QC tool), and **UI Refresh** (design tokens + refreshed nav + reusable component primitives + virtualized bag list). The release replaces v0.5's Plotly 3D scene viewer with a real Three.js renderer, opens the door to anyone-with-rosbags use cases via custom-type decoders, and lifts the dashboard's perceived quality bar.
+
+### 3D Complete
+
+- **Three.js / react-three-fiber renderer** — replaces v0.5's Plotly 3D `<SceneViewer>`. Real `OrbitControls`, infinite grid, sphere markers + HTML labels at frame origins, z-color-graded `THREE.Points` cloud rendering. Smooth at 50-100k points (was 10-25k cap with Plotly). Backend endpoints unchanged.
+- **URDF loader** — `urdf-loader@^0.12.7` integration. Two paths to load a URDF: auto from a bag's `/robot_description` topic via the new `GET /api/bags/{id}/scene/urdf-from-bag` endpoint, or manually from a sandboxed file path via `GET /api/scene/urdf?path=…`. Renders primitive-shape URDFs (box / cylinder / sphere) cleanly; mesh-file references silently skipped (deferred to v0.7).
+- **Marker / MarkerArray decoder** — `parse_marker()` and `parse_marker_array()` in `resurrector/core/scene.py`, parser-dispatch routing for `visualization_msgs/msg/Marker[Array]`, new `GET /api/bags/{id}/scene/markers` endpoint. Frontend renders CUBE / SPHERE / CYLINDER / ARROW as native Three.js primitives; LINE_STRIP / TEXT / etc. fall back to wireframe placeholders.
+- **Camera image overlay** — `GET /api/bags/{id}/scene/camera-frame-at` returns the frame_index nearest to a target time via DuckDB ORDER BY ABS(timestamp − target). The frontend composites the JPEG in a 320×240 absolute-positioned overlay with a `topic · Δt = N ms` caption.
+- **Live-mode recording infrastructure** — `BridgeRecorder.register_topic_info(info)` for late registration of topic schemas (live mode discovers them per-message). `LiveSubscriber.on_topic_discovered` callback fires once per unique topic with an introspected `TopicInfo`; messages now serialize via `rclpy.serialization.serialize_message` so `Message.raw_data` is populated. The `bridge live` CLI command itself is a small follow-up requiring rclpy to test end-to-end.
+
+### Custom-Type Ready
+
+- **Pluggable custom-type decoders** — replaces v0.5.x's static `if/elif` dispatch with a runtime registry. Public API exported from `resurrector`: `register_decoder(msg_type, fn)`, `unregister_decoder(msg_type)`, `list_decoders()`. Built-in decoders self-register at module import. Custom message types now make `bf['/my_topic'].to_polars()` produce typed columns instead of `_unparsed` placeholders. Direct response to AnthonyCvn's ROS Discourse question about custom message types.
+- **N-bag concatenated stream API** — `resurrector.concatenate_bags(bags, mode='time'|'index')` returns a `ConcatenatedBagFrame` that exposes `[topic]` → `ConcatenatedTopicView` with `iter_chunks()` / `to_polars()` across the underlying bags. Memory-bounded: composes per-bag `iter_chunks` rather than eagerly concatenating. Promised in the Discourse reply ("if that turns out to be a common pattern I'll promote it to first-class") and now made good on.
+- **Bag-side QC tool** — `resurrector qc <bags...>` plus `resurrector.core.qc.run_qc()` for programmatic use. Single-bag checks wrap `bf.health_report()` plus empty/very-short detection. Cross-bag fleet checks: schema drift (same topic name, different message_type or .msg definition across bags), topic-set divergence (present in some bags, missing in others), recording-rate anomalies (>50% deviation from cross-bag median), coverage gaps and overlaps. CLI: `--json` for CI consumption, `--fail-on-error` for CI gating. Distinct lane from `lerobot-doctor` (which works on already-converted LeRobot datasets) — this catches problems BEFORE conversion.
+
+### UI Refresh
+
+- **Design tokens** — `src/styles/tokens.css` with CSS variables for color (refined GitHub Dark + cyan accent), 4px-based spacing scale, type scale, radii, shadows, motion easings. Future light theme is a `:root` swap. Global `*:focus-visible` ring for accessibility.
+- **Refreshed top navigation** — extracted from `App.tsx` into `<NavBar>` component with sticky positioning, backdrop blur, active-route cyan underline, hover affordance with smooth transitions. New "logo mark" — accent square with subtle glow.
+- **Reusable component primitives** — `<Button>` (4 variants × 3 sizes), `<Card>` + `<CardHeader>`/`<CardBody>`/`<CardFooter>` with optional hover lift, `<Badge>` (6 semantic variants). All token-driven CSS modules under `src/ui/`. Pages adopt them organically as they're touched.
+- **Virtualized bag list** — `react-window@^2.2.7` powers `<VirtualizedBagList>`. Activation threshold: < 100 bags renders flat; ≥ 100 virtualizes. The Library page now scrolls smoothly past thousands of indexed bags.
+
+### Test infrastructure
+
+- New frontend test suite: `vitest` + `jsdom` + `@testing-library/react` + `@testing-library/jest-dom`. 36 frontend tests across `sceneMath`, UI primitives (Button/Card/Badge), and `VirtualizedBagList`.
+- Backend test count: **709 passed, 7 skipped** (was 585 in v0.5.0; +124 across 8 new test files for v0.6 features).
+
 ## [0.5.0] — 2026-05-02
 
 ### What's new

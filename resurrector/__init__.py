@@ -6,12 +6,18 @@ quality validation, multi-stream synchronization, ML-ready export,
 and an interactive web dashboard.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from resurrector.core.bag_frame import BagFrame
 from resurrector.ingest.scanner import scan
 from resurrector.core.query import search
 from resurrector.core.dataset import DatasetManager, BagRef, SyncConfig, DatasetMetadata
+from resurrector.ingest.parser import (
+    register_decoder, unregister_decoder, list_decoders,
+)
+from resurrector.core.concatenated import (
+    ConcatenatedBagFrame, ConcatenatedTopicView, concatenate_bags,
+)
 
 __all__ = [
     "BagFrame",

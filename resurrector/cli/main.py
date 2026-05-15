@@ -258,6 +258,130 @@ def health(
             console.print(json_str)
 
 
+@app.command()
+def qc(
+    paths: Annotated[list[Path], typer.Argument(
+        help="One or more bag files or directories. Directories are scanned "
+             "recursively for .mcap. e.g. resurrector qc bag_a.mcap bag_b.mcap "
+             "or resurrector qc /data/bags",
+    )],
+    json_output: Annotated[Optional[Path], typer.Option("--json",
+        help="Write the QC report as JSON to this path (machine-readable, "
+             "stable schema). Suitable for CI gating. e.g. --json qc.json",
+    )] = None,
+    fail_on_error: Annotated[bool, typer.Option("--fail-on-error",
+        help="Exit non-zero if the report contains any 'error'-severity "
+             "issues. Useful for CI pipelines. e.g. --fail-on-error",
+    )] = False,
+):
+    """Bag-side data-quality checks for a single bag or a fleet of bags.
+
+    Runs upstream QC before bags become training datasets:
+
+    - **Per-bag**: health score (drops, gaps, frequency drift, oversized
+      messages) plus empty / very-short-bag detection.
+    - **Cross-bag fleet**: schema drift (same topic with different
+      message_type / .msg definition across bags), topic-set divergence
+      (topic present in some bags but not others), recording-rate
+      anomalies (>50% deviation from cross-bag median), coverage gaps
+      and overlaps.
+
+    Complementary to lerobot-doctor — that tool QCs converted LeRobot
+    datasets; this one QCs the bags BEFORE conversion. Catches
+    bag-collection problems (drift across recording sessions, missing
+    sensors on one robot, etc.) that a single-dataset check wouldn't
+    surface.
+
+    Examples:
+      Single bag, console output:
+          resurrector qc experiment.mcap
+
+      Whole campaign with JSON for CI:
+          resurrector qc /data/campaign --json campaign_qc.json --fail-on-error
+    """
+    from resurrector.core.qc import run_qc
+    from rich.table import Table
+
+    report = run_qc(paths)
+
+    if json_output:
+        json_output.write_text(report.to_json())
+        console.print(f"[green]QC report saved to {json_output}[/green]")
+    else:
+        # Render to console
+        console.print(
+            f"\n[bold]Bag-side QC: {report.n_bags} bag(s)[/bold]  "
+            f"[red]{report.n_errors} error(s)[/red]  "
+            f"[yellow]{report.n_warnings} warning(s)[/yellow]\n"
+        )
+        # Per-bag summary
+        if report.bags:
+            table = Table(title="Per-bag")
+            table.add_column("Bag")
+            table.add_column("Score", justify="right")
+            table.add_column("Duration", justify="right")
+            table.add_column("Messages", justify="right")
+            table.add_column("Topics", justify="right")
+            table.add_column("Issues", justify="right")
+            for b in report.bags:
+                score_color = "green" if b.health_score >= 80 else (
+                    "yellow" if b.health_score >= 50 else "red"
+                )
+                table.add_row(
+                    Path(b.bag_path).name,
+                    f"[{score_color}]{b.health_score}[/{score_color}]",
+                    f"{b.duration_sec:.1f}s",
+                    f"{b.message_count:,}",
+                    str(b.n_topics),
+                    str(len(b.issues)),
+                )
+            console.print(table)
+
+        # Fleet issues
+        from rich.markup import escape as rich_escape
+
+        if report.fleet_issues:
+            console.print("\n[bold]Cross-bag findings[/bold]")
+            for issue in report.fleet_issues:
+                color = {"error": "red", "warning": "yellow", "info": "cyan"}[issue.severity]
+                # rich_escape protects against topic / message strings that
+                # contain brackets (e.g. /camera/compressed) being mis-parsed
+                # as markup tags
+                topic_str = (
+                    f" \\[{rich_escape(issue.topic)}]" if issue.topic else ""
+                )
+                console.print(
+                    f"  [{color}]{issue.severity.upper()}[/{color}] "
+                    f"\\[{rich_escape(issue.code)}]{topic_str} "
+                    f"{rich_escape(issue.message)}"
+                )
+
+        # Per-bag issues
+        any_bag_issues = any(b.issues for b in report.bags)
+        if any_bag_issues:
+            console.print("\n[bold]Per-bag findings[/bold]")
+            for b in report.bags:
+                if not b.issues:
+                    continue
+                console.print(f"\n  [dim]{Path(b.bag_path).name}[/dim]")
+                for issue in b.issues:
+                    color = {"error": "red", "warning": "yellow", "info": "cyan"}[issue.severity]
+                    topic_str = (
+                        f" \\[{rich_escape(issue.topic)}]" if issue.topic else ""
+                    )
+                    console.print(
+                        f"    [{color}]{issue.severity.upper()}[/{color}] "
+                        f"\\[{rich_escape(issue.code)}]{topic_str} "
+                        f"{rich_escape(issue.message)}"
+                    )
+
+        if not report.all_issues:
+            console.print("[green]No issues found across the fleet.[/green]")
+
+    if fail_on_error and report.n_errors > 0:
+        raise typer.Exit(code=1)
+
+
 @app.command(name="list")
 def list_bags(
     after: Annotated[Optional[str], typer.Option(

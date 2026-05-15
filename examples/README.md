@@ -67,6 +67,16 @@ scripts reuse it.
 | 22 | `22_bridge_events_and_filters.py` | Server-side filter + event broadcast | Two WS clients subscribed to `/imu/data` — one unfiltered, one with a Polars predicate. POST one event marker, see fan-out to both clients |
 | 23 | `23_scene_tf_and_pointcloud.py` | `TFTree` + PointCloud2 decoder | Walk `/tf` + `/tf_static` from a synth scene bag, resolve `world ← base_link` at three timestamps, decode + decimate a 100-point cloud |
 
+### v0.6.0 features
+
+| # | Script | Feature | What you'll see |
+|---|--------|---------|-----------------|
+| 24 | `24_custom_type_decoders.py` | `register_decoder` for custom message types | A custom `my_pkg/msg/Vec3` flows as `_unparsed` until you register a decoder; same bag, same iteration, then suddenly `to_polars()` produces typed x/y/z columns. Plus a fail-closed demo where a buggy decoder doesn't abort the iteration |
+| 25 | `25_concatenate_bags.py` | `concatenate_bags` N-bag stream | Three synth bags treated as one; time mode sorts by start_time, index mode preserves caller order; `to_polars()` spans all bags; topic missing in some bags is silently handled |
+| 26 | `26_bag_qc_fleet.py` | Bag-side QC tool — single + fleet | Synthetic 5-bag fleet with a deliberate rate anomaly (10Hz IMU vs 200Hz cluster) + a missing /tf topic. Fleet checks fire (rate_anomaly, topic_set_divergence, coverage_overlap). JSON output suitable for CI gating |
+
+The v0.6 3D Complete bundle (Three.js renderer + URDF + Marker rendering + camera overlay) is dashboard-only — there's no standalone Python script demo. Run `resurrector dashboard` and visit any bag's Scene tab to see it in action.
+
 ## Why these exist
 
 Reading docs about features is one thing; seeing them produce output

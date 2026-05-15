@@ -1910,6 +1910,220 @@ async def list_scene_topics(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+@app.get("/api/bags/{bag_id}/scene/camera-frame-at")
+async def get_camera_frame_at(
+    bag_id: int,
+    topic: str = Query(..., description="Image topic name"),
+    time_ns: int = Query(..., description="Target timestamp ns"),
+) -> dict[str, Any]:
+    """Return the frame_index nearest to ``time_ns`` for an image topic.
+
+    Used by the SceneViewer's camera-image overlay to keep the displayed
+    frame synced to the time slider. Frontend then fetches the actual
+    image bytes via the existing ``/topics/{name}/frame/{idx}`` endpoint
+    so we don't double-pay the JPEG-encode cost when the frame is cached.
+
+    Returns ``{frame_index, frame_time_ns, dt_ns}`` (dt_ns = signed
+    difference frame_time - target_time, useful for "frame is N ms old"
+    UI hints).
+    """
+    from resurrector.ingest.frame_index import (
+        IMAGE_TOPIC_TYPES, build_frame_offsets,
+    )
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        topic_info = next(
+            (t for t in bag.get("topics", []) if t["name"] == topic), None,
+        )
+        if topic_info is None:
+            raise HTTPException(404, f"Topic {topic!r} not found")
+        if topic_info["message_type"] not in IMAGE_TOPIC_TYPES:
+            raise HTTPException(
+                400, f"Topic {topic!r} is not an image topic "
+                     f"(type: {topic_info['message_type']})",
+            )
+
+        # Lazy-build the frame offsets if not already indexed
+        if not index.has_frame_offsets(int(bag_id), topic):
+            build_frame_offsets(index, int(bag_id), bag["path"], topics=[topic])
+
+        # Direct DuckDB query: pick the row with smallest |timestamp - target|
+        with index._lock:
+            row = index.conn.execute(
+                """
+                SELECT frame_index, timestamp_ns
+                FROM frame_offsets
+                WHERE bag_id = ? AND topic = ?
+                ORDER BY ABS(timestamp_ns - ?) ASC
+                LIMIT 1
+                """,
+                [int(bag_id), topic, int(time_ns)],
+            ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"No frames indexed for topic {topic!r}")
+        frame_index, frame_ts = row
+        return {
+            "frame_index": int(frame_index),
+            "frame_time_ns": int(frame_ts),
+            "dt_ns": int(frame_ts - int(time_ns)),
+        }
+    finally:
+        index.close()
+
+
+@app.get("/api/bags/{bag_id}/scene/markers")
+async def get_scene_markers(
+    bag_id: int,
+    topic: str = Query(..., description="Marker or MarkerArray topic name"),
+    time_ns: int | None = None,
+) -> dict[str, Any]:
+    """Return the decoded markers from one Marker / MarkerArray message.
+
+    Picks the message nearest to ``time_ns`` (or the first message if
+    unspecified). Auto-detects whether the topic is `Marker` (returns
+    a single-element list) or `MarkerArray` (returns the full list).
+
+    Returns ``{frame_id, time_ns, n_markers, markers: [...]}``.
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.bag_frame import BagFrame
+        from resurrector.core.scene import parse_marker, parse_marker_array
+
+        bf = BagFrame(bag["path"])
+        topic_info = next(
+            (ti for ti in bf.metadata.topics if ti.name == topic), None,
+        )
+        if topic_info is None:
+            raise HTTPException(404, f"Topic {topic!r} not found")
+        is_array = "MarkerArray" in topic_info.message_type
+
+        chosen_msg = None
+        chosen_dt = None
+        for msg in bf._parser.read_messages(topics=[topic]):
+            if msg.raw_data is None:
+                continue
+            if time_ns is None:
+                chosen_msg = msg
+                break
+            dt = abs(msg.timestamp_ns - int(time_ns))
+            if chosen_dt is None or dt < chosen_dt:
+                chosen_msg = msg
+                chosen_dt = dt
+            if msg.timestamp_ns > int(time_ns) and chosen_dt is not None:
+                break
+        if chosen_msg is None or chosen_msg.raw_data is None:
+            raise HTTPException(404, f"No marker messages on {topic!r}")
+
+        if is_array:
+            markers = parse_marker_array(chosen_msg.raw_data)
+        else:
+            single = parse_marker(chosen_msg.raw_data)
+            markers = [single] if single is not None else []
+
+        return {
+            "topic": topic,
+            "time_ns": chosen_msg.timestamp_ns,
+            "n_markers": len(markers),
+            "markers": [m.to_dict() for m in markers],
+        }
+    finally:
+        index.close()
+
+
+@app.get("/api/scene/urdf")
+async def get_urdf_file(path: str) -> Any:
+    """Serve a URDF file from a sandboxed location for the SceneViewer.
+
+    Path validation: must resolve under one of the allowed roots
+    (RESURRECTOR_ALLOWED_ROOTS or the safe default set). Refuses
+    symlinks pointing outside the sandbox. URDF files are typically
+    small (< 1 MB), so we read into memory and return as text.
+
+    Returns the raw URDF XML with Content-Type ``application/xml``.
+    The frontend's urdf-loader parses the string client-side and walks
+    relative `<mesh filename="…">` references via the loader's package://
+    resolver — those mesh files would need a separate endpoint or to be
+    inlined; v0.6.0 supports primitive-shape URDFs (box / cylinder /
+    sphere) without external mesh assets.
+    """
+    try:
+        resolved = _validate_path(path)
+    except HTTPException:
+        raise
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(404, f"URDF file not found: {path}")
+    if resolved.suffix.lower() not in (".urdf", ".xml"):
+        raise HTTPException(400, "Only .urdf or .xml files are accepted")
+    if resolved.stat().st_size > 5 * 1024 * 1024:  # 5 MB cap
+        raise HTTPException(413, "URDF file exceeds 5 MB cap")
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "URDF file is not valid UTF-8")
+    return JSONResponse(
+        content={"urdf": text, "path": str(resolved)},
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/bags/{bag_id}/scene/urdf-from-bag")
+async def get_urdf_from_bag(bag_id: int, topic: str = "/robot_description") -> Any:
+    """Try to extract a URDF string from a bag's `/robot_description` topic.
+
+    Many ROS 2 bags include the URDF as a string published to a latched
+    topic (commonly ``/robot_description``). If found, we return it the
+    same way as ``/api/scene/urdf`` so the frontend treats both sources
+    interchangeably.
+
+    Returns 404 if the topic isn't present or no message has the URDF
+    payload (we look for ``<robot`` in the decoded string field).
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(int(bag_id))
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.bag_frame import BagFrame
+
+        bf = BagFrame(bag["path"])
+        if topic not in {ti.name for ti in bf.metadata.topics}:
+            raise HTTPException(
+                404,
+                f"Topic {topic!r} not found in bag (typical robot_description "
+                f"location is /robot_description)",
+            )
+        # Try to read the first message; std_msgs/String CDR is just a
+        # length-prefixed string after the 4-byte CDR header.
+        for msg in bf._parser.read_messages(topics=[topic]):
+            if msg.raw_data is None or len(msg.raw_data) < 8:
+                continue
+            import struct
+            try:
+                (n,) = struct.unpack_from("<I", msg.raw_data, 4)
+                payload = msg.raw_data[8:8 + n].decode("utf-8", errors="replace")
+            except (struct.error, UnicodeDecodeError):
+                continue
+            if "<robot" in payload:
+                return JSONResponse(
+                    content={"urdf": payload, "topic": topic},
+                    headers={"Cache-Control": "public, max-age=300"},
+                )
+        raise HTTPException(
+            404,
+            f"No URDF-like message found on {topic!r} (no <robot tag in payloads)",
+        )
+    finally:
+        index.close()
+
+
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
     # SPA fallback: any path that isn't a real file in /static gets

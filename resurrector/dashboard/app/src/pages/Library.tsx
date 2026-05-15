@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import HealthBadge from '../components/HealthBadge'
+import VirtualizedBagList from '../components/VirtualizedBagList'
 import { api, Bag } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
@@ -326,57 +327,11 @@ export default function Library() {
           </div>
         </div>
       ) : (
-        bags.map(bag => (
-          <Link
-            key={bag.id}
-            to={`/bag/${bag.id}`}
-            style={{ textDecoration: 'none', color: 'inherit' }}
-          >
-            <div
-              style={cardStyle}
-              onMouseEnter={e => (e.currentTarget.style.borderColor = '#58a6ff')}
-              onMouseLeave={e => (e.currentTarget.style.borderColor = '#30363d')}
-            >
-              <div>
-                <div
-                  style={{
-                    fontSize: '16px',
-                    fontWeight: 600,
-                    color: '#58a6ff',
-                    marginBottom: '4px',
-                  }}
-                >
-                  {basename(bag.path)}
-                </div>
-                <div style={{ display: 'flex', gap: '16px', ...statStyle }}>
-                  <span>{bag.duration_sec?.toFixed(1)}s</span>
-                  <span>{formatSize(bag.size_bytes)}</span>
-                  <span>{bag.topics.length} topics</span>
-                  <span>{bag.message_count?.toLocaleString()} msgs</span>
-                </div>
-                {bag.tags.length > 0 && (
-                  <div style={{ marginTop: '4px', display: 'flex', gap: '6px' }}>
-                    {bag.tags.map((t, i) => (
-                      <span
-                        key={i}
-                        style={{
-                          background: '#1f2937',
-                          padding: '2px 8px',
-                          borderRadius: '12px',
-                          fontSize: '12px',
-                          color: '#8b949e',
-                        }}
-                      >
-                        {t.key}:{t.value}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <HealthBadge score={bag.health_score} />
-            </div>
-          </Link>
-        ))
+        // v0.6.0 (C.7): VirtualizedBagList renders all bags inline below
+        // its threshold (~100), virtualizes above. Library scrolls
+        // smoothly past thousands of indexed bags without re-rendering
+        // every row.
+        <VirtualizedBagList bags={bags} />
       )}
     </div>
   )

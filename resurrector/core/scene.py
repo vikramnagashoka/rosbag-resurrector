@@ -510,3 +510,217 @@ def decode_pointcloud2_xyz(
     # Filter out NaN/inf (common in unstructured sweeps)
     mask = np.isfinite(out).all(axis=1)
     return out[mask]
+
+
+# ---------------------------------------------------------------------------
+# visualization_msgs/Marker + MarkerArray
+# ---------------------------------------------------------------------------
+
+
+# Marker.type enum values from ROS 2 visualization_msgs/Marker
+MARKER_TYPES = {
+    0: "ARROW",
+    1: "CUBE",
+    2: "SPHERE",
+    3: "CYLINDER",
+    4: "LINE_STRIP",
+    5: "LINE_LIST",
+    6: "CUBE_LIST",
+    7: "SPHERE_LIST",
+    8: "POINTS",
+    9: "TEXT_VIEW_FACING",
+    10: "MESH_RESOURCE",
+    11: "TRIANGLE_LIST",
+}
+
+# Marker.action enum
+MARKER_ACTIONS = {
+    0: "ADD",
+    1: "MODIFY",
+    2: "DELETE",
+    3: "DELETEALL",
+}
+
+
+@dataclass
+class Marker:
+    """Decoded visualization_msgs/Marker.
+
+    Subset of the full Marker message — covers the fields the SceneViewer
+    actually needs to render. Less-used fields (mesh_resource, mesh_use_embedded_materials,
+    text content for TEXT_VIEW_FACING) are present but not rendered in v0.6.0.
+    """
+    frame_id: str
+    timestamp_ns: int
+    ns: str
+    id: int
+    type: int  # see MARKER_TYPES
+    action: int  # see MARKER_ACTIONS
+    position: tuple[float, float, float]
+    orientation: tuple[float, float, float, float]  # x, y, z, w
+    scale: tuple[float, float, float]
+    color: tuple[float, float, float, float]  # r, g, b, a
+    lifetime_sec: float
+    frame_locked: bool
+    text: str = ""
+    mesh_resource: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "frame_id": self.frame_id,
+            "timestamp_ns": self.timestamp_ns,
+            "ns": self.ns,
+            "id": self.id,
+            "type": self.type,
+            "type_name": MARKER_TYPES.get(self.type, f"UNKNOWN_{self.type}"),
+            "action": self.action,
+            "action_name": MARKER_ACTIONS.get(self.action, f"UNKNOWN_{self.action}"),
+            "position": list(self.position),
+            "orientation": list(self.orientation),
+            "scale": list(self.scale),
+            "color": list(self.color),
+            "lifetime_sec": self.lifetime_sec,
+            "frame_locked": self.frame_locked,
+            "text": self.text,
+            "mesh_resource": self.mesh_resource,
+        }
+
+
+def _parse_marker_inline(buf: bytes, off: int) -> tuple[Marker | None, int]:
+    """Parse a Marker body starting at ``off`` (no CDR header skip).
+
+    Returns ``(marker, new_offset)`` or ``(None, off)`` on parse failure.
+    Used by both :func:`parse_marker` (after stripping the CDR header) and
+    :func:`parse_marker_array` (which iterates inline marker bodies after
+    its sequence-count header).
+    """
+    try:
+        # Header: sec (int32), nsec (uint32), frame_id (string)
+        sec, nsec = struct.unpack_from("<iI", buf, off)
+        off += 8
+        frame_id, off = _read_cdr_string(buf, off)
+        # ns (string), id (int32), type (int32), action (int32)
+        ns, off = _read_cdr_string(buf, off)
+        off = (off + 3) & ~3
+        marker_id, marker_type, marker_action = struct.unpack_from(
+            "<iii", buf, off,
+        )
+        off += 12
+        # Pose: position + orientation (3+4 float64), align to 8
+        off = (off + 7) & ~7
+        px, py, pz = struct.unpack_from("<3d", buf, off)
+        off += 24
+        qx, qy, qz, qw = struct.unpack_from("<4d", buf, off)
+        off += 32
+        # Scale: Vector3
+        sx, sy, sz = struct.unpack_from("<3d", buf, off)
+        off += 24
+        # Color: ColorRGBA (4 float32)
+        cr, cg, cb, ca = struct.unpack_from("<4f", buf, off)
+        off += 16
+        # Lifetime: Duration (int32 + uint32), align to 4
+        off = (off + 3) & ~3
+        lt_sec, lt_nsec = struct.unpack_from("<iI", buf, off)
+        off += 8
+        lifetime = lt_sec + lt_nsec / 1e9
+        # frame_locked (bool)
+        (frame_locked,) = struct.unpack_from("<B", buf, off)
+        off += 1
+        # Tail: points[], colors[], text, mesh_resource, mesh_use_embedded_materials.
+        # CDR alignment is relative to the buf start (= encapsulation body
+        # start), so each uint32 / string-length field needs 4-byte alignment.
+        text = ""
+        mesh_resource = ""
+        try:
+            # Align to 4 for the points[] length prefix
+            off = (off + 3) & ~3
+            (n_points,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if n_points > 1_000_000:  # sanity
+                return None, off
+            if n_points > 0:
+                off = (off + 7) & ~7
+                off += n_points * 24
+            # colors[] length — align to 4
+            off = (off + 3) & ~3
+            (n_colors,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            if n_colors > 1_000_000:
+                return None, off
+            if n_colors > 0:
+                off = (off + 3) & ~3
+                off += n_colors * 16
+            # text (string) — length prefix needs 4-byte alignment
+            off = (off + 3) & ~3
+            text, off = _read_cdr_string(buf, off)
+            # mesh_resource (string)
+            off = (off + 3) & ~3
+            mesh_resource, off = _read_cdr_string(buf, off)
+            # mesh_use_embedded_materials (bool) — skip
+            off += 1
+        except (struct.error, IndexError):
+            # Tail fields unreadable — caller-relevant fields already captured
+            pass
+
+        marker = Marker(
+            frame_id=frame_id,
+            timestamp_ns=sec * 1_000_000_000 + nsec,
+            ns=ns,
+            id=marker_id,
+            type=marker_type,
+            action=marker_action,
+            position=(px, py, pz),
+            orientation=(qx, qy, qz, qw),
+            scale=(sx, sy, sz),
+            color=(cr, cg, cb, ca),
+            lifetime_sec=lifetime,
+            frame_locked=bool(frame_locked),
+            text=text,
+            mesh_resource=mesh_resource,
+        )
+        return marker, off
+    except (struct.error, IndexError, UnicodeDecodeError):
+        return None, off
+
+
+def parse_marker(raw_data: bytes) -> Marker | None:
+    """Parse a single visualization_msgs/Marker CDR message.
+
+    Returns None on malformed input — never raises. Decodes the fields
+    needed for rendering primitives (CUBE / SPHERE / CYLINDER / ARROW)
+    plus text and mesh_resource for completeness.
+    """
+    if len(raw_data) < 4:
+        return None
+    marker, _ = _parse_marker_inline(raw_data[4:], 0)
+    return marker
+
+
+def parse_marker_array(raw_data: bytes) -> list[Marker]:
+    """Parse a visualization_msgs/MarkerArray CDR payload.
+
+    Wire format: CDR encapsulation header (4 bytes) + uint32 sequence
+    count + N inline Marker bodies (no per-marker CDR header). Returns
+    the decoded list; if a marker mid-sequence fails to parse, we stop
+    rather than continue with potentially mis-aligned offsets.
+    """
+    if len(raw_data) < 8:
+        return []
+    buf = raw_data[4:]  # strip CDR encapsulation header
+    try:
+        (n,) = struct.unpack_from("<I", buf, 0)
+    except struct.error:
+        return []
+    if n > 100_000:  # sanity guard
+        return []
+    if n == 0:
+        return []
+    out: list[Marker] = []
+    off = 4
+    for _ in range(n):
+        marker, new_off = _parse_marker_inline(buf, off)
+        if marker is None:
+            break  # mis-aligned or truncated; stop rather than emit garbage
+        out.append(marker)
+        off = new_off
+    return out

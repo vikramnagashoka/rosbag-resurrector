@@ -244,11 +244,86 @@ def _safe_read_string(buf: bytes, offset: int, msg_type: str = "?") -> tuple[str
     return s, offset
 
 
-def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
-    """Best-effort CDR deserialization for common ROS2 message types.
+# ---------------------------------------------------------------------------
+# Pluggable decoder registry (v0.6.0 — Sub-feature B.1)
+#
+# Decoder functions take the full CDR-encoded message bytes (including
+# the 4-byte encapsulation header) and return a dict that becomes
+# Message.data. Raising any exception indicates parse failure — the
+# parser catches it and returns a {_parse_error: True, ...} placeholder
+# so one bad message doesn't abort an entire bag scan.
+# ---------------------------------------------------------------------------
 
-    Handles the most common sensor message types without needing the
-    full ROS2 type system. On malformed input, a CDRParseError is
+from typing import Callable
+
+DecoderFn = Callable[[bytes], dict[str, Any]]
+
+# msg_type → decoder function. Mutated at import time below to seed the
+# built-in decoders, and at runtime by register_decoder().
+_DECODER_REGISTRY: dict[str, DecoderFn] = {}
+
+
+def register_decoder(msg_type: str, decoder: DecoderFn) -> None:
+    """Register a custom CDR decoder for a ROS 2 message type.
+
+    Lets users with custom message types (``my_pkg/msg/CustomThing``)
+    plug in a decoder so ``bf['/my_topic'].to_polars()`` produces typed
+    columns instead of the opaque ``_unparsed`` placeholder.
+
+    Args:
+        msg_type: Fully-qualified type string, e.g.
+            ``"my_pkg/msg/CustomThing"``. Must exactly match what the
+            bag's schema reports.
+        decoder: Function ``(raw_data: bytes) -> dict``. Receives the
+            full CDR-encoded message bytes including the 4-byte CDR
+            encapsulation header. Should return a flat or nested dict;
+            nested dicts get dot-flattened by ``BagFrame.iter_chunks()``.
+            Raise any exception to indicate parse failure — the parser
+            catches it and surfaces a ``_parse_error`` placeholder.
+
+    Re-registration is allowed and replaces the existing decoder.
+
+    Example::
+
+        from resurrector.ingest.parser import register_decoder
+        import struct
+
+        def decode_my_thing(raw):
+            buf = raw[4:]  # skip CDR header
+            x, y, z = struct.unpack_from('<3d', buf, 0)
+            return {'x': x, 'y': y, 'z': z}
+
+        register_decoder('my_pkg/msg/CustomThing', decode_my_thing)
+    """
+    if not callable(decoder):
+        raise TypeError(f"decoder for {msg_type!r} must be callable")
+    if not msg_type:
+        raise ValueError("msg_type cannot be empty")
+    _DECODER_REGISTRY[msg_type] = decoder
+
+
+def unregister_decoder(msg_type: str) -> bool:
+    """Remove a registered decoder. Returns True if one was present.
+
+    Useful for tests or hot-reload scenarios. Removing a built-in
+    decoder is allowed — ``_unparsed`` placeholders will appear for
+    that type until another decoder is registered.
+    """
+    return _DECODER_REGISTRY.pop(msg_type, None) is not None
+
+
+def list_decoders() -> list[str]:
+    """Return all message types with a registered decoder, sorted."""
+    return sorted(_DECODER_REGISTRY.keys())
+
+
+def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
+    """Dispatch CDR decoding via the decoder registry.
+
+    Built-in decoders (Imu, JointState, Image, LaserScan,
+    CompressedImage, TFMessage, PointCloud2, Marker, MarkerArray) are
+    registered at module import. Users add their own via
+    :func:`register_decoder`. On malformed input, a CDRParseError is
     caught here and surfaced in the returned dict rather than
     propagating up — so one bad message doesn't abort a whole bag scan.
     """
@@ -256,26 +331,13 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
     if len(data) < 4:
         return result
 
-    # Skip CDR encapsulation header (4 bytes)
-    buf = data[4:]
+    decoder = _DECODER_REGISTRY.get(msg_type)
+    if decoder is None:
+        logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
+        return {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
+
     try:
-        if msg_type == "sensor_msgs/msg/Imu":
-            result = _parse_imu(buf)
-        elif msg_type == "sensor_msgs/msg/JointState":
-            result = _parse_joint_state(buf)
-        elif msg_type == "sensor_msgs/msg/Image":
-            result = _parse_image(buf)
-        elif msg_type == "sensor_msgs/msg/LaserScan":
-            result = _parse_laser_scan(buf)
-        elif msg_type == "sensor_msgs/msg/CompressedImage":
-            result = _parse_compressed_image(buf)
-        elif msg_type in ("tf2_msgs/msg/TFMessage",):
-            result = _parse_tf_message(data)  # uses raw including CDR header
-        elif msg_type in ("sensor_msgs/msg/PointCloud2",):
-            result = _parse_pointcloud2(data)
-        else:
-            logger.debug("No CDR parser for message type '%s' (%d bytes)", msg_type, len(data))
-            result = {"_unparsed": True, "_msg_type": msg_type, "_raw_size": len(data)}
+        result = decoder(data)
     except CDRParseError as exc:
         logger.warning("CDR parse error: %s", exc)
         result = {
@@ -289,6 +351,44 @@ def _parse_cdr_message(msg_type: str, data: bytes) -> dict[str, Any]:
         result = {"_parse_error": True, "_msg_type": msg_type, "_raw_size": len(data)}
 
     return result
+
+
+# Built-in decoders — wrap the existing helpers (some take CDR-stripped
+# buffers, some take the full data including header) into a uniform
+# (raw_data: bytes) → dict signature.
+
+def _decode_imu(data: bytes) -> dict[str, Any]:
+    return _parse_imu(data[4:])
+
+
+def _decode_joint_state(data: bytes) -> dict[str, Any]:
+    return _parse_joint_state(data[4:])
+
+
+def _decode_image(data: bytes) -> dict[str, Any]:
+    return _parse_image(data[4:])
+
+
+def _decode_laser_scan(data: bytes) -> dict[str, Any]:
+    return _parse_laser_scan(data[4:])
+
+
+def _decode_compressed_image(data: bytes) -> dict[str, Any]:
+    return _parse_compressed_image(data[4:])
+
+
+# These ones already accept the full data including CDR header
+def _register_builtin_decoders() -> None:
+    """Seed the registry with the built-in CDR decoders. Idempotent."""
+    register_decoder("sensor_msgs/msg/Imu", _decode_imu)
+    register_decoder("sensor_msgs/msg/JointState", _decode_joint_state)
+    register_decoder("sensor_msgs/msg/Image", _decode_image)
+    register_decoder("sensor_msgs/msg/LaserScan", _decode_laser_scan)
+    register_decoder("sensor_msgs/msg/CompressedImage", _decode_compressed_image)
+    register_decoder("tf2_msgs/msg/TFMessage", _parse_tf_message)
+    register_decoder("sensor_msgs/msg/PointCloud2", _parse_pointcloud2)
+    register_decoder("visualization_msgs/msg/Marker", _parse_marker)
+    register_decoder("visualization_msgs/msg/MarkerArray", _parse_marker_array)
 
 
 def _read_header(buf: bytes, offset: int, msg_type: str = "?") -> tuple[int, int, str, int]:
@@ -545,6 +645,22 @@ def _parse_tf_message(raw_data: bytes) -> dict[str, Any]:
     }
 
 
+def _parse_marker(raw_data: bytes) -> dict[str, Any]:
+    """Parse a single visualization_msgs/Marker into the message dict."""
+    from resurrector.core.scene import parse_marker
+    m = parse_marker(raw_data)
+    if m is None:
+        return {"_parse_error": True, "_msg_type": "visualization_msgs/msg/Marker"}
+    return {"marker": m.to_dict()}
+
+
+def _parse_marker_array(raw_data: bytes) -> dict[str, Any]:
+    """Parse a visualization_msgs/MarkerArray into the message dict."""
+    from resurrector.core.scene import parse_marker_array
+    markers = parse_marker_array(raw_data)
+    return {"markers": [m.to_dict() for m in markers], "_count": len(markers)}
+
+
 def _parse_pointcloud2(raw_data: bytes) -> dict[str, Any]:
     """Parse PointCloud2 CDR header (metadata only — points stay in raw_data).
 
@@ -616,3 +732,7 @@ def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
             "(provided by any ROS 2 install)."
         )
     raise ValueError(f"Unsupported file format: {ext}")
+
+
+# Register the built-in decoders now that all helper functions are defined.
+_register_builtin_decoders()
