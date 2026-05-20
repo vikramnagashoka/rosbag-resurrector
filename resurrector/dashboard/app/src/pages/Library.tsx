@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import HealthBadge from '../components/HealthBadge'
 import VirtualizedBagList from '../components/VirtualizedBagList'
-import { api, Bag } from '../api'
+import { InstallBanner, useCapabilities } from '../components/InstallBanner'
+import { api, Bag, ScanError } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
 const cardStyle: React.CSSProperties = {
@@ -46,6 +47,11 @@ export default function Library() {
   // it'd be loud to show a permanent input above the list. The
   // empty state already exposes the same form prominently.
   const [showHeaderScan, setShowHeaderScan] = useState(false)
+  // Last scan's classified errors, surfaced as install banners. Cleared
+  // on the next scan attempt so users don't see a stale ros1 banner
+  // after they install mcap and rescan a clean folder.
+  const [scanErrors, setScanErrors] = useState<ScanError[]>([])
+  const caps = useCapabilities()
   const toast = useErrorToast()
 
   useEffect(() => {
@@ -71,6 +77,7 @@ export default function Library() {
     e.preventDefault()
     if (!scanPath.trim()) return
     setScanning(true)
+    setScanErrors([])
     const result = await runWithToast(
       toast,
       () => api.triggerScan(scanPath),
@@ -78,6 +85,7 @@ export default function Library() {
     )
     if (result) {
       toast.push('info', `Indexed ${result.indexed} of ${result.scanned} bag(s).`)
+      setScanErrors(result.errors)
       await fetchBags()
     }
     setScanning(false)
@@ -245,6 +253,18 @@ export default function Library() {
             </span>
           </div>
         </div>
+      )}
+
+      {scanErrors.some(e => e.kind === 'ros1_convert_unavailable') && caps?.ros1_convert && (
+        <InstallBanner
+          capability={caps.ros1_convert}
+          title={`${scanErrors.filter(e => e.kind === 'ros1_convert_unavailable').length} ROS 1 .bag file(s) skipped — install the mcap CLI to convert them.`}
+          helperText={
+            <>The scan finished but couldn't process the .bag files because the
+              <code> mcap</code> command-line tool isn't on PATH. After installing,
+              run the scan again.</>
+          }
+        />
       )}
 
       {loading ? (

@@ -53,6 +53,13 @@ class PlaybackEngine:
         self._current_timestamp_ns: int = self._metadata.start_time_ns
         self._task: asyncio.Task | None = None
         self._stop_requested = False
+        # Timing reference for the playback loop. Exposed as instance
+        # attributes so pause→resume can re-zero them; otherwise the
+        # wall clock advances during pause but bag time doesn't, and
+        # resume races through every queued message at max speed
+        # trying to "catch up."
+        self._wall_start: float = 0.0
+        self._bag_start_ns: int = self._current_timestamp_ns
 
     @property
     def metadata(self) -> BagMetadata:
@@ -98,6 +105,11 @@ class PlaybackEngine:
     async def play(self) -> None:
         """Start or resume playback."""
         if self._state == PlaybackState.PAUSED:
+            # Re-zero the timing reference so the loop's sleep_time
+            # calc doesn't count paused wall-time as elapsed. Set BEFORE
+            # the event so the loop never observes stale values.
+            self._wall_start = time.monotonic()
+            self._bag_start_ns = self._current_timestamp_ns
             self._pause_event.set()
             self._state = PlaybackState.PLAYING
             logger.info("Resumed playback at %.1fx", self._speed)
@@ -154,8 +166,8 @@ class PlaybackEngine:
     async def _playback_loop(self) -> None:
         """Core playback loop: iterate messages with timing control."""
         while not self._stop_requested:
-            wall_start = time.monotonic()
-            bag_start_ns = self._current_timestamp_ns
+            self._wall_start = time.monotonic()
+            self._bag_start_ns = self._current_timestamp_ns
 
             # Create a fresh parser for each loop iteration (to support seek)
             parser = MCAPParser(self._bag_path)
@@ -173,10 +185,11 @@ class PlaybackEngine:
                 if self._stop_requested:
                     return
 
-                # Compute how long to sleep
-                bag_elapsed_ns = msg.timestamp_ns - bag_start_ns
+                # Read instance attrs so pause→resume's re-zeroed clock
+                # takes effect on the very next message.
+                bag_elapsed_ns = msg.timestamp_ns - self._bag_start_ns
                 target_wall_elapsed = bag_elapsed_ns / (self._speed * 1e9)
-                actual_wall_elapsed = time.monotonic() - wall_start
+                actual_wall_elapsed = time.monotonic() - self._wall_start
                 sleep_time = target_wall_elapsed - actual_wall_elapsed
 
                 if sleep_time > 0.001:  # Only sleep if > 1ms

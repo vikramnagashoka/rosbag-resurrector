@@ -13,17 +13,30 @@ export class ApiError extends Error {
   readonly status: number
   readonly detail: unknown
   constructor(status: number, detail: unknown, fallback: string) {
-    const message =
-      typeof detail === 'object' && detail !== null && 'detail' in (detail as any)
-        ? String((detail as any).detail)
-        : typeof detail === 'string'
-        ? detail
-        : fallback
-    super(message)
+    super(extractErrorMessage(detail, fallback))
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
   }
+}
+
+// Pulls a human-readable message out of whatever the server returned.
+// FastAPI default: {detail: "string"}. Our structured 4xx/5xx: {detail: {kind, message, ...}}.
+// Bridge subprocess: {error: "string"}. Plain strings just return themselves.
+// Anything else falls back to JSON.stringify so users never see "[object Object]".
+function extractErrorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object') {
+    const d: any = detail
+    if (typeof d.detail === 'string') return d.detail
+    if (d.detail && typeof d.detail === 'object' && typeof d.detail.message === 'string') {
+      return d.detail.message
+    }
+    if (typeof d.error === 'string') return d.error
+    if (typeof d.message === 'string') return d.message
+    try { return JSON.stringify(detail) } catch { /* fall through */ }
+  }
+  return fallback
 }
 
 async function request<T>(
@@ -219,6 +232,37 @@ export interface FrameIndexStatus {
   topics_indexed: string[]
 }
 
+export interface SearchIndexBagEntry {
+  bag_id: number
+  name: string
+  path: string
+  image_topics: string[]
+  frame_count: number
+}
+
+export interface SearchIndexStatus {
+  vision_available: boolean
+  install_command: string
+  indexed_bags: SearchIndexBagEntry[]
+  unindexed_bags: SearchIndexBagEntry[]
+}
+
+export interface ScanError {
+  file: string
+  error: string
+  kind: 'ros1_convert_unavailable' | 'ros2_convert_unavailable' | 'unknown'
+}
+
+export interface Capability {
+  name: string
+  available: boolean
+  install_command: string
+  description: string
+}
+
+export type CapabilityName = 'vision' | 'bridge_live' | 'ros1_convert' | 'all_exports'
+export type CapabilityMap = Record<CapabilityName, Capability>
+
 // ---------- Endpoints ----------
 
 export const api = {
@@ -318,9 +362,9 @@ export const api = {
   },
 
   // Scan
-  triggerScan: (path: string) => request<{ scanned: number; indexed: number; errors: unknown[] }>(
-    'POST', `/api/scan`, { query: { path } },
-  ),
+  triggerScan: (path: string) => request<{
+    scanned: number; indexed: number; errors: ScanError[]
+  }>('POST', `/api/scan`, { query: { path } }),
 
   // Search
   searchFrames: (
@@ -339,6 +383,10 @@ export const api = {
     }),
   getFrameIndexStatus: (bagId: number) =>
     request<FrameIndexStatus>('GET', `/api/bags/${bagId}/frame-index-status`),
+  getSearchIndexStatus: () =>
+    request<SearchIndexStatus>('GET', `/api/search/index-status`),
+  getCapabilities: () =>
+    request<CapabilityMap>('GET', `/api/system/capabilities`),
 
   // Annotations
   listAnnotations: (bagId: number, topic?: string) =>
