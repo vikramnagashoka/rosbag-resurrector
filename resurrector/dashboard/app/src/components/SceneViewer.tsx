@@ -109,14 +109,17 @@ function FrameTriad({
       </mesh>
       <Html position={[origin.x, origin.y + 0.05, origin.z]} center>
         <div style={{
-          color: '#e1e4e8',
+          color: '#67e8f9',
           fontSize: 11,
+          fontWeight: 600,
           fontFamily: 'monospace',
-          background: 'rgba(13,17,23,0.7)',
-          padding: '1px 4px',
-          borderRadius: 2,
+          background: 'rgba(0,0,0,0.85)',
+          padding: '2px 6px',
+          borderRadius: 3,
+          border: '1px solid rgba(103,232,249,0.5)',
           whiteSpace: 'nowrap',
           pointerEvents: 'none',
+          textShadow: '0 0 4px rgba(0,0,0,0.9)',
         }}>{name}</div>
       </Html>
     </group>
@@ -349,7 +352,7 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
   const [pointCloud, setPointCloud] = useState<ScenePointCloud | null>(null)
   const [selectedPointCloudTopic, setSelectedPointCloudTopic] = useState<string | null>(null)
   const [timeOffsetSec, setTimeOffsetSec] = useState<number>(bagDurationSec)
-  const [maxPoints, setMaxPoints] = useState<number>(10000)
+  const [maxPoints, setMaxPoints] = useState<number>(5000)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [urdfXml, setUrdfXml] = useState<string | null>(null)
@@ -567,6 +570,18 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
                 <option key={t} value={t}>{t}</option>
               ))}
             </select>
+            {selectedPointCloudTopic && (
+              <button
+                type="button"
+                onClick={() => setSelectedPointCloudTopic(null)}
+                title="Hide point cloud"
+                style={{
+                  padding: '2px 7px', background: '#21262d', color: '#e1e4e8',
+                  border: '1px solid #30363d', borderRadius: 3, cursor: 'pointer',
+                  fontSize: 11, fontFamily: 'monospace',
+                }}
+              >Hide</button>
+            )}
           </label>
         )}
         {topics.images.length > 0 && (
@@ -584,6 +599,18 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
                 <option key={t} value={t}>{t}</option>
               ))}
             </select>
+            {selectedCameraTopic && (
+              <button
+                type="button"
+                onClick={() => setSelectedCameraTopic(null)}
+                title="Hide camera overlay"
+                style={{
+                  padding: '2px 7px', background: '#21262d', color: '#e1e4e8',
+                  border: '1px solid #30363d', borderRadius: 3, cursor: 'pointer',
+                  fontSize: 11, fontFamily: 'monospace',
+                }}
+              >Hide</button>
+            )}
           </label>
         )}
         {topics.markers.length > 0 && (
@@ -601,6 +628,18 @@ export default function SceneViewer({ bagId, bagDurationSec, bagStartNs }: Props
                 <option key={t} value={t}>{t}</option>
               ))}
             </select>
+            {selectedMarkerTopic && (
+              <button
+                type="button"
+                onClick={() => setSelectedMarkerTopic(null)}
+                title="Hide markers"
+                style={{
+                  padding: '2px 7px', background: '#21262d', color: '#e1e4e8',
+                  border: '1px solid #30363d', borderRadius: 3, cursor: 'pointer',
+                  fontSize: 11, fontFamily: 'monospace',
+                }}
+              >Hide</button>
+            )}
             {markers && markers.n_markers > 0 && (
               <span style={{ color: '#8b949e', fontSize: 11 }}>
                 {markers.n_markers} marker{markers.n_markers === 1 ? '' : 's'}

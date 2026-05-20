@@ -105,3 +105,13 @@ assets/*
 !assets/demo.gif
 test_log.txt
 trimmed.mcap
+
+# Playwright e2e artifacts — traces, screenshots on failure, run reports
+resurrector/dashboard/app/test-results/
+resurrector/dashboard/app/playwright-report/
+resurrector/dashboard/app/blob-report/
+resurrector/dashboard/app/.playwright-cache/
+
+# Local /qa skill output — analysis artifacts, screenshots, baselines.
+# Like marketing/, this stays out of the public repo.
+qa-reports/

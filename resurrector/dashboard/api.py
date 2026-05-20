@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -9,11 +10,14 @@ from typing import Any
 import asyncio
 import json
 
+logger = logging.getLogger("resurrector.dashboard.api")
+
 import polars as pl
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
 app = FastAPI(
@@ -135,6 +139,22 @@ async def get_system_paths() -> dict[str, Any]:
     guessing with ``~/...`` strings the browser can't expand.
     """
     return _resolved_export_paths()
+
+
+@app.get("/api/system/capabilities")
+async def get_system_capabilities() -> dict[str, Any]:
+    """Report the runtime state of every optional capability.
+
+    The dashboard's Search / Bridge / Library / Export surfaces each
+    pre-check the relevant capability on mount and render an install
+    banner (with copy-to-clipboard command) when one is missing,
+    instead of leaving the user to discover the gap by hitting a 500.
+
+    Response shape: ``{<name>: {available: bool, install_command, description, name}}``.
+    See ``resurrector.core.capabilities`` for the source of truth.
+    """
+    from resurrector.core.capabilities import get_capabilities
+    return {name: c.to_dict() for name, c in get_capabilities().items()}
 
 
 @app.post("/api/system/generate-demo-bag")
@@ -638,6 +658,24 @@ async def trigger_scan(
     return await _scan_blocking(scan_path_obj)
 
 
+def _classify_scan_error(file_path: Path, exc: Exception) -> dict[str, Any]:
+    """Tag scan errors with a ``kind`` so the frontend can route the right
+    install banner. Returns the error dict the scan endpoint surfaces.
+
+    Recognized kinds: ``ros1_convert_unavailable`` (.bag file but the
+    ``mcap`` CLI is missing), ``ros2_convert_unavailable`` (.db3 / dir
+    bag but no ROS 2 install on PATH), ``unknown`` (everything else).
+    """
+    msg = str(exc)
+    suffix = file_path.suffix.lower()
+    kind = "unknown"
+    if suffix == ".bag" and ("mcap" in msg or "convert" in msg.lower()):
+        kind = "ros1_convert_unavailable"
+    elif (suffix == ".db3" or file_path.is_dir()) and "ros2" in msg.lower():
+        kind = "ros2_convert_unavailable"
+    return {"file": str(file_path), "error": msg, "kind": kind}
+
+
 async def _scan_blocking(scan_path_obj: Path) -> dict[str, Any]:
     """Blocking scan (original behavior)."""
     from resurrector.ingest.scanner import scan_path
@@ -661,7 +699,7 @@ async def _scan_blocking(scan_path_obj: Path) -> dict[str, Any]:
                 index.update_health_score(bag_id, report.score)
                 indexed += 1
             except Exception as e:
-                errors.append({"file": str(scanned.path), "error": str(e)})
+                errors.append(_classify_scan_error(scanned.path, e))
     finally:
         index.close()
 
@@ -700,8 +738,9 @@ async def _scan_stream(scan_path_obj: Path):
 
                 yield f"data: {json.dumps({'event': 'indexed', 'file': scanned.path.name, 'health': report.score, 'progress': i + 1, 'total': total})}\n\n"
             except Exception as e:
-                errors.append({"file": str(scanned.path), "error": str(e)})
-                yield f"data: {json.dumps({'event': 'error', 'file': scanned.path.name, 'error': str(e), 'progress': i + 1, 'total': total})}\n\n"
+                err = _classify_scan_error(scanned.path, e)
+                errors.append(err)
+                yield f"data: {json.dumps({'event': 'error', 'file': scanned.path.name, 'error': err['error'], 'kind': err['kind'], 'progress': i + 1, 'total': total})}\n\n"
 
             # Yield control to event loop so SSE messages flush
             await asyncio.sleep(0)
@@ -858,15 +897,53 @@ async def search_frames_api(
     """
     index = _get_index()
     try:
-        from resurrector.core.vision import FrameSearchEngine
+        try:
+            from resurrector.core.vision import FrameSearchEngine
+        except ImportError as e:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "kind": "vision_not_installed",
+                    "message": str(e),
+                    "install_command": "pip install rosbag-resurrector[vision]",
+                },
+            )
 
         engine = FrameSearchEngine(index)
 
-        if clips:
-            results = engine.search_temporal(
-                q, clip_duration_sec=clip_duration,
-                top_k=top_k, bag_id=bag_id, min_similarity=min_similarity,
+        # If no bag has indexed frames yet, return early with a clear hint
+        # so the frontend can render an actionable empty state (which bags
+        # need indexing) instead of an opaque "no results" message.
+        if index.count_frame_embeddings() == 0:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "kind": "no_indexed_frames",
+                    "message": "No bags have CLIP frame embeddings yet. Index a bag with `resurrector index-frames <bag-path>`.",
+                },
             )
+
+        try:
+            if clips:
+                results = engine.search_temporal(
+                    q, clip_duration_sec=clip_duration,
+                    top_k=top_k, bag_id=bag_id, min_similarity=min_similarity,
+                )
+            else:
+                results = engine.search(
+                    q, top_k=top_k, bag_id=bag_id, min_similarity=min_similarity,
+                )
+        except ImportError as e:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "kind": "vision_not_installed",
+                    "message": str(e),
+                    "install_command": "pip install rosbag-resurrector[vision]",
+                },
+            )
+
+        if clips:
             return {
                 "query": q,
                 "mode": "clips",
@@ -885,26 +962,89 @@ async def search_frames_api(
                     for r in results
                 ],
             }
-        else:
-            results = engine.search(
-                q, top_k=top_k, bag_id=bag_id, min_similarity=min_similarity,
-            )
-            return {
-                "query": q,
-                "mode": "frames",
-                "results": [
-                    {
-                        "bag_id": r.bag_id,
-                        "bag_path": r.bag_path,
-                        "topic": r.topic,
-                        "timestamp_sec": round(r.timestamp_sec, 2),
-                        "frame_index": r.frame_index,
-                        "similarity": round(r.similarity, 4),
-                        "thumbnail_url": f"/api/bags/{r.bag_id}/topics/{r.topic.lstrip('/')}/frame/{r.frame_index}?width=320",
-                    }
-                    for r in results
-                ],
+        return {
+            "query": q,
+            "mode": "frames",
+            "results": [
+                {
+                    "bag_id": r.bag_id,
+                    "bag_path": r.bag_path,
+                    "topic": r.topic,
+                    "timestamp_sec": round(r.timestamp_sec, 2),
+                    "frame_index": r.frame_index,
+                    "similarity": round(r.similarity, 4),
+                    "thumbnail_url": f"/api/bags/{r.bag_id}/topics/{r.topic.lstrip('/')}/frame/{r.frame_index}?width=320",
+                }
+                for r in results
+            ],
+        }
+    finally:
+        index.close()
+
+
+@app.get("/api/search/index-status")
+async def get_search_index_status() -> dict[str, Any]:
+    """Cross-bag summary used by the Search page to render a useful empty
+    state: shows which bags already have CLIP embeddings vs which have
+    image topics but no embeddings yet (the "ready to index" set).
+
+    Also reports whether the optional vision deps are importable so the
+    UI can suggest the right install command up front.
+    """
+    try:
+        from resurrector.core.vision import CLIPEmbedder  # noqa: F401
+        try:
+            import sentence_transformers  # noqa: F401
+            vision_available = True
+        except ImportError:
+            try:
+                import openai  # noqa: F401
+                vision_available = True
+            except ImportError:
+                vision_available = False
+    except ImportError:
+        vision_available = False
+
+    index = _get_index()
+    try:
+        IMAGE_TYPES = ("sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage")
+
+        # Pull every bag with its topics; classify by whether it has frame
+        # embeddings already vs has image topics that could be indexed.
+        rows = index.conn.execute(
+            "SELECT id, path FROM bags ORDER BY path"
+        ).fetchall()
+
+        indexed: list[dict[str, Any]] = []
+        unindexed: list[dict[str, Any]] = []
+
+        for bag_id, path in rows:
+            embed_count = index.count_frame_embeddings(bag_id)
+            image_topics = [
+                t["name"] for t in index._get_topics(bag_id)
+                if t["message_type"] in IMAGE_TYPES
+            ]
+
+            entry = {
+                "bag_id": bag_id,
+                "name": Path(path).name,
+                "path": path,
+                "image_topics": image_topics,
+                "frame_count": embed_count,
             }
+
+            if embed_count > 0:
+                indexed.append(entry)
+            elif image_topics:
+                unindexed.append(entry)
+            # Bags with no image topics aren't surfaced — nothing to index.
+
+        return {
+            "vision_available": vision_available,
+            "install_command": "pip install rosbag-resurrector[vision]",
+            "indexed_bags": indexed,
+            "unindexed_bags": unindexed,
+        }
     finally:
         index.close()
 
@@ -1251,6 +1391,27 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
     if mode not in {"playback", "live"}:
         raise HTTPException(400, "mode must be 'playback' or 'live'")
 
+    # Live mode needs rclpy; fail fast with a structured detail the
+    # frontend can render as an install banner instead of letting the
+    # subprocess die silently after spawn.
+    if mode == "live":
+        from resurrector.core.capabilities import get_capabilities
+        cap = get_capabilities()["bridge_live"]
+        if not cap.available:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "kind": "capability_unavailable",
+                    "capability": "bridge_live",
+                    "install_command": cap.install_command,
+                    "description": cap.description,
+                    "message": (
+                        "Live mode requires rclpy (ROS 2 Python client). "
+                        "Install ROS 2 first."
+                    ),
+                },
+            )
+
     port = int(payload.get("port", _BRIDGE_DEFAULT_PORT))
 
     state = _get_bridge_state()
@@ -1378,7 +1539,7 @@ async def bridge_status_api() -> dict[str, Any]:
     "/api/bridge/proxy/{rest_path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
 )
-async def bridge_proxy(rest_path: str, request: Any) -> Any:
+async def bridge_proxy(rest_path: str, request: Request) -> Any:
     """Forward requests to the running bridge's REST API.
 
     Frontend calls `POST /api/bridge/proxy/api/playback/play` and we
@@ -1407,6 +1568,15 @@ async def bridge_proxy(rest_path: str, request: Any) -> Any:
             )
         except httpx.ConnectError as e:
             raise HTTPException(502, f"Cannot reach bridge at {url}: {e}")
+
+    # Log non-2xx so we can diagnose proxied failures without having to
+    # sniff WebSocket frames. The bridge subprocess otherwise hides
+    # behind the proxy.
+    if not (200 <= resp.status_code < 300):
+        logger.warning(
+            "bridge proxy %s %s -> %s body=%s",
+            method, url, resp.status_code, resp.content[:300],
+        )
 
     return Response(
         content=resp.content,

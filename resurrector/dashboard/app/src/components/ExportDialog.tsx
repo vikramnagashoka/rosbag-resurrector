@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { api, ExportPreset } from '../api'
+import { InstallBanner, useCapability } from './InstallBanner'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
 interface Props {
@@ -35,6 +36,7 @@ function applyTopicFilterClientSide(
 
 export default function ExportDialog({ bagId, availableTopics, onClose }: Props) {
   const [presets, setPresets] = useState<ExportPreset[]>([])
+  const allExportsCap = useCapability('all_exports')
   const [selectedPreset, setSelectedPreset] = useState<string>('')   // '' = manual
   const [selectedTopics, setSelectedTopics] = useState<string[]>(availableTopics)
   const [format, setFormat] = useState('parquet')
@@ -139,6 +141,17 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
     <div style={overlayStyle} onClick={onClose}>
       <div style={dialogStyle} onClick={e => e.stopPropagation()}>
         <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>Export Data</h2>
+
+        {allExportsCap && !allExportsCap.available && presets.some(p => !p.available) && (
+          <InstallBanner
+            capability={allExportsCap}
+            title={`${presets.filter(p => !p.available).length} preset(s) unavailable — Zarr / RLDS extras not installed.`}
+            helperText={
+              <>Parquet, HDF5, and CSV exports work without this. Install if you need
+                Zarr or LeRobot/RLDS dataset output.</>
+            }
+          />
+        )}
 
         {/* Preset dropdown — appears only if presets loaded successfully */}
         {presets.length > 0 && (

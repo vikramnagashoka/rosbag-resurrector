@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api, BridgeStatus } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
+import { InstallBanner, useCapability } from '../components/InstallBanner'
 
 // Polled every 3s when we have a bridge running so the UI notices
 // unexpected subprocess death (E2 in the plan review).
@@ -14,6 +15,7 @@ export default function Bridge() {
   const [speed, setSpeed] = useState(1.0)
   const [port, setPort] = useState(9090)
   const [starting, setStarting] = useState(false)
+  const liveCap = useCapability('bridge_live')
   const toast = useErrorToast()
   const prevRunning = useRef(false)
 
@@ -141,24 +143,40 @@ export default function Bridge() {
         <div style={panelStyle}>
           <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Start bridge</h3>
           <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-            {(['playback', 'live'] as const).map(m => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                style={{
-                  background: mode === m ? '#1f6feb22' : '#21262d',
-                  border: mode === m ? '1px solid #1f6feb' : '1px solid #30363d',
-                  borderRadius: 6,
-                  padding: '6px 14px',
-                  color: '#e1e4e8',
-                  cursor: 'pointer',
-                  fontSize: 13,
-                }}
-              >
-                {m}
-              </button>
-            ))}
+            {(['playback', 'live'] as const).map(m => {
+              const liveBlocked = m === 'live' && liveCap !== null && !liveCap.available
+              return (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  disabled={false}
+                  title={liveBlocked ? 'Live mode needs rclpy (ROS 2)' : undefined}
+                  style={{
+                    background: mode === m ? '#1f6feb22' : '#21262d',
+                    border: mode === m ? '1px solid #1f6feb' : '1px solid #30363d',
+                    borderRadius: 6,
+                    padding: '6px 14px',
+                    color: liveBlocked ? '#6e7681' : '#e1e4e8',
+                    cursor: 'pointer',
+                    fontSize: 13,
+                  }}
+                >
+                  {m}
+                </button>
+              )
+            })}
           </div>
+
+          {mode === 'live' && liveCap && !liveCap.available && (
+            <InstallBanner
+              capability={liveCap}
+              title="Bridge live mode needs rclpy (ROS 2)."
+              helperText={
+                <>Install ROS 2 to subscribe to running topics. Playback mode works
+                  without it — just hand it an existing recording.</>
+              }
+            />
+          )}
 
           {mode === 'playback' ? (
             <>
@@ -242,21 +260,28 @@ export default function Bridge() {
           </label>
 
           <div style={{ marginTop: 8 }}>
-            <button
-              onClick={startBridge}
-              disabled={starting}
-              style={{
-                background: starting ? '#21262d' : '#238636',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 6,
-                padding: '8px 20px',
-                cursor: starting ? 'not-allowed' : 'pointer',
-                fontWeight: 600,
-              }}
-            >
-              {starting ? 'Starting…' : 'Start bridge'}
-            </button>
+            {(() => {
+              const startBlocked = mode === 'live' && liveCap !== null && !liveCap.available
+              const disabled = starting || startBlocked
+              return (
+                <button
+                  onClick={startBridge}
+                  disabled={disabled}
+                  title={startBlocked ? 'Install ROS 2 (rclpy) to use live mode' : undefined}
+                  style={{
+                    background: disabled ? '#21262d' : '#238636',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 6,
+                    padding: '8px 20px',
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    fontWeight: 600,
+                  }}
+                >
+                  {starting ? 'Starting…' : 'Start bridge'}
+                </button>
+              )
+            })()}
           </div>
         </div>
       ) : (

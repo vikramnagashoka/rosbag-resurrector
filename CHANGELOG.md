@@ -8,6 +8,45 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-19
+
+### What's new
+
+A bug-fix and UX-polish release built around one new system endpoint: every optional capability (`vision`, `bridge_live`, `ros1_convert`, `all_exports`) now flows through `GET /api/system/capabilities`, and the dashboard renders a uniform install banner with a copy-to-clipboard command whenever a surface needs an extra that isn't installed. Plus three real bug fixes — playback resume burst, "[object Object]" toast, opaque Search 500 — and the first end-to-end test harness so this class of regression can't slip past again.
+
+### Bug fixes
+
+- **Bridge `play` no longer shows `play: [object Object]`** — root cause was `request: Any` in `bridge_proxy` ([resurrector/dashboard/api.py](resurrector/dashboard/api.py)), which made FastAPI treat the parameter as a query string and return 422 with an array-shaped detail body. Hardened the TypeScript `ApiError` extraction to walk known error shapes (`detail.detail`, `detail.message`, `error`, `message`) and JSON-stringify as a last resort, so users never see `[object Object]` regardless of what the backend returns.
+- **Playback engine no longer rushes through messages after resume** — `wall_start` was set once at task creation and kept ticking during pause, so resume saw the engine as "behind" and emitted every remaining message in milliseconds. Moved `wall_start` / `bag_start_ns` to instance attributes and re-zeroed on pause→play transition. Verified by a new regression test: 0.6 s pause used to advance bag time by ~0.75 s in 0.15 s of post-resume wall time; now stays in proportion.
+- **Search page no longer shows opaque 500 when vision extras missing** — `/api/search/frames` now returns structured 503 (`detail.kind=vision_not_installed`) and 409 (`detail.kind=no_indexed_frames`). The page pre-flights `/api/search/index-status` on mount and renders a guided empty state listing each unindexed bag with a copy-paste `resurrector index-frames` command per bag.
+- **Bridge proxy logs non-2xx responses** so future subprocess failures don't hide behind the proxy boundary.
+- **Scene viewer label contrast** — frame names now render bright cyan on an opaque dark pill with a text-shadow, readable on both the dark scene and the cream-colored point cloud.
+
+### Capability detection + install banners
+
+- **`GET /api/system/capabilities`** — single endpoint reporting `{vision, bridge_live, ros1_convert, all_exports}` with `available`, `install_command`, and `description` for each. Source of truth: [resurrector/core/capabilities.py](resurrector/core/capabilities.py).
+- **`<InstallBanner>` shared component** — uniform amber banner with a `<CopyBlock>` and "restart `resurrector dashboard` after installing" footer. Used by the four UI surfaces below.
+- **Bridge live-mode pre-check** — clicking "live" without rclpy installed now shows the install banner inline and disables the Start button. Backend `POST /api/bridge/start` returns 503 with `detail.kind=capability_unavailable` if a stale frontend tries to start live without the capability.
+- **Library scan classifies ROS 1 errors** — scan results now carry a `kind` per error; `.bag` files that fail because the `mcap` CLI is missing surface as a banner with `brew install mcap` and the GitHub releases URL.
+- **Export dialog banner** — when any export preset requires `all-exports` and it's not installed, the dialog shows the banner above the preset dropdown (the dropdown already disabled unavailable presets; the banner makes the reason discoverable).
+
+### Scene tab UX
+
+- **One-click "Hide" buttons** next to the Cloud / Camera / Markers dropdowns. Replaces having to drop the dropdown to "(none)" to clear a layer.
+- **Default `Max points` lowered from 10k to 5k** so the cloud doesn't bury the TF axes on first load.
+
+### End-to-end + visual validation framework
+
+- **Playwright + headless Chromium installed** in [resurrector/dashboard/app/](resurrector/dashboard/app/) with [playwright.config.ts](resurrector/dashboard/app/playwright.config.ts) booting a hermetic dashboard on port 8967 against a temp index pre-loaded with the scene-demo bag. New commands: `bun --bun run e2e`, `bun --bun run e2e:ui`, `bun --bun run e2e:update-snapshots`.
+- **Four smoke tests** in [e2e/smoke.spec.ts](resurrector/dashboard/app/e2e/smoke.spec.ts) — Search install banner, Bridge live install banner, Bridge playback play (the regression test that catches `[object Object]`), Library bag list. Each test annotated with the bug it would have caught.
+- **Documented as mandatory** for dashboard feature work in [CLAUDE.md](CLAUDE.md) Quick start.
+
+### Test counts
+
+- Backend: **717 passed** (was 709 in v0.6.0; +7 capability tests +1 pause-resume regression).
+- Frontend unit: **48 passed** (was 42; +6 `ApiError` extraction cases).
+- E2E: **4 passed** (was 0).
+
 ## [0.6.0] — 2026-05-09
 
 ### What's new
