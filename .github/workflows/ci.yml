@@ -202,3 +202,84 @@ jobs:
         # Lightweight syntax-error catcher. Ruff/mypy are too noisy on
         # the existing codebase — adding them is a v0.5+ task.
         run: python -m compileall resurrector tests
+
+  e2e:
+    # Playwright-driven browser tests against a hermetic dashboard.
+    # Runs only the behavioural specs (smoke + interactions) — visual
+    # snapshots are macOS-Chromium baselines and would fail on Linux
+    # CI without per-platform baselines committed first. Visual specs
+    # stay local-only until that follow-up lands.
+    #
+    # The dashboard's `bun --bun` runtime workaround is local-only too
+    # (a macOS node/llhttp issue); CI uses plain Node since llhttp is
+    # consistent on Ubuntu runners.
+    name: E2E (Playwright, behavioural)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + dev extras
+        # The `resurrector` CLI must be on PATH and `python` next to it
+        # must import mcap/numpy/etc. — the e2e launcher's PATH-discovery
+        # falls back to the venv's python alongside `resurrector`.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: resurrector/dashboard/app/package-lock.json
+
+      - name: Install frontend deps + build
+        # The e2e suite serves the built static bundle out of the
+        # dashboard, so build must run before Playwright launches.
+        working-directory: resurrector/dashboard/app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-v1
+
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: resurrector/dashboard/app
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system deps (cached browser)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: resurrector/dashboard/app
+        run: npx playwright install-deps chromium
+
+      - name: Run behavioural e2e suite
+        working-directory: resurrector/dashboard/app
+        run: npm run e2e:behavioural
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: resurrector/dashboard/app/playwright-report/
+          retention-days: 14
+
+      - name: Upload trace + screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: resurrector/dashboard/app/test-results/
+          retention-days: 14
