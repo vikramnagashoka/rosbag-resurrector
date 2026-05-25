@@ -8,6 +8,28 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-05-24
+
+### What's new
+
+Test-infrastructure release: the Playwright behavioural suite added in v0.6.1 now runs as a required gate on **every PR + push** via a new `e2e` job in [.github/workflows/ci.yml](.github/workflows/ci.yml). Two new specs (`interactions.spec.ts` + `visual.spec.ts`) extend coverage beyond the original four smoke tests; the visual snapshots stay local-only for now (macOS baselines; Linux baselines are a follow-up).
+
+### Test infrastructure
+
+- **New CI job: E2E (Playwright, behavioural)** — boots a hermetic dashboard on port 8967, generates the synth scene-demo bag, pre-indexes it, runs `e2e:behavioural` (smoke + interactions). Caches the Chromium download (~92 MB) keyed by `playwright-chromium-Linux-v1`. Uploads the Playwright report + traces + screenshots as artifacts on failure, 14-day retention.
+- **New spec: `e2e/interactions.spec.ts`** — Library → Explorer navigation (catches SPA-fallback regressions), Scene-tab Hide button (the v0.6.1 affordance), Max points dropdown wiring, Library scan resilience.
+- **New spec: `e2e/visual.spec.ts`** — 5 screenshot baselines for Help, Library, NavBar, Search install banner, Bridge live banner. macOS-Chromium only; stays out of CI until Linux baselines land.
+- **Split npm scripts:** `e2e:behavioural` (CI subset), `e2e:visual` (local snapshot tests), `e2e` (everything), `e2e:update-snapshots` (refresh baselines after intentional UI changes).
+- **Moved `make_scene_demo_bag.py`** from gitignored `marketing/build-notes/` into `tests/fixtures/` so it ships in the checkout that CI sees. Accepts an output-path arg so the e2e launcher can write directly into a temp dir instead of polluting `~/rosbag-demo/`.
+- **`run-dashboard.sh` is now portable** — discovers `resurrector` via PATH first (CI's `pip install -e .` puts it there), with the local `/tmp/v060-build` dev venv as fallback. Uses the python adjacent to the resurrector binary so the right environment's deps resolve.
+
+### Test counts
+
+- Backend: **717 passed** (unchanged from v0.6.1)
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **13 passed, 1 intentionally skipped** (was 4 in v0.6.1; +5 visual, +4 interaction)
+- CI: 27 checks per PR (was 26 — `e2e` job added)
+
 ## [0.6.1] — 2026-05-19
 
 ### What's new
