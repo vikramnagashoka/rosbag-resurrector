@@ -273,6 +273,10 @@ def qc(
         help="Exit non-zero if the report contains any 'error'-severity "
              "issues. Useful for CI pipelines. e.g. --fail-on-error",
     )] = False,
+    anomalies: Annotated[bool, typer.Option("--anomalies",
+        help="Also run relative cross-bag outlier detection and rank the "
+             "fleet 'most suspicious first'. Needs >=3 bags. e.g. --anomalies",
+    )] = False,
 ):
     """Bag-side data-quality checks for a single bag or a fleet of bags.
 
@@ -302,7 +306,7 @@ def qc(
     from resurrector.core.qc import run_qc
     from rich.table import Table
 
-    report = run_qc(paths)
+    report = run_qc(paths, detect_anomalies=anomalies)
 
     if json_output:
         json_output.write_text(report.to_json())
@@ -336,6 +340,25 @@ def qc(
                     str(len(b.issues)),
                 )
             console.print(table)
+
+        # Anomaly ranking (only populated with --anomalies)
+        if report.anomaly_ranking:
+            from rich.markup import escape as rich_escape
+            console.print("\n[bold]Most suspicious bags[/bold] [dim](relative outliers)[/dim]")
+            ranked = [r for r in report.anomaly_ranking if r["score"] > 0]
+            if not ranked:
+                console.print("  [green]No relative outliers — the fleet looks consistent.[/green]")
+            for r in ranked[:10]:
+                console.print(
+                    f"  [yellow]{r['score']}×[/yellow] {rich_escape(r['name'])} "
+                    f"[dim]{rich_escape('; '.join(r['reasons'][:3]))}"
+                    f"{'...' if len(r['reasons']) > 3 else ''}[/dim]"
+                )
+        elif anomalies:
+            console.print(
+                "\n[dim]Anomaly detection needs >=3 readable bags; "
+                "skipped.[/dim]"
+            )
 
         # Fleet issues
         from rich.markup import escape as rich_escape
@@ -598,6 +621,215 @@ def export(
 
 
 @app.command()
+def publish(
+    dataset_dir: Annotated[Path, typer.Argument(
+        help="A materialized dataset directory (from `resurrector export` or "
+             "`dataset export`). e.g. ./datasets/pick-place/1.0",
+    )],
+    repo_id: Annotated[str, typer.Option("--repo-id",
+        help="Target HuggingFace dataset repo, `owner/name`. "
+             "e.g. --repo-id myorg/pick-place-v1",
+    )],
+    private: Annotated[bool, typer.Option("--private",
+        help="Create the HF repo as private. e.g. --private",
+    )] = False,
+    license_id: Annotated[str, typer.Option("--license",
+        help="SPDX license id for the dataset card. e.g. --license mit",
+    )] = "apache-2.0",
+    qc: Annotated[bool, typer.Option("--qc/--no-qc",
+        help="Run bag-side QC on the source bags first and embed a quality "
+             "grade in the dataset card. On by default when source bags are "
+             "resolvable. e.g. --no-qc to skip",
+    )] = True,
+    dry_run: Annotated[bool, typer.Option("--dry-run",
+        help="Build + write the dataset card locally but skip the upload. "
+             "Lets you preview README.md before publishing. e.g. --dry-run",
+    )] = False,
+    token: Annotated[Optional[str], typer.Option("--token",
+        help="HuggingFace token. Falls back to a cached login or HF_TOKEN. "
+             "e.g. --token hf_xxx",
+    )] = None,
+):
+    """Publish a dataset directory to the HuggingFace Hub with an auto card.
+
+    Builds a HuggingFace dataset card (README with YAML frontmatter) from the
+    directory's manifest + config, optionally embeds a `resurrector qc`
+    quality grade, writes it into the directory, and uploads the folder.
+
+    The published page documents the sensor inventory, topic list, and data
+    quality so consumers can judge the dataset before training — and credits
+    rosbag-resurrector.
+
+    Needs the publish extra:  `pip install rosbag-resurrector[publish]`
+
+    Examples:
+      Preview the card without uploading:
+          resurrector publish ./datasets/pick-place/1.0 --repo-id me/pick-place --dry-run
+
+      Publish for real:
+          resurrector publish ./datasets/pick-place/1.0 --repo-id me/pick-place
+    """
+    from resurrector.core.publish import publish_dataset
+
+    if not dataset_dir.is_dir():
+        console.print(f"[red]Not a directory: {dataset_dir}[/red]")
+        raise typer.Exit(1)
+
+    # Optional QC pass over the source bags, if the config records them.
+    qc_summary = None
+    if qc:
+        import json as _json
+        cfg_path = dataset_dir / "dataset_config.json"
+        bag_paths = []
+        if cfg_path.exists():
+            try:
+                cfg = _json.loads(cfg_path.read_text())
+                # bag_refs may be plain path strings (resurrector export) or
+                # {path: ...} dicts (dataset export) — handle both.
+                raw_refs = cfg.get("bag_refs") or []
+                candidates = [
+                    r["path"] if isinstance(r, dict) else r
+                    for r in raw_refs
+                ]
+                bag_paths = [c for c in candidates if c and Path(c).exists()]
+            except Exception:
+                bag_paths = []
+        if bag_paths:
+            from resurrector.core.qc import run_qc
+            report = run_qc(bag_paths)
+            qc_summary = report.to_dict()
+            console.print(
+                f"[dim]QC: {report.n_errors} error(s), "
+                f"{report.n_warnings} warning(s) across {report.n_bags} bag(s)[/dim]"
+            )
+        else:
+            console.print("[dim]QC skipped — no resolvable source bags in config.[/dim]")
+
+    try:
+        result = publish_dataset(
+            dataset_dir, repo_id, token=token, private=private,
+            qc_summary=qc_summary, license=license_id, dry_run=dry_run,
+        )
+    except ImportError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if result.dry_run:
+        console.print(
+            f"[yellow]Dry run[/yellow] — card written to {result.card_path}. "
+            f"{result.n_files} file(s) would upload to {result.url}"
+        )
+    else:
+        console.print(f"[green]Published {result.n_files} file(s) → {result.url}[/green]")
+
+
+@app.command()
+def benchmark(
+    bag: Annotated[Path, typer.Argument(
+        help="Bag to benchmark. e.g. resurrector benchmark run_043.mcap",
+    )],
+    metrics: Annotated[Path, typer.Option("--metrics",
+        help="JSON metric-spec file: a list of {name, direction, tolerance}. "
+             "name is a metric id like 'rate:/imu/data' or 'health_score'; "
+             "direction is lower_is_better|higher_is_better|stable. "
+             "e.g. --metrics metrics.json",
+    )],
+    baseline: Annotated[Optional[Path], typer.Option("--baseline",
+        help="JSON baseline file mapping metric name -> value. Regressions "
+             "are measured against this. e.g. --baseline baseline.json",
+    )] = None,
+    update_baseline: Annotated[bool, typer.Option("--update-baseline",
+        help="Write the current metric values to the --baseline path and exit "
+             "(captures a new baseline). e.g. --update-baseline",
+    )] = False,
+    json_output: Annotated[Optional[Path], typer.Option("--json",
+        help="Write the benchmark report as JSON. e.g. --json bench.json",
+    )] = None,
+    fail_on_regression: Annotated[bool, typer.Option("--fail-on-regression",
+        help="Exit non-zero if any metric regressed past its tolerance. "
+             "The CI gate. e.g. --fail-on-regression",
+    )] = False,
+):
+    """Extract scalar metrics from a bag and gate on regressions vs a baseline.
+
+    CI-for-robots: define metrics (recording rates, health, message counts,
+    numeric column aggregates), commit a baseline, and fail a build when a
+    change makes the robot measurably worse.
+
+    Metric ids: `duration`, `message_count`, `health_score`,
+    `rate:<topic>`, `count:<topic>`, `mean|min|max:<topic>:<column>`.
+
+    Examples:
+      Capture a baseline:
+          resurrector benchmark good.mcap --metrics metrics.json --baseline baseline.json --update-baseline
+
+      Gate a candidate in CI:
+          resurrector benchmark candidate.mcap --metrics metrics.json --baseline baseline.json --fail-on-regression
+    """
+    from resurrector.core.benchmark import (
+        load_specs, run_benchmark, capture_baseline, UnknownMetricError,
+    )
+    from rich.table import Table
+
+    try:
+        specs = load_specs(metrics)
+    except (ValueError, OSError) as e:
+        console.print(f"[red]Bad metrics spec: {e}[/red]")
+        raise typer.Exit(1)
+
+    # Capture-baseline mode: compute current values, write them, exit.
+    if update_baseline:
+        if baseline is None:
+            console.print("[red]--update-baseline requires --baseline <path>[/red]")
+            raise typer.Exit(1)
+        try:
+            values = capture_baseline(bag, specs)
+        except UnknownMetricError as e:
+            console.print(f"[red]Metric error: {e}[/red]")
+            raise typer.Exit(1)
+        baseline.write_text(json.dumps(values, indent=2))
+        console.print(f"[green]Baseline ({len(values)} metrics) written to {baseline}[/green]")
+        return
+
+    baseline_values = None
+    if baseline is not None and baseline.exists():
+        baseline_values = json.loads(baseline.read_text())
+
+    try:
+        report = run_benchmark(bag, specs, baseline_values)
+    except UnknownMetricError as e:
+        console.print(f"[red]Metric error: {e}[/red]")
+        raise typer.Exit(1)
+
+    if json_output:
+        json_output.write_text(report.to_json())
+        console.print(f"[green]Benchmark report saved to {json_output}[/green]")
+    else:
+        table = Table(title=f"Benchmark: {bag.name}")
+        table.add_column("Metric")
+        table.add_column("Current", justify="right")
+        table.add_column("Baseline", justify="right")
+        table.add_column("Δ%", justify="right")
+        table.add_column("Status")
+        for c in report.checks:
+            base_str = "—" if c.baseline is None else f"{c.baseline:.3g}"
+            pct_str = "—" if c.delta_pct is None else f"{c.delta_pct * 100:+.1f}%"
+            status = (
+                "[red]REGRESSED[/red]" if c.regressed
+                else ("[dim]baseline set[/dim]" if c.baseline is None else "[green]ok[/green]")
+            )
+            table.add_row(c.name, f"{c.current:.3g}", base_str, pct_str, status)
+        console.print(table)
+        if report.regressed:
+            console.print(f"\n[red]{report.n_regressions} metric(s) regressed.[/red]")
+        else:
+            console.print("\n[green]No regressions.[/green]")
+
+    if fail_on_regression and report.regressed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def diff(
     bag1: Annotated[Path, typer.Argument(
         help="First bag (the baseline / 'before'). e.g. baseline.mcap",
@@ -605,6 +837,16 @@ def diff(
     bag2: Annotated[Path, typer.Argument(
         help="Second bag (the comparison / 'after'). e.g. experiment.mcap",
     )],
+    json_output: Annotated[Optional[Path], typer.Option("--json",
+        help="Write the structured diff as JSON to this path (stable schema, "
+             "CI-friendly): topics added/removed, type/schema/rate/count "
+             "changes, duration + message deltas. e.g. --json diff.json",
+    )] = None,
+    fail_on_change: Annotated[bool, typer.Option("--fail-on-change",
+        help="Exit non-zero if any structural change is detected (topic "
+             "added/removed, type/schema/rate change). A CI gate that a "
+             "recording's shape stays stable. e.g. --fail-on-change",
+    )] = False,
 ):
     """Compare topic lists, message counts, and durations across two bags.
 
@@ -612,12 +854,37 @@ def diff(
     checks and for diagnosing setup drift between recordings (a topic
     silently dropped, a frequency change, a duration mismatch).
 
+    With **--json** you get a machine-readable structured diff (the same
+    shape the dashboard's /api/diff endpoint returns); with
+    **--fail-on-change** the command becomes a CI gate.
+
     For visual / numeric trace overlays, use the dashboard's Compare or
     Cross-bag Overlay pages instead.
 
-    Example:
-      resurrector diff baseline.mcap experiment.mcap
+    Examples:
+      Human-readable table:
+          resurrector diff baseline.mcap experiment.mcap
+
+      CI gate that the recording shape stays stable:
+          resurrector diff baseline.mcap candidate.mcap --fail-on-change
     """
+    from resurrector.core.bag_diff import diff_bags
+
+    # --json / --fail-on-change use the structured engine; the default
+    # human view keeps the existing rich-table formatter unchanged.
+    if json_output is not None or fail_on_change:
+        result = diff_bags(bag1, bag2)
+        if json_output is not None:
+            json_output.write_text(result.to_json())
+            console.print(f"[green]Diff saved to {json_output}[/green]")
+        else:
+            from resurrector.cli.formatters import print_diff
+            from resurrector.ingest.parser import parse_bag
+            print_diff(parse_bag(bag1).get_metadata(), parse_bag(bag2).get_metadata())
+        if fail_on_change and result.has_changes:
+            raise typer.Exit(code=1)
+        return
+
     from resurrector.ingest.parser import parse_bag
     from resurrector.cli.formatters import print_diff
 

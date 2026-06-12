@@ -73,6 +73,24 @@ def _ros1_convert_available() -> bool:
     return shutil.which("mcap") is not None
 
 
+def _publish_available() -> bool:
+    """Publishing to the HuggingFace Hub needs huggingface_hub."""
+    try:
+        import huggingface_hub  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _copilot_available() -> bool:
+    """The 'Ask your bag' copilot needs the anthropic SDK."""
+    try:
+        import anthropic  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def get_capabilities() -> dict[str, Capability]:
     """Return the runtime-detected capability map keyed by name."""
     caps = [
@@ -106,6 +124,18 @@ def get_capabilities() -> dict[str, Capability]:
             available=_all_exports_available(),
             install_command="pip install rosbag-resurrector[all-exports]",
             description="Zarr and TensorFlow Datasets (RLDS) export formats",
+        ),
+        Capability(
+            name="publish",
+            available=_publish_available(),
+            install_command="pip install rosbag-resurrector[publish]",
+            description="Publish datasets to the HuggingFace Hub with an auto card",
+        ),
+        Capability(
+            name="copilot",
+            available=_copilot_available(),
+            install_command="pip install rosbag-resurrector[copilot]",
+            description="'Ask your bag' — grounded natural-language analysis",
         ),
     ]
     return {c.name: c for c in caps}

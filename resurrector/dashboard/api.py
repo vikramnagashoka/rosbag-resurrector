@@ -328,6 +328,61 @@ async def get_bag_health(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+@app.get("/api/diff")
+async def diff_bags_api(
+    bag_a_id: int = Query(description="Baseline bag id"),
+    bag_b_id: int = Query(description="Candidate bag id"),
+) -> dict[str, Any]:
+    """Semantic diff between two indexed bags (A = baseline, B = candidate).
+
+    Backs a future Compare-page "what changed" panel. Metadata-level —
+    reads summaries, not messages — so it's cheap even on large bags.
+    Returns the same shape as ``BagDiff.to_dict()``.
+    """
+    index = _get_index()
+    try:
+        bag_a = index.get_bag(bag_a_id)
+        bag_b = index.get_bag(bag_b_id)
+        if bag_a is None:
+            raise HTTPException(404, f"Bag {bag_a_id} not found")
+        if bag_b is None:
+            raise HTTPException(404, f"Bag {bag_b_id} not found")
+
+        from resurrector.core.bag_diff import diff_bags
+        result = diff_bags(bag_a["path"], bag_b["path"])
+        return result.to_dict()
+    finally:
+        index.close()
+
+
+@app.get("/api/bags/{bag_id}/explain")
+async def explain_time_range_api(
+    bag_id: int,
+    start_sec: float = Query(description="Window start, seconds from bag start"),
+    end_sec: float = Query(description="Window end, seconds from bag start"),
+    use_llm: bool = Query(default=True, description="Use the LLM narrative if available"),
+) -> dict[str, Any]:
+    """Grounded 'explain this time range' for the Scene/Plot brush selection.
+
+    Gathers real per-topic activity + overlapping health findings for the
+    window and returns a narrative grounded in that evidence (LLM when the
+    [copilot] extra + ANTHROPIC_API_KEY are present, otherwise a deterministic
+    rule-based summary). The raw evidence is included for citation display.
+    """
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.copilot import explain_time_range
+        result = explain_time_range(
+            bag["path"], start_sec, end_sec, use_llm=use_llm,
+        )
+        return result.to_dict()
+    finally:
+        index.close()
+
+
 _FRAME_SUBROUTE = __import__("re").compile(r"^(?P<topic>.+)/frame/(?P<idx>\d+)$")
 _THUMB_SUBROUTE = "/thumbnail"
 
@@ -748,6 +803,103 @@ async def _scan_stream(scan_path_obj: Path):
         index.close()
 
     yield f"data: {json.dumps({'event': 'complete', 'scanned': total, 'indexed': indexed, 'errors': errors})}\n\n"
+
+
+# ============================================================================
+# Async job system (v0.7 — Feature E)
+# ============================================================================
+
+
+def _scan_job_worker(scan_path_str: str):
+    """Build a synchronous scan worker for the job manager.
+
+    Returns a callable ``worker(progress)`` that scans + indexes a directory,
+    reporting per-bag progress. Runs on a background thread (the job pool),
+    so it must be fully synchronous — no asyncio here.
+    """
+    def worker(progress) -> dict[str, Any]:
+        from resurrector.ingest.scanner import scan_path
+        from resurrector.ingest.parser import parse_bag
+        from resurrector.core.bag_frame import BagFrame
+
+        scan_path_obj = _validate_path(scan_path_str)
+        files = scan_path(scan_path_obj)
+        total = len(files)
+        index = _get_index()
+        indexed = 0
+        errors: list[dict[str, Any]] = []
+        progress(0.0, f"scanning {total} file(s)")
+        try:
+            for i, scanned in enumerate(files):
+                try:
+                    parser = parse_bag(scanned.path)
+                    metadata = parser.get_metadata()
+                    bag_id = index.upsert_bag(scanned, metadata)
+                    bf = BagFrame(scanned.path)
+                    report = bf.health_report()
+                    index.update_health_score(bag_id, report.score)
+                    indexed += 1
+                except Exception as e:  # noqa: BLE001
+                    errors.append(_classify_scan_error(scanned.path, e))
+                frac = (i + 1) / total if total else 1.0
+                progress(frac, f"{i + 1}/{total} — {scanned.path.name}")
+        finally:
+            index.close()
+        return {"scanned": total, "indexed": indexed, "errors": errors}
+
+    return worker
+
+
+@app.post("/api/jobs/scan")
+async def submit_scan_job(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Submit a directory scan as a background job. Returns ``{job_id}``.
+
+    The async alternative to ``POST /api/scan`` for TB-scale fleets where a
+    synchronous scan would time out the request. Poll ``GET /api/jobs/{id}``
+    for progress.
+    """
+    from resurrector.core.jobs import get_job_manager
+
+    payload = payload or {}
+    path = payload.get("path")
+    if not path:
+        raise HTTPException(400, "'path' is required")
+    # Validate up front so a bad path fails the request, not silently the job.
+    scan_path_obj = _validate_path(path)
+    if not scan_path_obj.exists():
+        raise HTTPException(400, f"Path does not exist: {path}")
+
+    manager = get_job_manager()
+    job_id = manager.submit("scan", _scan_job_worker(path))
+    return {"job_id": job_id}
+
+
+@app.get("/api/jobs")
+async def list_jobs_api(kind: str | None = Query(default=None)) -> dict[str, Any]:
+    """List background jobs, newest first. Optional ``?kind=scan`` filter."""
+    from resurrector.core.jobs import get_job_manager
+    jobs = get_job_manager().list_jobs(kind=kind)
+    return {"jobs": [j.to_dict() for j in jobs]}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_api(job_id: str) -> dict[str, Any]:
+    """Poll one job's status / progress / result. 404 if unknown id."""
+    from resurrector.core.jobs import get_job_manager
+    job = get_job_manager().get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    return job.to_dict()
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job_api(job_id: str) -> dict[str, Any]:
+    """Request cooperative cancellation of a job."""
+    from resurrector.core.jobs import get_job_manager
+    ok = get_job_manager().cancel(job_id)
+    if not ok:
+        raise HTTPException(409, "Job not cancellable (unknown or already finished)")
+    return {"cancelled": True, "job_id": job_id}
 
 
 @app.get("/api/bags/{bag_id}/timeline")

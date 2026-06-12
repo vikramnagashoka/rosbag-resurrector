@@ -70,6 +70,8 @@ jobs:
           - all-exports     # zarr + tensorflow-datasets (heavy: TF wheel ~600 MB)
           - watch           # watchdog (tiny)
           - ros1            # rosbags (for legacy .bag reading)
+          - publish         # huggingface_hub (v0.7 dataset publishing)
+          - copilot         # anthropic SDK (v0.7 "Ask your bag"; no API key needed for tests)
     steps:
       - uses: actions/checkout@v4
 

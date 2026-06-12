@@ -13,6 +13,7 @@ import DensityRibbon from '../components/DensityRibbon'
 import TransformEditor from '../components/TransformEditor'
 import TrimExportPopover from '../components/TrimExportPopover'
 import JupyterButton from '../components/JupyterButton'
+import ExplainPanel from '../components/ExplainPanel'
 import { api, Annotation, Bag, TopicDataResponse } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 
@@ -73,6 +74,7 @@ export default function Explorer() {
   const [showExport, setShowExport] = useState(false)
   const [activeTab, setActiveTab] = useState<Tab>('plot')
   const [xRangeSec, setXRangeSec] = useState<{ start: number; end: number } | null>(null)
+  const [showExplain, setShowExplain] = useState(false)
 
   // v0.3.1 state
   const [showTransformEditor, setShowTransformEditor] = useState(false)
@@ -243,6 +245,22 @@ export default function Explorer() {
               topics={[selectedTopic]}
             />
           )}
+          <button
+            onClick={() => setShowExplain(true)}
+            disabled={!xRangeSec}
+            title={xRangeSec ? 'Explain the selected time range' : 'Brush a range on the plot first'}
+            style={{
+              background: xRangeSec ? '#1f6feb22' : '#21262d',
+              border: xRangeSec ? '1px solid #1f6feb' : '1px solid #30363d',
+              borderRadius: 6,
+              padding: '6px 12px',
+              color: xRangeSec ? '#e1e4e8' : '#484f58',
+              cursor: xRangeSec ? 'pointer' : 'not-allowed',
+              fontSize: 13,
+            }}
+          >
+            Explain ✨
+          </button>
           <button
             onClick={() => setShowExport(true)}
             style={{
@@ -594,6 +612,15 @@ export default function Explorer() {
           bagId={bagId}
           availableTopics={bag.topics.map(t => t.name)}
           onClose={() => setShowExport(false)}
+        />
+      )}
+
+      {showExplain && xRangeSec && (
+        <ExplainPanel
+          bagId={bagId}
+          startSec={xRangeSec.start}
+          endSec={xRangeSec.end}
+          onClose={() => setShowExplain(false)}
         />
       )}
 
