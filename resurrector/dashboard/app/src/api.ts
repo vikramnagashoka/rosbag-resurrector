@@ -232,6 +232,28 @@ export interface FrameIndexStatus {
   topics_indexed: string[]
 }
 
+export interface ExplainEvidenceTopic {
+  topic: string
+  message_type: string
+  count_in_window: number
+  rate_in_window_hz: number
+  overall_rate_hz: number | null
+}
+
+export interface ExplainResult {
+  narrative: string
+  source: 'llm' | 'rule_based'
+  start_sec: number
+  end_sec: number
+  evidence: {
+    window: { start_sec: number; end_sec: number; duration_sec: number; bag_duration_sec: number }
+    totals: { messages_in_window: number; active_topics: number; silent_topics: string[] }
+    topics: ExplainEvidenceTopic[]
+    health_issues: Array<{ check: string; severity: string; topic: string | null; message: string }>
+    health_score: number | null
+  }
+}
+
 export interface SearchIndexBagEntry {
   bag_id: number
   name: string
@@ -387,6 +409,10 @@ export const api = {
     request<SearchIndexStatus>('GET', `/api/search/index-status`),
   getCapabilities: () =>
     request<CapabilityMap>('GET', `/api/system/capabilities`),
+  explainTimeRange: (bagId: number, startSec: number, endSec: number, useLlm = true) =>
+    request<ExplainResult>('GET', `/api/bags/${bagId}/explain`, {
+      query: { start_sec: startSec, end_sec: endSec, use_llm: useLlm },
+    }),
 
   // Annotations
   listAnnotations: (bagId: number, topic?: string) =>

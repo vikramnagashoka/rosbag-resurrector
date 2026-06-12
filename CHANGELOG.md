@@ -8,6 +8,74 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-11
+
+### What's new
+
+Six "10x-candidate" features ship together: **anomaly surfacing**, **bag diff**,
+**HuggingFace dataset publishing**, **CI regression gating**, an **async job
+system**, and the **"Ask your bag"** grounded copilot. The throughline from the
+v0.7 plan: features A (publish) and B (explain) were chosen *because their
+output is a distribution channel* — a published HF dataset page and a grounded
+"explain this window" answer are artifacts that travel, not just capabilities.
+Each ships at its narrowest tested wedge via the Python API, CLI, or REST;
+Feature B also ships its dashboard "Explain" button. New optional extras
+`[publish]` and `[copilot]` keep the heavy deps (huggingface_hub, anthropic)
+off the base install.
+
+### Features
+
+- **Automated anomaly surfacing (Feature C).** `resurrector qc --anomalies`
+  ranks a fleet "most suspicious first" using relative (median/MAD robust
+  z-score) outlier detection across per-topic rate + message count and per-bag
+  duration / total-messages / topic-count. `run_qc(detect_anomalies=True)`
+  attaches the ranking to the report. New module
+  [resurrector/core/anomaly.py](resurrector/core/anomaly.py).
+- **Bag diff (Feature F).** `resurrector diff a.mcap b.mcap` gains `--json`
+  (structured machine-readable diff) and `--fail-on-change` (CI gate). New
+  `diff_bags()` engine + `GET /api/diff?bag_a_id=&bag_b_id=`. Reports topics
+  added/removed, message-type changes, schema drift, rate shifts (>10%), and
+  count/duration deltas. New module
+  [resurrector/core/bag_diff.py](resurrector/core/bag_diff.py).
+- **HuggingFace dataset publish (Feature A).** `resurrector publish <dir>
+  --repo-id owner/name` builds an auto dataset card (YAML frontmatter + sensor
+  inventory + embedded `qc` quality grade), writes it as README.md, and
+  uploads the folder. `--dry-run` previews the card offline. New
+  [resurrector/core/publish.py](resurrector/core/publish.py); needs the
+  `[publish]` extra (huggingface_hub).
+- **CI-for-robots benchmark (Feature D).** `resurrector benchmark <bag>
+  --metrics m.json --baseline b.json` extracts scalar metrics
+  (duration, message_count, health_score, `rate:<topic>`, `count:<topic>`,
+  `mean|min|max:<topic>:<col>` — column aggregates stream in bounded memory),
+  compares to a committed baseline with per-metric direction + tolerance, and
+  `--fail-on-regression` gates a build. `--update-baseline` captures a new
+  baseline. New [resurrector/core/benchmark.py](resurrector/core/benchmark.py).
+- **Async job system (Feature E).** In-process thread-pool job manager with a
+  pollable status registry for long operations. `POST /api/jobs/scan` runs a
+  directory scan in the background; `GET /api/jobs/{id}` polls progress;
+  `POST /api/jobs/{id}/cancel` requests cooperative cancellation. Single-user,
+  single-process by design (no broker). New
+  [resurrector/core/jobs.py](resurrector/core/jobs.py).
+- **Ask your bag (Feature B).** Grounded "explain this time range":
+  `GET /api/bags/{id}/explain?start_sec=&end_sec=` gathers real per-topic
+  activity + overlapping health findings for the window and narrates them.
+  Grounded by construction — a deterministic rule-based summary is the floor
+  (always available), with a richer Anthropic narrative when the `[copilot]`
+  extra + `ANTHROPIC_API_KEY` are present; the model is instructed to use only
+  the queried evidence, which is returned for citation display. New
+  [resurrector/core/copilot.py](resurrector/core/copilot.py). **Dashboard
+  UI:** an "Explain ✨" button on the Explorer header, enabled once a time
+  range is brushed on the plot, opens a panel showing the grounded narrative
+  plus the evidence table behind it (the citation surface). New
+  [ExplainPanel.tsx](resurrector/dashboard/app/src/components/ExplainPanel.tsx).
+
+Also: two new optional extras (`publish`, `copilot`) and two new capability
+flags surfaced by `GET /api/system/capabilities`.
+
+Test counts: **796 backend** (was 717; +79 across 6 new test files),
+48 frontend unit, **10 e2e behavioural** (was 8; +2 for the Explain button)
+plus 5 visual snapshots — all green.
+
 ## [0.6.2] — 2026-05-24
 
 ### What's new

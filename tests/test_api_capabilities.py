@@ -21,7 +21,10 @@ class TestCapabilitiesEndpoint:
         r = _client().get("/api/system/capabilities")
         assert r.status_code == 200
         d = r.json()
-        assert set(d.keys()) == {"vision", "bridge_live", "ros1_convert", "all_exports"}
+        assert set(d.keys()) == {
+            "vision", "bridge_live", "ros1_convert", "all_exports",
+            "publish", "copilot",
+        }
 
     def test_each_capability_has_required_fields(self):
         d = _client().get("/api/system/capabilities").json()

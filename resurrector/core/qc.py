@@ -81,6 +81,9 @@ class QCReport:
     """Full QC report — per-bag + cross-bag findings."""
     bags: list[BagQCResult] = field(default_factory=list)
     fleet_issues: list[QCIssue] = field(default_factory=list)
+    # Populated only when run_qc(..., detect_anomalies=True). Holds the
+    # ranked "most suspicious bag" list from the relative outlier pass.
+    anomaly_ranking: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def n_bags(self) -> int:
@@ -106,6 +109,7 @@ class QCReport:
         return {
             "bags": [b.to_dict() for b in self.bags],
             "fleet_issues": [i.to_dict() for i in self.fleet_issues],
+            "anomaly_ranking": self.anomaly_ranking,
             "summary": {
                 "n_bags": self.n_bags,
                 "n_errors": self.n_errors,
@@ -363,12 +367,19 @@ def _check_coverage_gaps(bag_metas: list[tuple[str, Any]]) -> list[QCIssue]:
     return issues
 
 
-def run_qc(bags: list[str | Path]) -> QCReport:
+def run_qc(
+    bags: list[str | Path],
+    detect_anomalies: bool = False,
+) -> QCReport:
     """Run bag-side QC across N bags.
 
     Args:
         bags: List of bag paths (or directory paths — directories are
             recursed for .mcap files).
+        detect_anomalies: When True, additionally run the relative
+            cross-bag outlier pass (``resurrector.core.anomaly``) and
+            attach its issues + ranked "most suspicious bag" list. No-op
+            for fewer than 3 bags.
 
     Returns:
         :class:`QCReport` with per-bag results + fleet-level findings.
@@ -405,4 +416,14 @@ def run_qc(bags: list[str | Path]) -> QCReport:
     fleet_issues.extend(_check_rate_anomaly(bag_metas))
     fleet_issues.extend(_check_coverage_gaps(bag_metas))
 
-    return QCReport(bags=bag_results, fleet_issues=fleet_issues)
+    report = QCReport(bags=bag_results, fleet_issues=fleet_issues)
+
+    if detect_anomalies:
+        # Imported lazily so the QC fast path doesn't pull the anomaly
+        # module unless asked.
+        from resurrector.core.anomaly import detect_fleet_anomalies
+        anomaly_report = detect_fleet_anomalies(bag_metas)
+        report.fleet_issues.extend(anomaly_report.issues)
+        report.anomaly_ranking = [r.to_dict() for r in anomaly_report.ranking]
+
+    return report

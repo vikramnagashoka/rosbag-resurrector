@@ -26,6 +26,39 @@ test.describe('Library → Explorer navigation', () => {
   })
 })
 
+test.describe('Ask your bag — Explain', () => {
+  test('Explain button is present and disabled until a range is brushed', async ({ page }) => {
+    // Would catch: the v0.7 Explain button regressing — missing entirely,
+    // or wired so it's always enabled/disabled regardless of selection.
+    // (Brushing Plotly's canvas is flaky, so we assert the disabled-until-
+    // selection wiring; the panel content is API-driven + backend-tested.)
+    await page.goto('/')
+    await page.getByText(/scene_demo\.mcap/).first().click()
+    await page.waitForURL(/\/bag\/\d+/)
+
+    const explain = page.getByRole('button', { name: /^Explain/ })
+    await expect(explain).toBeVisible({ timeout: 10_000 })
+    // No range brushed yet → disabled.
+    await expect(explain).toBeDisabled()
+  })
+
+  test('explain API returns a grounded narrative for a window', async ({ request }) => {
+    // Backs the panel: the endpoint the Explain button calls must return a
+    // narrative + evidence grounded in real per-topic activity.
+    const bags = await request.get('/api/bags').then(r => r.json())
+    expect(bags.length).toBeGreaterThan(0)
+    const id = bags[0].id
+    const r = await request.get(`/api/bags/${id}/explain`, {
+      params: { start_sec: 0, end_sec: 4, use_llm: false },
+    })
+    expect(r.ok()).toBeTruthy()
+    const data = await r.json()
+    expect(data.source).toBe('rule_based')
+    expect(data.narrative.length).toBeGreaterThan(0)
+    expect(data.evidence.totals.messages_in_window).toBeGreaterThan(0)
+  })
+})
+
 test.describe('Explorer Scene tab', () => {
   test('Hide button clears the active Cloud topic', async ({ page }) => {
     // Would catch: the Hide button (added in v0.6.1) regressing to no-op,
