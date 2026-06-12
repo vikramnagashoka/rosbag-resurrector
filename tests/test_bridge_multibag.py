@@ -232,7 +232,16 @@ class TestOffsetStaggering:
         assert "b" in first_seen_at, "bag b never emitted a message"
         a_start = first_seen_at["a"] - start
         b_start = first_seen_at["b"] - start
-        # bag a should start almost immediately
-        assert a_start < 0.1, f"bag a started after {a_start:.3f}s, expected ~0"
-        # bag b should start at ~0.3s (+/- some scheduling slack)
-        assert 0.2 < b_start < 0.5, f"bag b started after {b_start:.3f}s, expected ~0.3"
+        # The invariant that actually matters is RELATIVE: bag a (offset 0)
+        # starts well before bag b (offset 0.3s). That's jitter-proof. An
+        # absolute "a_start < 0.1" bound is flaky on loaded CI runners —
+        # thread startup + asyncio scheduling can eat >100ms before the
+        # first callback fires (observed: 0.103s on a 3.10 runner).
+        assert a_start < b_start, (
+            f"bag a ({a_start:.3f}s) should start before bag b ({b_start:.3f}s)"
+        )
+        # bag a should still start promptly — not delayed by the 0.3s offset.
+        # 0.25 keeps it clearly below b's offset while tolerating scheduling slack.
+        assert a_start < 0.25, f"bag a started after {a_start:.3f}s, expected ~0"
+        # bag b should start at ~0.3s (offset) + scheduling slack.
+        assert 0.2 < b_start < 0.6, f"bag b started after {b_start:.3f}s, expected ~0.3"
