@@ -383,6 +383,43 @@ async def explain_time_range_api(
         index.close()
 
 
+@app.get("/api/bags/{bag_id}/report")
+async def incident_report_api(
+    bag_id: int,
+    start_sec: float = Query(description="Window start, seconds from bag start"),
+    end_sec: float = Query(description="Window end, seconds from bag start"),
+    fmt: str = Query(default="html", description="html | md"),
+    use_llm: bool = Query(default=True, description="Use the LLM narrative if available"),
+) -> Any:
+    """Generate a shareable incident report for the brushed window.
+
+    Returns the self-contained report as a downloadable attachment (HTML by
+    default, or Markdown). Backs the Explain panel's 'Download report' button.
+    """
+    from starlette.responses import Response
+    if fmt not in ("html", "md"):
+        raise HTTPException(400, "fmt must be 'html' or 'md'")
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+        if bag is None:
+            raise HTTPException(404, "Bag not found")
+        from resurrector.core.report import generate_incident_report
+        result = generate_incident_report(
+            bag["path"], start_sec, end_sec, fmt=fmt, use_llm=use_llm,
+        )
+        media = "text/html" if fmt == "html" else "text/markdown"
+        stem = Path(bag["path"]).stem
+        fname = f"{stem}_incident_{int(start_sec)}-{int(end_sec)}s.{fmt}"
+        return Response(
+            content=result.content,
+            media_type=media,
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+    finally:
+        index.close()
+
+
 _FRAME_SUBROUTE = __import__("re").compile(r"^(?P<topic>.+)/frame/(?P<idx>\d+)$")
 _THUMB_SUBROUTE = "/thumbnail"
 

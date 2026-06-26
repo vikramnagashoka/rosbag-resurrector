@@ -50,14 +50,33 @@ export default function ExplainPanel({ bagId, startSec, endSec, onClose }: Props
           <h2 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
             Explain {startSec.toFixed(2)}s – {endSec.toFixed(2)}s
           </h2>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            style={{
-              background: '#21262d', border: '1px solid #30363d', borderRadius: 6,
-              color: '#e1e4e8', cursor: 'pointer', padding: '4px 10px', fontSize: 13,
-            }}
-          >Close</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              onClick={() => {
+                // Download the self-contained incident report. Open in a new
+                // tab so the browser's download handling kicks in via the
+                // attachment Content-Disposition the endpoint sets.
+                const url = `/api/bags/${bagId}/report?start_sec=${startSec}&end_sec=${endSec}&fmt=html`
+                window.open(url, '_blank')
+              }}
+              disabled={!result}
+              title="Download a shareable incident report (HTML)"
+              style={{
+                background: result ? '#1f6feb22' : '#21262d',
+                border: result ? '1px solid #1f6feb' : '1px solid #30363d',
+                borderRadius: 6, color: result ? '#e1e4e8' : '#484f58',
+                cursor: result ? 'pointer' : 'not-allowed', padding: '4px 10px', fontSize: 13,
+              }}
+            >Download report</button>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              style={{
+                background: '#21262d', border: '1px solid #30363d', borderRadius: 6,
+                color: '#e1e4e8', cursor: 'pointer', padding: '4px 10px', fontSize: 13,
+              }}
+            >Close</button>
+          </div>
         </div>
 
         {loading && <div style={{ color: '#8b949e' }}>Analyzing window…</div>}

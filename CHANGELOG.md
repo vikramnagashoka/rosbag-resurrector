@@ -8,6 +8,48 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-26
+
+### What's new
+
+Two **demand-validated** features — both came from outreach replies, not the
+roadmap — built by composing v0.7 primitives into the exact workflows users
+asked for.
+
+### Incident Report Generator
+
+- **`resurrector report <bag> --start S --end E -o incident.html`** — generate a
+  single **self-contained** shareable report for a time window: the grounded
+  evidence table + narrative (from the copilot), health findings in the window,
+  a per-topic activity chart (inline SVG, no JS), an optional camera thumbnail
+  (base64-embedded), an optional `--baseline` diff section, and a probable-cause
+  verdict (known / likely / unknown). HTML or Markdown (`-o incident.md`).
+- The HTML inlines all CSS/SVG/images — drop it in a Slack thread, a GitHub
+  issue, or an email and it renders standalone. New
+  [resurrector/core/report.py](resurrector/core/report.py).
+- **Dashboard:** a "Download report" button on the Explain panel produces the
+  same report for the brushed window via `GET /api/bags/{id}/report`.
+
+### Bag Contracts
+
+- **`resurrector contract init <good-bags...> -o contract.yaml`** infers a
+  versioned spec — required topics, message types, rate ranges (observed
+  [min,max] widened by `--rate-tolerance`), and required TF frames — from
+  known-good bags.
+- **`resurrector contract check <bag> -c contract.yaml --fail-on-violation`**
+  validates a candidate against the spec and exits non-zero on any violation
+  (missing topic, wrong type, rate out of range, missing TF frame) — a
+  declarative CI gate teams own as a file. New
+  [resurrector/core/contract.py](resurrector/core/contract.py).
+- Contract format is YAML when pyyaml is importable, JSON otherwise (no new
+  hard dependency); detected by file extension.
+
+### Test counts
+
+- Backend: **820 passed** (was 796; +24 across `test_report.py` + `test_contract.py`)
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **11 behavioural** (was 10; +1 incident-report endpoint) plus 5 visual
+
 ## [0.7.0] — 2026-06-11
 
 ### What's new
