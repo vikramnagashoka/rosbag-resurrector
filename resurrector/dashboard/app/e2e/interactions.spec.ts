@@ -57,6 +57,22 @@ test.describe('Ask your bag — Explain', () => {
     expect(data.narrative.length).toBeGreaterThan(0)
     expect(data.evidence.totals.messages_in_window).toBeGreaterThan(0)
   })
+
+  test('incident report endpoint returns a self-contained HTML attachment', async ({ request }) => {
+    // Backs the panel's "Download report" button (v0.7.1). The report must be
+    // a downloadable, self-contained HTML — no external asset refs.
+    const bags = await request.get('/api/bags').then(r => r.json())
+    const id = bags[0].id
+    const r = await request.get(`/api/bags/${id}/report`, {
+      params: { start_sec: 0, end_sec: 4, fmt: 'html', use_llm: false },
+    })
+    expect(r.ok()).toBeTruthy()
+    expect(r.headers()['content-disposition']).toContain('attachment')
+    const html = await r.text()
+    expect(html).toContain('Incident Report')
+    expect(html).toContain('</svg>')          // inline activity chart
+    expect(html).not.toContain('src="http')   // no external assets
+  })
 })
 
 test.describe('Explorer Scene tab', () => {

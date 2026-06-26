@@ -894,6 +894,171 @@ def diff(
 
 
 @app.command()
+def report(
+    bag: Annotated[Path, typer.Argument(
+        help="Bag file to report on. e.g. experiment.mcap",
+    )],
+    start: Annotated[float, typer.Option("--start", "-s",
+        help="Window start, seconds from bag start. e.g. --start 12.5")] = 0.0,
+    end: Annotated[Optional[float], typer.Option("--end", "-e",
+        help="Window end, seconds. Defaults to bag end. e.g. --end 18.0")] = None,
+    output: Annotated[Optional[Path], typer.Option("--output", "-o",
+        help="Write the report here. Extension picks the format (.html / .md). "
+             "e.g. -o incident.html")] = None,
+    fmt: Annotated[str, typer.Option("--format",
+        help="Output format if --output has no extension. html | md")] = "html",
+    baseline: Annotated[Optional[Path], typer.Option("--baseline",
+        help="A known-good bag to diff against. Adds a 'diff vs baseline' "
+             "section. e.g. --baseline good_run.mcap")] = None,
+    use_llm: Annotated[bool, typer.Option("--llm",
+        help="Use the AI copilot for the narrative (needs [copilot] + "
+             "ANTHROPIC_API_KEY). Falls back to rule-based otherwise.")] = False,
+):
+    """Generate a shareable incident report for a time window.
+
+    Brush a bad window in the dashboard (or pick one from `qc --anomalies`),
+    then produce a single self-contained HTML (or Markdown) report: the
+    grounded evidence table, health findings, a per-topic activity chart, an
+    optional camera thumbnail, an optional diff vs a known-good baseline, and
+    a probable-cause verdict (known / likely / unknown).
+
+    The HTML is self-contained (inline CSS/SVG/base64) — drop it in a Slack
+    thread, a GitHub issue, or an email and it just works.
+
+    Examples:
+      Whole-bag HTML report:
+          resurrector report run.mcap -o incident.html
+
+      A specific bad window, with a baseline diff:
+          resurrector report run.mcap -s 12 -e 18 --baseline good.mcap -o incident.html
+
+      Markdown for a GitHub issue:
+          resurrector report run.mcap -s 12 -e 18 -o incident.md
+    """
+    from resurrector.core.report import generate_incident_report
+    from resurrector.ingest.parser import parse_bag
+
+    end_sec = end if end is not None else parse_bag(bag).get_metadata().duration_sec
+
+    # Resolve format from the output extension when present.
+    resolved_fmt = fmt
+    if output is not None:
+        ext = output.suffix.lower()
+        if ext in (".html", ".htm"):
+            resolved_fmt = "html"
+        elif ext in (".md", ".markdown"):
+            resolved_fmt = "md"
+
+    out_path = output
+    if out_path is None:
+        out_path = Path(f"{bag.stem}_incident.{ 'md' if resolved_fmt == 'md' else 'html'}")
+
+    result = generate_incident_report(
+        bag, start, end_sec, output_path=out_path, fmt=resolved_fmt,
+        baseline_bag=baseline, use_llm=use_llm,
+    )
+    cause_color = {"known": "red", "likely": "yellow", "unknown": "dim"}[result.probable_cause]
+    console.print(
+        f"[green]Report written to {out_path}[/green]  "
+        f"probable cause: [{cause_color}]{result.probable_cause}[/{cause_color}]"
+    )
+
+
+# Bag Contracts — versioned 'what a good run looks like' spec, enforced in CI.
+contract_app = typer.Typer(help="Author + enforce bag contracts (CI-friendly).")
+app.add_typer(contract_app, name="contract")
+
+
+@contract_app.command("init")
+def contract_init(
+    bags: Annotated[list[Path], typer.Argument(
+        help="One or more known-good bags (or directories). The contract is "
+             "inferred from these. e.g. resurrector contract init good_*.mcap",
+    )],
+    output: Annotated[Path, typer.Option("--output", "-o",
+        help="Where to write the contract. .yaml (needs pyyaml) or .json. "
+             "e.g. -o contract.yaml")] = Path("contract.yaml"),
+    tolerance: Annotated[float, typer.Option("--rate-tolerance",
+        help="Widen inferred rate ranges by this fraction (0.2 = ±20%).")] = 0.2,
+):
+    """Infer a contract from known-good bags.
+
+    A topic is required if it appears in every input bag; its rate range is
+    the observed [min, max] widened by --rate-tolerance. Required TF frames
+    are those present in every bag. Edit the output by hand, commit it, and
+    enforce with `resurrector contract check` in CI.
+    """
+    from resurrector.core.contract import infer_contract, save_contract
+
+    resolved: list[Path] = []
+    for b in bags:
+        resolved.extend(sorted(b.rglob("*.mcap")) if b.is_dir() else [b])
+    if not resolved:
+        console.print("[red]No bags found.[/red]")
+        raise typer.Exit(code=1)
+
+    c = infer_contract(resolved, rate_tolerance=tolerance)
+    try:
+        save_contract(c, output)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    console.print(
+        f"[green]Contract written to {output}[/green] — "
+        f"{len(c.topics)} topic(s), {len(c.tf_frames)} required TF frame(s), "
+        f"inferred from {len(resolved)} bag(s)."
+    )
+
+
+@contract_app.command("check")
+def contract_check(
+    bag: Annotated[Path, typer.Argument(help="Bag to validate. e.g. candidate.mcap")],
+    contract_path: Annotated[Path, typer.Option("--contract", "-c",
+        help="Contract file (.yaml / .json). e.g. -c contract.yaml")] = Path("contract.yaml"),
+    json_output: Annotated[Optional[Path], typer.Option("--json",
+        help="Write the result as JSON. e.g. --json result.json")] = None,
+    fail_on_violation: Annotated[bool, typer.Option("--fail-on-violation",
+        help="Exit non-zero if any violation is found. The CI gate.")] = False,
+):
+    """Validate a bag against a contract.
+
+    Reports every violation (missing topic, wrong type, rate out of range,
+    missing TF frame). With --fail-on-violation it's a CI gate.
+
+    Example:
+        resurrector contract check candidate.mcap -c contract.yaml --fail-on-violation
+    """
+    from resurrector.core.contract import load_contract, check_contract
+    from rich.markup import escape as rich_escape
+
+    if not contract_path.exists():
+        console.print(f"[red]Contract not found: {contract_path}[/red]")
+        raise typer.Exit(code=1)
+
+    contract = load_contract(contract_path)
+    result = check_contract(bag, contract)
+
+    if json_output is not None:
+        json_output.write_text(result.to_json())
+        console.print(f"[green]Result saved to {json_output}[/green]")
+    elif result.passed:
+        console.print(f"[green]PASS[/green] {bag.name} satisfies {contract_path.name}")
+    else:
+        console.print(
+            f"[red]FAIL[/red] {bag.name}: {len(result.violations)} violation(s)"
+        )
+        for v in result.violations:
+            topic_str = f" \\[{rich_escape(v.topic)}]" if v.topic else ""
+            console.print(
+                f"  [red]{rich_escape(v.code)}[/red]{topic_str} "
+                f"{rich_escape(v.message)}"
+            )
+
+    if fail_on_violation and not result.passed:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def tag(
     path: Annotated[Path, typer.Argument(
         help="Path to an indexed bag file. "
