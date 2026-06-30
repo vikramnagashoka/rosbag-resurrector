@@ -1,11 +1,14 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import '../styles/notebook.css'
-import { Notebook, HealthTier } from './types'
-import { SAMPLE_NOTEBOOKS } from './sampleData'
+import { api } from '../api'
+import { Notebook, HealthTier, CellType, Cell, nextCellId } from './types'
+import { notebooksFromBags } from './build'
+import CellFeed from './CellFeed'
 
-// PR 0 — the workspace shell: rail + header + (empty) feed + docked
-// command bar. Static data, no live cells yet. Later PRs add the cell
-// framework, command palette, linked cursor, etc.
+// The notebook workspace: rail + header + cell feed + docked command bar.
+// PR 1 wires it to real indexed bags and adds the cell framework + the
+// `health` cell. Command palette (full), plot/stats/sync/image/search/scene
+// cells, linked cursor, and Explain land in later PRs.
 
 const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
   good: { color: 'var(--nb-health-good)', bg: 'var(--nb-health-good-bg)' },
@@ -13,18 +16,41 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
   bad: { color: 'var(--nb-health-bad)', bg: 'var(--nb-health-bad-bg)' },
 }
 
-// Suggestion chips shown under the command input (static in PR 0).
-const SUGGESTIONS = [
-  'Plot /odom', 'Stats /imu/data', 'Synchronize', 'Health report',
-  'Semantic search', 'Camera frames',
+// Suggestion chips. `type` is the cell they add (null = not wired yet —
+// those land in their respective PRs alongside the command palette).
+const SUGGESTIONS: { label: string; type: CellType | null }[] = [
+  { label: 'Health report', type: 'health' },
+  { label: 'Plot /odom', type: null },
+  { label: 'Stats /imu/data', type: null },
+  { label: 'Synchronize', type: null },
+  { label: 'Semantic search', type: null },
+  { label: 'Camera frames', type: null },
 ]
 
 export default function NotebookWorkspace() {
-  const [notebooks, setNotebooks] = useState<Notebook[]>(SAMPLE_NOTEBOOKS)
-  const [activeId, setActiveId] = useState<string>(SAMPLE_NOTEBOOKS[0].id)
+  const [notebooks, setNotebooks] = useState<Notebook[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(true)
+  // Per-cell UI state, keyed by cell id.
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [runtime, setRuntime] = useState<Record<string, number>>({})
 
-  const active = notebooks.find(n => n.id === activeId) ?? notebooks[0]
+  useEffect(() => {
+    let cancelled = false
+    api.listBags()
+      .then(bags => {
+        if (cancelled) return
+        const nbs = notebooksFromBags(bags)
+        setNotebooks(nbs)
+        setActiveId(nbs[0]?.id ?? null)
+      })
+      .catch(() => { /* empty rail shown on failure */ })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const active = notebooks.find(n => n.id === activeId) ?? null
 
   function newNotebook() {
     const id = `nb-${Date.now()}`
@@ -35,6 +61,29 @@ export default function NotebookWorkspace() {
     }
     setNotebooks(prev => [...prev, blank])
     setActiveId(id)
+  }
+
+  function addCell(type: CellType) {
+    if (!active) return
+    const cell: Cell = { id: nextCellId(), type }
+    setNotebooks(prev => prev.map(n =>
+      n.id === active.id ? { ...n, cells: [...n.cells, cell] } : n,
+    ))
+  }
+
+  function removeCell(cellId: string) {
+    if (!active) return
+    setNotebooks(prev => prev.map(n =>
+      n.id === active.id ? { ...n, cells: n.cells.filter(c => c.id !== cellId) } : n,
+    ))
+  }
+
+  function toggleCollapse(cellId: string) {
+    setCollapsed(prev => ({ ...prev, [cellId]: !prev[cellId] }))
+  }
+
+  function setCellRuntime(cellId: string, ms: number) {
+    setRuntime(prev => (prev[cellId] != null ? prev : { ...prev, [cellId]: ms }))
   }
 
   return (
@@ -55,6 +104,11 @@ export default function NotebookWorkspace() {
         </div>
 
         <div className="nb-list">
+          {notebooks.length === 0 && !loading && (
+            <div style={{ padding: '10px 11px', fontSize: 12, color: 'var(--nb-text-faint)' }}>
+              No indexed bags. Scan some from the classic Library, then reload.
+            </div>
+          )}
           {notebooks.map(nb => (
             <button
               key={nb.id}
@@ -89,20 +143,22 @@ export default function NotebookWorkspace() {
       <div className="nb-col">
         <header className="nb-header">
           <div>
-            <div className="nb-title">{active.title}</div>
-            <div className="nb-header-meta">
-              <span className="nb-bag-chip">{active.bag}</span>
-              <span
-                className="nb-health-pill"
-                style={{ color: TIER_VARS[active.tier].color, background: TIER_VARS[active.tier].bg }}
-              >
-                <span className="nb-dot" style={{ background: TIER_VARS[active.tier].color }} />
-                {active.health}
-              </span>
-              <span className="nb-duration">
-                {active.durationLabel} · {active.topicCount} topics · {active.messageCount.toLocaleString()} msgs
-              </span>
-            </div>
+            <div className="nb-title">{active?.title ?? (loading ? 'Loading…' : 'No notebook')}</div>
+            {active && (
+              <div className="nb-header-meta">
+                <span className="nb-bag-chip">{active.bag}</span>
+                <span
+                  className="nb-health-pill"
+                  style={{ color: TIER_VARS[active.tier].color, background: TIER_VARS[active.tier].bg }}
+                >
+                  <span className="nb-dot" style={{ background: TIER_VARS[active.tier].color }} />
+                  {active.health}
+                </span>
+                <span className="nb-duration">
+                  {active.durationLabel} · {active.topicCount} topics · {active.messageCount.toLocaleString()} msgs
+                </span>
+              </div>
+            )}
           </div>
           <div className="nb-header-actions">
             <button className="nb-btn">Share</button>
@@ -112,7 +168,7 @@ export default function NotebookWorkspace() {
 
         <div className="nb-feed">
           <div className="nb-feed-inner">
-            {active.cells.length === 0 ? (
+            {!active || active.cells.length === 0 ? (
               <div className="nb-empty">
                 <div className="nb-empty-title">Start your analysis</div>
                 <div className="nb-empty-sub">
@@ -120,8 +176,15 @@ export default function NotebookWorkspace() {
                 </div>
               </div>
             ) : (
-              // Cell feed lands in PR 1.
-              <div />
+              <CellFeed
+                cells={active.cells}
+                bagId={active.bagId}
+                collapsed={collapsed}
+                runtime={runtime}
+                onToggleCollapse={toggleCollapse}
+                onDelete={removeCell}
+                onRuntime={setCellRuntime}
+              />
             )}
           </div>
         </div>
@@ -141,8 +204,15 @@ export default function NotebookWorkspace() {
             </div>
             <div className="nb-chips">
               {SUGGESTIONS.map(s => (
-                <button key={s} className="nb-chip">
-                  <span className="nb-chip-plus">+</span> {s}
+                <button
+                  key={s.label}
+                  className="nb-chip"
+                  disabled={!s.type || !active}
+                  title={s.type ? `Add a ${s.type} cell` : 'Lands in a later slice'}
+                  style={!s.type ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
+                  onClick={() => s.type && addCell(s.type)}
+                >
+                  <span className="nb-chip-plus">+</span> {s.label}
                 </button>
               ))}
             </div>

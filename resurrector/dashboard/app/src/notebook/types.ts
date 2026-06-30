@@ -35,3 +35,22 @@ export function tierForScore(score: number): HealthTier {
   if (score >= 80) return 'warn'
   return 'bad'
 }
+
+// The mono command string shown in each cell header. Mirrors the
+// pandas-like API the cell represents.
+export function cellCommand(cell: Cell): string {
+  switch (cell.type) {
+    case 'health': return 'bf.health().report()'
+    case 'plot': return `bf["${cell.topic ?? '/topic'}"].plot()`
+    case 'stats': return `bf["${cell.topic ?? '/topic'}"].stats()`
+    case 'sync': return `bf.sync([${(cell.topics ?? []).map(t => `"${t}"`).join(', ')}]).head()`
+    case 'image': return `bf["${cell.topic ?? '/camera/rgb'}"].frame(${cell.frame ?? 0})`
+    case 'search': return `search("${cell.query ?? ''}")`
+    case 'scene': return `bf["${cell.topic ?? '/lidar/points'}"].scene()`
+  }
+}
+
+let _cellSeq = 0
+export function nextCellId(): string {
+  return `cell-${Date.now()}-${_cellSeq++}`
+}

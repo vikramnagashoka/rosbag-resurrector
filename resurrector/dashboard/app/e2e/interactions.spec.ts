@@ -9,19 +9,36 @@ import { test, expect } from '@playwright/test'
 // for features that ship with new UI affordances.
 
 test.describe('Notebook workspace (v0.8 overhaul)', () => {
-  test('rail switches the active notebook + header follows', async ({ page }) => {
-    // Would catch: rail item click not swapping active notebook, or the
-    // header not reflecting the active notebook's title/bag.
+  test('rail is backed by real indexed bags + switching swaps the header', async ({ page }) => {
+    // Would catch: notebooks not loading from /api/bags, or rail clicks
+    // not swapping the active notebook into the header.
     await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
 
-    // The first notebook is active by default — its title shows in the header.
-    const header = page.locator('.nb-title')
-    await expect(header).toHaveText('Gripper slip — root cause')
+    // At least one notebook from the hermetic env's indexed bag(s).
+    const items = page.locator('.nb-list-item')
+    await expect(items.first()).toBeVisible()
 
-    // Click a different rail item; the header title should change.
-    await page.locator('.nb-list-item', { hasText: 'Warehouse loop QC' }).click()
-    await expect(header).toHaveText('Warehouse loop QC')
+    // Add a blank investigation → it becomes active (Untitled in header).
+    await page.locator('.nb-new-btn').click()
+    await expect(page.locator('.nb-title')).toHaveText('Untitled investigation')
+
+    // Click the first (real-bag) notebook → header swaps away from Untitled.
+    await items.first().click()
+    await expect(page.locator('.nb-title')).not.toHaveText('Untitled investigation')
+  })
+
+  test('Health report chip adds a health cell that renders a real score ring', async ({ page }) => {
+    // Would catch: the cell framework not appending cells, or the health
+    // cell not wiring to /api/bags/:id/health.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    // Active notebook is the first real bag; add a health cell.
+    await page.getByRole('button', { name: /Health report/ }).click()
+    // The shared cell shell shows the command string…
+    await expect(page.getByText('bf.health().report()')).toBeVisible()
+    // …and the body renders the conic score ring from real health data.
+    await expect(page.getByRole('img', { name: /Health score/ })).toBeVisible({ timeout: 10_000 })
   })
 
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {

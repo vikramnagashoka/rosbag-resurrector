@@ -255,3 +255,52 @@
 }
 .nb-chip:hover { background: var(--nb-accent-chip); border-color: var(--nb-accent-band-border); }
 .nb-chip-plus { color: var(--nb-accent); font-weight: 600; }
+
+/* ----------------------------------------------------------------- Cell */
+.nb-cell {
+  background: var(--nb-card-bg);
+  border: 1px solid var(--nb-border);
+  border-radius: 13px;
+  overflow: visible;
+  box-shadow: var(--nb-shadow-card);
+  margin-bottom: 14px;
+}
+.nb-cell-header {
+  background: var(--nb-cell-header-bg);
+  border-radius: 12px 12px 0 0;
+  padding: 11px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.nb-cell-header.collapsed { border-radius: 12px; }
+.nb-cell-chevron {
+  border: none; background: transparent; color: var(--nb-text-faintest);
+  font-size: 11px; line-height: 1; padding: 2px; width: 16px;
+}
+.nb-cell-index { font-size: 10px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest2); }
+.nb-cell-cmd {
+  flex: 1; min-width: 0;
+  font-size: 12.5px; font-family: var(--nb-font-mono); color: var(--nb-accent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nb-cell-runtime { font-size: 10px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3); }
+.nb-cell-del {
+  border: none; background: transparent; color: var(--nb-text-faintest2);
+  font-size: 13px; line-height: 1; padding: 2px 4px;
+}
+.nb-cell-del:hover { color: var(--nb-health-bad); }
+.nb-cell-body { padding: 14px 16px; }
+.nb-cell-loading { color: var(--nb-text-faint); font-size: 12px; }
+
+/* Health cell */
+.nb-health { display: flex; align-items: center; gap: 20px; }
+.nb-ring { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center; flex: 0 0 72px; }
+.nb-ring-inner {
+  width: 54px; height: 54px; border-radius: 50%; background: var(--nb-card-bg);
+  display: grid; place-items: center; font-family: var(--nb-font-mono); font-weight: 600; font-size: 18px; color: var(--nb-text);
+}
+.nb-issues { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+.nb-issue { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--nb-text-2); }
+.nb-issue-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex: 0 0 7px; }
+.nb-issue-none { font-size: 12.5px; color: var(--nb-health-good); }
