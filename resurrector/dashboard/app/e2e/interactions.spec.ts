@@ -39,6 +39,9 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('bf.health().report()')).toBeVisible()
     // …and the body renders the conic score ring from real health data.
     await expect(page.getByRole('img', { name: /Health score/ })).toBeVisible({ timeout: 10_000 })
+    // …plus the v0.8 enriched sections: per-check breakdown + summary.
+    await expect(page.getByText('CHECKS')).toBeVisible()
+    await expect(page.getByText(/topics checked/)).toBeVisible()
   })
 
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {

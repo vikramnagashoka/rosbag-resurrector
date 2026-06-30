@@ -285,6 +285,25 @@ async def get_bag(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+def _aggregate_checks(results: list[Any]) -> list[dict[str, Any]]:
+    """Collapse per-topic-per-check HealthResults into one row per check
+    dimension. Score = worst (min) across topics so the failing dimension
+    is visible; issue_count = total across topics. Order is preserved by
+    first appearance (matches the configured check order)."""
+    agg: dict[str, dict[str, Any]] = {}
+    for r in results:
+        e = agg.get(r.check_name)
+        if e is None:
+            e = {"check": r.check_name, "score": r.score,
+                 "passed": r.passed, "issue_count": 0}
+            agg[r.check_name] = e
+        else:
+            e["score"] = min(e["score"], r.score)
+            e["passed"] = e["passed"] and r.passed
+        e["issue_count"] += len(r.issues)
+    return list(agg.values())
+
+
 @app.get("/api/bags/{bag_id}/health")
 async def get_bag_health(bag_id: int) -> dict[str, Any]:
     """Run the full health report for one bag — score, issues, recommendations.
@@ -322,6 +341,17 @@ async def get_bag_health(bag_id: int) -> dict[str, Any]:
             "topic_scores": {
                 k: {"score": v.score, "issue_count": len(v.issues)}
                 for k, v in report.topic_scores.items()
+            },
+            # Per-check breakdown (the 5 health dimensions). report.results
+            # is per-topic-per-check, so aggregate by check name: worst score
+            # across topics (the informative one — surfaces the failing
+            # dimension) + total issues for that dimension.
+            "checks": _aggregate_checks(report.results),
+            # Cheap aggregate counts so the UI doesn't recompute them.
+            "summary": {
+                "errors": len(report.errors),
+                "warnings": len(report.warnings),
+                "topics_checked": len(report.topic_scores),
             },
         }
     finally:

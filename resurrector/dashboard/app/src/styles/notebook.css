@@ -304,3 +304,32 @@
 .nb-issue { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--nb-text-2); }
 .nb-issue-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex: 0 0 7px; }
 .nb-issue-none { font-size: 12.5px; color: var(--nb-health-good); }
+
+/* Health cell — enriched sections (v0.8) */
+.nb-health-summary {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  font-size: 11px; font-family: var(--nb-font-mono); color: var(--nb-text-muted);
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--nb-border-hair);
+}
+.nb-health-summary b { font-weight: 600; }
+.nb-health-section-label {
+  font-size: 9.5px; font-family: var(--nb-font-mono); letter-spacing: 0.08em;
+  color: var(--nb-text-faintest); margin: 12px 0 7px;
+}
+.nb-checks { display: flex; flex-wrap: wrap; gap: 7px; }
+.nb-check {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--nb-border-hair); border-radius: 7px;
+  padding: 5px 9px; font-size: 11px;
+}
+.nb-check-name { color: var(--nb-text-2); }
+.nb-check-score { font-family: var(--nb-font-mono); font-weight: 600; }
+.nb-recos { display: flex; flex-direction: column; gap: 5px; }
+.nb-reco { display: flex; gap: 8px; font-size: 12.5px; color: var(--nb-text-2); }
+.nb-reco::before { content: '→'; color: var(--nb-accent); }
+.nb-topic-scores { display: flex; flex-wrap: wrap; gap: 6px; }
+.nb-topic-score {
+  font-size: 10.5px; font-family: var(--nb-font-mono);
+  border: 1px solid var(--nb-border-hair); border-radius: 6px; padding: 3px 8px;
+  color: var(--nb-text-2);
+}

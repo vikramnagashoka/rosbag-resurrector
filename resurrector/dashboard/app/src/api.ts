@@ -115,6 +115,10 @@ export interface HealthReport {
   }>
   recommendations: string[]
   topic_scores: Record<string, { score: number; issue_count: number }>
+  // Added v0.8: per-check breakdown + aggregate counts (optional so older
+  // backends / cached responses without them still type-check).
+  checks?: Array<{ check: string; score: number; passed: boolean; issue_count: number }>
+  summary?: { errors: number; warnings: number; topics_checked: number }
 }
 
 export interface Annotation {
