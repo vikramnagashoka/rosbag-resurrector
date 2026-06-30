@@ -8,6 +8,33 @@ import { test, expect } from '@playwright/test'
 // like*, interactions catch *what it does*. Both layers need to exist
 // for features that ship with new UI affordances.
 
+test.describe('Notebook workspace (v0.8 overhaul)', () => {
+  test('rail switches the active notebook + header follows', async ({ page }) => {
+    // Would catch: rail item click not swapping active notebook, or the
+    // header not reflecting the active notebook's title/bag.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    // The first notebook is active by default — its title shows in the header.
+    const header = page.locator('.nb-title')
+    await expect(header).toHaveText('Gripper slip — root cause')
+
+    // Click a different rail item; the header title should change.
+    await page.locator('.nb-list-item', { hasText: 'Warehouse loop QC' }).click()
+    await expect(header).toHaveText('Warehouse loop QC')
+  })
+
+  test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
+    // Would catch: the "+" button regressing to a no-op.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    const before = await page.locator('.nb-list-item').count()
+    await page.locator('.nb-new-btn').click()
+    await expect(page.locator('.nb-list-item')).toHaveCount(before + 1)
+    await expect(page.locator('.nb-title')).toHaveText('Untitled investigation')
+  })
+})
+
 test.describe('Library → Explorer navigation', () => {
   test('clicking a bag card lands on its Explorer view with topics listed', async ({ page }) => {
     // Would catch: SPA-route regressions (e.g. v0.5.x SPA fallback

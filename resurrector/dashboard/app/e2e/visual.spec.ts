@@ -93,4 +93,16 @@ test.describe('Visual baselines', () => {
       test.skip(true, 'Health link not found from Explorer; tighten locator')
     }
   })
+
+  test('Notebook workspace shell (v0.8 overhaul)', async ({ page }) => {
+    // Would catch: regressions in the warm-paper notebook chrome — rail,
+    // header, empty feed, command bar. Static data in PR 0, so fully
+    // deterministic. Lives at /n, separate from the classic dark UI.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    // Wait for the webfont to settle so the snapshot is stable.
+    await page.evaluate(() => (document as any).fonts?.ready)
+    await page.waitForTimeout(300)
+    await expect(page).toHaveScreenshot('notebook-shell.png', { fullPage: true })
+  })
 })

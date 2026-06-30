@@ -1,0 +1,257 @@
+/* Notebook UI overhaul — scoped warm "paper" theme (v0.8).
+ *
+ * Deliberately scoped under `.nb` so it does NOT touch the existing
+ * dark-themed pages (Library/Explorer/Health/…). The notebook workspace
+ * is built alongside the old UI and swapped in as the default only once
+ * it reaches parity. Tokens mirror design_handoff_notebook_overhaul/README.md.
+ */
+
+.nb {
+  /* Surfaces / neutrals */
+  --nb-app-bg: #f4f2ec;
+  --nb-rail-bg: #fbf8f1;
+  --nb-card-bg: #fffdf9;
+  --nb-cell-header-bg: #faf7f0;
+  --nb-field-bg: #f1ede4;
+  --nb-search-field-bg: #f6f3ea;
+  --nb-chart-bg: #fbfaf6;
+
+  /* Borders */
+  --nb-border: #e6e0d3;
+  --nb-border-hair: #efe9dd;
+  --nb-border-hair2: #f0ebe1;
+  --nb-border-control: #ddd6c8;
+  --nb-border-soft: #eee8db;
+
+  /* Text */
+  --nb-text: #26231e;
+  --nb-text-2: #46413a;
+  --nb-text-muted: #6b6457;
+  --nb-text-faint: #9a9281;
+  --nb-text-faintest: #a99f8a;
+  --nb-text-faintest2: #b5ab95;
+  --nb-text-faintest3: #c0b8a3;
+
+  /* Accent (themeable; default blue) */
+  --nb-accent: #2563c9;
+  --nb-accent-band: rgba(37, 99, 201, 0.13);
+  --nb-accent-band-border: rgba(37, 99, 201, 0.55);
+  --nb-accent-chip: rgba(37, 99, 201, 0.10);
+
+  /* Health tiers */
+  --nb-health-good: #2f8f5f;
+  --nb-health-good-bg: #e7f4ec;
+  --nb-health-warn: #bf8a2c;
+  --nb-health-warn-bg: #f6efdd;
+  --nb-health-bad: #c75c4b;
+  --nb-health-bad-bg: #f8eae6;
+
+  /* Explain panel + tooltip + independent toggle */
+  --nb-explain-bg: #f6f4fb;
+  --nb-explain-border: #e7e3f2;
+  --nb-tooltip-bg: #2a2722;
+  --nb-tooltip-text: #f6f3ea;
+  --nb-indep-text: #9a7415;
+  --nb-indep-bg: #f6efdd;
+  --nb-indep-border: #e0d6b8;
+
+  /* Type */
+  --nb-font-ui: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --nb-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Shadows */
+  --nb-shadow-card: 0 1px 2px rgba(80, 70, 40, 0.04);
+  --nb-shadow-pop: 0 10px 30px rgba(80, 70, 40, 0.14);
+  --nb-shadow-tooltip: 0 6px 20px rgba(0, 0, 0, 0.22);
+
+  /* Series palette (consumed by JS too, kept here for reference) */
+  --nb-series-1: #5a57d6;
+  --nb-series-2: #bf8a2c;
+  --nb-series-3: #2f8f5f;
+  --nb-series-4: #3f6fb0;
+  --nb-series-5: #c75c4b;
+  --nb-series-6: #7c4dd6;
+
+  position: fixed;
+  inset: 0;
+  display: flex;
+  background: var(--nb-app-bg);
+  color: var(--nb-text);
+  font-family: var(--nb-font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.nb *, .nb *::before, .nb *::after { box-sizing: border-box; }
+.nb button { font-family: inherit; cursor: pointer; }
+
+/* ---------------------------------------------------------------- Rail */
+.nb-rail {
+  width: 250px;
+  flex: 0 0 250px;
+  background: var(--nb-rail-bg);
+  border-right: 1px solid var(--nb-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.nb-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 16px 14px;
+}
+.nb-brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--nb-accent);
+  flex: 0 0 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.nb-brand-mark span { width: 12px; height: 12px; border-radius: 3px; background: #fffdf9; opacity: 0.92; }
+.nb-brand-name { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
+.nb-brand-sub { font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest); }
+
+.nb-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 16px;
+  font-size: 9.5px;
+  font-family: var(--nb-font-mono);
+  letter-spacing: 0.1em;
+  color: var(--nb-text-faintest);
+}
+.nb-new-btn {
+  width: 22px; height: 22px;
+  border: 1px solid var(--nb-border-control);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--nb-accent);
+  font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.nb-new-btn:hover { background: #f1ebdf; }
+
+.nb-list { flex: 1; overflow-y: auto; padding: 2px 10px; }
+.nb-list-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  padding: 9px 11px;
+  margin-bottom: 3px;
+}
+.nb-list-item:hover { background: #f1ebdf; }
+.nb-list-item.active {
+  background: #fffdf9;
+  border-color: #e3ddcf;
+  box-shadow: inset 3px 0 0 var(--nb-accent);
+}
+.nb-item-title { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: #6b6457; }
+.nb-list-item.active .nb-item-title { color: var(--nb-text); }
+.nb-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
+.nb-item-file { font-size: 10px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest); margin-top: 3px; }
+.nb-item-cells { font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3); margin-top: 2px; }
+
+.nb-status {
+  border-top: 1px solid var(--nb-border);
+  padding: 12px 16px;
+}
+.nb-status-row { display: flex; align-items: center; justify-content: space-between; }
+.nb-status-label { font-size: 11px; color: var(--nb-text-muted); font-weight: 500; }
+.nb-status-doctor { font-size: 11px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest); }
+.nb-status-bar { display: flex; gap: 3px; margin: 8px 0 6px; }
+.nb-status-seg { height: 6px; flex: 1; border-radius: 2px; }
+.nb-status-meta { font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3); }
+
+/* -------------------------------------------------------------- Column */
+.nb-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.nb-header {
+  background: var(--nb-card-bg);
+  border-bottom: 1px solid var(--nb-border);
+  padding: 14px 22px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.nb-title { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+.nb-header-meta { display: flex; align-items: center; gap: 10px; margin-top: 7px; flex-wrap: wrap; }
+.nb-bag-chip {
+  font-size: 11px; font-family: var(--nb-font-mono);
+  background: var(--nb-field-bg); border: 1px solid var(--nb-border);
+  border-radius: 6px; padding: 3px 8px; color: var(--nb-text-2);
+}
+.nb-health-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-family: var(--nb-font-mono); font-weight: 600;
+  border-radius: 20px; padding: 3px 10px;
+}
+.nb-duration { font-size: 11px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest); }
+
+.nb-header-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.nb-btn {
+  font-size: 12.5px; font-weight: 500;
+  border-radius: 8px; padding: 7px 14px;
+  border: 1px solid var(--nb-border-control);
+  background: var(--nb-card-bg); color: var(--nb-text-2);
+}
+.nb-btn:hover { background: #faf6ec; }
+.nb-btn-accent { background: var(--nb-accent); color: #fff; border-color: var(--nb-accent); }
+.nb-btn-accent:hover { filter: brightness(1.05); }
+
+/* ----------------------------------------------------------------- Feed */
+.nb-feed { flex: 1; overflow-y: auto; }
+.nb-feed-inner { max-width: 900px; margin: 0 auto; padding: 22px 20px 36px; }
+.nb-empty {
+  border: 1.5px dashed var(--nb-border-control);
+  border-radius: 13px;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--nb-text-faint);
+}
+.nb-empty-title { font-size: 14px; font-weight: 600; color: var(--nb-text-muted); margin-bottom: 6px; }
+.nb-empty-sub { font-size: 12px; }
+
+/* --------------------------------------------------------- Command bar */
+.nb-cmdbar { background: var(--nb-card-bg); border-top: 1px solid var(--nb-border); }
+.nb-cmdbar-inner { max-width: 900px; margin: 0 auto; padding: 14px 20px 16px; position: relative; }
+.nb-cmd-input-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--nb-field-bg);
+  border: 1px solid var(--nb-border-control);
+  border-radius: 10px;
+  padding: 9px 12px;
+  transition: border-color 0.12s;
+}
+.nb-cmd-input-row:focus-within { border-color: var(--nb-accent); }
+.nb-cmd-caret { color: var(--nb-accent); font-family: var(--nb-font-mono); font-weight: 600; }
+.nb-cmd-input {
+  flex: 1; border: none; background: transparent; outline: none;
+  font-family: var(--nb-font-mono); font-size: 12.5px; color: var(--nb-text);
+}
+.nb-cmd-input::placeholder { color: var(--nb-text-faintest); }
+.nb-cmd-keyhint {
+  font-size: 10px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest);
+  background: #fffdf9; border: 1px solid var(--nb-border-soft); border-radius: 5px; padding: 2px 6px;
+}
+.nb-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.nb-chip {
+  font-size: 12px;
+  border: 1px solid var(--nb-border-control);
+  background: transparent;
+  border-radius: 8px;
+  padding: 6px 11px;
+  color: var(--nb-text-2);
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.nb-chip:hover { background: var(--nb-accent-chip); border-color: var(--nb-accent-band-border); }
+.nb-chip-plus { color: var(--nb-accent); font-weight: 600; }
