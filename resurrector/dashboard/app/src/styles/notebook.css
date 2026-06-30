@@ -333,3 +333,36 @@
   border: 1px solid var(--nb-border-hair); border-radius: 6px; padding: 3px 8px;
   color: var(--nb-text-2);
 }
+
+/* ---------------------------------------------------------- Plot cell */
+.nb-cell-select {
+  font-family: var(--nb-font-mono); font-size: 11px;
+  background: var(--nb-card-bg); color: var(--nb-text-2);
+  border: 1px solid var(--nb-border-control); border-radius: 7px;
+  padding: 3px 6px;
+}
+.nb-plot-legend {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin-bottom: 10px;
+}
+.nb-legend-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; font-family: var(--nb-font-mono); color: var(--nb-text-2);
+}
+.nb-legend-swatch { width: 9px; height: 9px; border-radius: 2px; }
+.nb-legend-val { color: var(--nb-text-muted); }
+.nb-plot-meta {
+  margin-left: auto; font-size: 10.5px; font-family: var(--nb-font-mono);
+  color: var(--nb-text-faintest);
+}
+.nb-chart-wrap { position: relative; }
+.nb-chart {
+  width: 100%; height: 190px; display: block;
+  background: var(--nb-chart-bg);
+  border: 1px solid var(--nb-border-hair2); border-radius: 8px;
+}
+.nb-chart-xaxis {
+  display: flex; justify-content: space-between;
+  font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest);
+  margin-top: 4px; padding: 0 2px;
+}

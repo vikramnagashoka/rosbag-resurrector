@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import '../styles/notebook.css'
 import { api } from '../api'
-import { Notebook, HealthTier, CellType, Cell, nextCellId } from './types'
+import { Notebook, HealthTier, CellType, Cell, nextCellId, plottableTopics } from './types'
 import { notebooksFromBags } from './build'
 import CellFeed from './CellFeed'
 
@@ -19,8 +19,8 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
 // Suggestion chips. `type` is the cell they add (null = not wired yet —
 // those land in their respective PRs alongside the command palette).
 const SUGGESTIONS: { label: string; type: CellType | null }[] = [
+  { label: 'Plot signal', type: 'plot' },
   { label: 'Health report', type: 'health' },
-  { label: 'Plot /odom', type: null },
   { label: 'Stats /imu/data', type: null },
   { label: 'Synchronize', type: null },
   { label: 'Semantic search', type: null },
@@ -57,7 +57,7 @@ export default function NotebookWorkspace() {
     const blank: Notebook = {
       id, title: 'Untitled investigation', bag: '—',
       health: 0, tier: 'warn', durationLabel: '—', durationSec: 0,
-      topicCount: 0, messageCount: 0, cells: [],
+      topicCount: 0, messageCount: 0, bagTopics: [], cells: [],
     }
     setNotebooks(prev => [...prev, blank])
     setActiveId(id)
@@ -66,8 +66,19 @@ export default function NotebookWorkspace() {
   function addCell(type: CellType) {
     if (!active) return
     const cell: Cell = { id: nextCellId(), type }
+    // Plot cells need a starting topic — the first line-plottable one.
+    if (type === 'plot') cell.topic = plottableTopics(active)[0]
     setNotebooks(prev => prev.map(n =>
       n.id === active.id ? { ...n, cells: [...n.cells, cell] } : n,
+    ))
+  }
+
+  function setCellTopic(cellId: string, topic: string) {
+    if (!active) return
+    setNotebooks(prev => prev.map(n =>
+      n.id === active.id
+        ? { ...n, cells: n.cells.map(c => (c.id === cellId ? { ...c, topic } : c)) }
+        : n,
     ))
   }
 
@@ -179,11 +190,13 @@ export default function NotebookWorkspace() {
               <CellFeed
                 cells={active.cells}
                 bagId={active.bagId}
+                plottableTopics={plottableTopics(active)}
                 collapsed={collapsed}
                 runtime={runtime}
                 onToggleCollapse={toggleCollapse}
                 onDelete={removeCell}
                 onRuntime={setCellRuntime}
+                onSetTopic={setCellTopic}
               />
             )}
           </div>

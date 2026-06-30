@@ -27,7 +27,17 @@ export interface Notebook {
   durationSec: number
   topicCount: number
   messageCount: number
+  bagTopics: { name: string; messageType: string }[]
   cells: Cell[]
+}
+
+// Image topics aren't line-plottable; everything else is offered in the
+// plot topic dropdown (numeric extraction happens after fetch).
+const IMAGE_TYPES = new Set([
+  'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage',
+])
+export function plottableTopics(nb: Pick<Notebook, 'bagTopics'>): string[] {
+  return nb.bagTopics.filter(t => !IMAGE_TYPES.has(t.messageType)).map(t => t.name)
 }
 
 export function tierForScore(score: number): HealthTier {

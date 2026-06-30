@@ -44,6 +44,29 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText(/topics checked/)).toBeVisible()
   })
 
+  test('Plot signal chip adds a plot cell with a real SVG chart + topic dropdown', async ({ page }) => {
+    // Would catch: plot cell not rendering, the downsampled-series fetch
+    // failing, or the header topic dropdown not re-driving the cell.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: /Plot signal/ }).click()
+
+    // The chart renders with at least one series polyline carrying points.
+    // (Don't assert toBeVisible on the polyline — constant-signal topics
+    // draw a flat zero-height line that Playwright reports as hidden.)
+    await expect(page.locator('.nb-chart')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-chart polyline')).not.toHaveCount(0)
+    const points = await page.locator('.nb-chart polyline').first().getAttribute('points')
+    expect(points && points.length).toBeTruthy()
+
+    // The topic dropdown re-drives the command string.
+    const select = page.locator('.nb-cell-select')
+    const options = await select.locator('option').allTextContents()
+    expect(options.length).toBeGreaterThan(1)
+    await select.selectOption(options[1])
+    await expect(page.getByText(`bf["${options[1]}"].plot()`)).toBeVisible()
+  })
+
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
     // Would catch: the "+" button regressing to a no-op.
     await page.goto('/n')
