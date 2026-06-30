@@ -25,6 +25,10 @@ interface Props {
   // Click-to-jump callback. Receives a relative-seconds value derived
   // from where the user clicked on the ribbon.
   onJumpToTimestampSec?: (relativeSec: number) => void
+  // Drag-to-select callback. Receives the [start, end] seconds of a box
+  // the user dragged horizontally on the ribbon — an arbitrary-width range
+  // (vs the fixed window a single click produces).
+  onSelectRangeSec?: (startSec: number, endSec: number) => void
 }
 
 const RIBBON_BINS = 200
@@ -34,6 +38,7 @@ export default function DensityRibbon({
   highlightTopic,
   zoomRangeSec,
   onJumpToTimestampSec,
+  onSelectRangeSec,
 }: Props) {
   const toast = useErrorToast()
   const [data, setData] = useState<DensityResponse | null>(null)
@@ -167,8 +172,13 @@ export default function DensityRibbon({
           paper_bgcolor: '#161b22',
           plot_bgcolor: '#0d1117',
           font: { color: '#8b949e', size: 10 },
+          // Horizontal box-select: drag any-width range to pick a time
+          // window (feeds Explain / incident report). A plain click still
+          // jumps via onClick below.
+          dragmode: 'select',
+          selectdirection: 'h',
           xaxis: {
-            title: { text: 'seconds from start', font: { size: 10 } },
+            title: { text: 'seconds from start — drag to select a range', font: { size: 10 } },
             color: '#8b949e',
             gridcolor: '#30363d',
             zeroline: false,
@@ -192,6 +202,13 @@ export default function DensityRibbon({
           if (!event?.points?.length || !onJumpToTimestampSec) return
           const x = Number(event.points[0].x)
           if (isFinite(x)) onJumpToTimestampSec(x)
+        }}
+        onSelected={(event: any) => {
+          const xr = event?.range?.x
+          if (!xr || xr.length !== 2 || !onSelectRangeSec) return
+          const a = Math.min(Number(xr[0]), Number(xr[1]))
+          const b = Math.max(Number(xr[0]), Number(xr[1]))
+          if (isFinite(a) && isFinite(b) && b > a) onSelectRangeSec(a, b)
         }}
       />
     </div>

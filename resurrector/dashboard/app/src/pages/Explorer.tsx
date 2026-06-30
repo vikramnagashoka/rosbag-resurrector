@@ -191,6 +191,18 @@ export default function Explorer() {
     }
   }
 
+  function handleSelectRange(startSec: number, endSec: number) {
+    // Arbitrary-width selection from dragging a box on the density ribbon.
+    // Unlike handleJumpToTimestamp (fixed ~1s click window), this honors the
+    // exact dragged range — so Explain / report can cover any span.
+    if (!(endSec > startSec)) return
+    setXRangeSec({ start: Math.max(0, startSec), end: endSec })
+    if (!selectedTopic && bag?.topics.length) {
+      const first = bag.topics.find(t => !IMAGE_TYPES.has(t.message_type))
+      if (first) setSelectedTopic(first.name)
+    }
+  }
+
   function handleAddDerivedSeries(label: string, points: Array<{ t_ns: number; v: number }>) {
     const ts = points.map(p => p.t_ns)
     const vs = points.map(p => p.v)
@@ -248,7 +260,7 @@ export default function Explorer() {
           <button
             onClick={() => setShowExplain(true)}
             disabled={!xRangeSec}
-            title={xRangeSec ? 'Explain the selected time range' : 'Brush a range on the plot first'}
+            title={xRangeSec ? 'Explain the selected time range' : 'Drag a range on the density ribbon first'}
             style={{
               background: xRangeSec ? '#1f6feb22' : '#21262d',
               border: xRangeSec ? '1px solid #1f6feb' : '1px solid #30363d',
@@ -417,6 +429,7 @@ export default function Explorer() {
                     highlightTopic={selectedTopic}
                     zoomRangeSec={xRangeSec}
                     onJumpToTimestampSec={handleJumpToTimestamp}
+                    onSelectRangeSec={handleSelectRange}
                   />
 
                   {topicData && (
