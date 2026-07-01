@@ -60,7 +60,7 @@ export default function NotebookWorkspace() {
     const id = `nb-${Date.now()}`
     const blank: Notebook = {
       id, title: 'Untitled investigation', bag: '—',
-      health: 0, tier: 'warn', durationLabel: '—', durationSec: 0,
+      health: 0, tier: 'warn', durationLabel: '—', durationSec: 0, startNs: 0,
       topicCount: 0, messageCount: 0, bagTopics: [], cells: [],
     }
     setNotebooks(prev => [...prev, blank])
@@ -206,6 +206,7 @@ export default function NotebookWorkspace() {
                 imageTopics={imageTopics(active)}
                 pointcloudTopics={pointcloudTopics(active)}
                 frameCountFor={t => topicMessageCount(active, t)}
+                sceneTimeNs={active.startNs + Math.round(active.durationSec * 0.5 * 1e9)}
                 collapsed={collapsed}
                 runtime={runtime}
                 onToggleCollapse={toggleCollapse}

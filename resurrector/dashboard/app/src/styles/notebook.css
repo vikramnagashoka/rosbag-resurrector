@@ -400,8 +400,14 @@
   border: 1px solid var(--nb-border-hair2); border-radius: 8px;
   display: grid; place-items: center;
 }
+/* Live 3D render fills the box (dark canvas is expected for a viewer). */
+.nb-scene-live { background: #141821; overflow: hidden; padding: 0; }
 .nb-scene-label {
   font-family: var(--nb-font-mono); font-size: 12px; color: var(--nb-text-muted);
   background: var(--nb-card-bg); border: 1px solid var(--nb-border); border-radius: 8px;
   padding: 8px 14px;
+}
+.nb-scene-caption {
+  font-family: var(--nb-font-mono); font-size: 10.5px; color: var(--nb-text-faintest);
+  margin-top: 6px; text-align: center;
 }

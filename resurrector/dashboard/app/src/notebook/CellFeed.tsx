@@ -19,6 +19,7 @@ interface Props {
   imageTopics: string[]
   pointcloudTopics: string[]
   frameCountFor: (topic: string) => number
+  sceneTimeNs: number
   collapsed: Record<string, boolean>
   runtime: Record<string, number>
   onToggleCollapse: (id: string) => void
@@ -48,7 +49,8 @@ function topicSelect(
 export default function CellFeed(props: Props) {
   const {
     cells, bagId, plottableTopics, imageTopics, pointcloudTopics, frameCountFor,
-    collapsed, runtime, onToggleCollapse, onDelete, onRuntime, onSetTopic, onSetFrame,
+    sceneTimeNs, collapsed, runtime, onToggleCollapse, onDelete, onRuntime,
+    onSetTopic, onSetFrame,
   } = props
 
   return (
@@ -87,7 +89,7 @@ export default function CellFeed(props: Props) {
               : null
             break
           case 'scene':
-            body = <SceneCell bagId={bagId} topic={cell.topic} onRuntime={rt} />
+            body = <SceneCell bagId={bagId} topic={cell.topic} timeNs={sceneTimeNs} onRuntime={rt} />
             headerExtras = pointcloudTopics.length > 1
               ? topicSelect(cell.topic, pointcloudTopics, t => onSetTopic(cell.id, t))
               : null

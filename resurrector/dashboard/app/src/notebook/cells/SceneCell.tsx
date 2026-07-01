@@ -1,58 +1,42 @@
-import React, { useEffect, useState } from 'react'
-import { api, SceneTopics } from '../../api'
+import React, { useState } from 'react'
+import SceneCanvas from './SceneCanvas'
 
-// `scene` cell body — a placeholder for the point cloud + TF tree, showing
-// the live metadata line (topic · point count · TF frames) from the
-// existing scene endpoints. The full 3D render is the classic Scene tab;
-// here it's a compact summary card per the design.
+// `scene` cell body — a live 3D render (point cloud + TF triads) sized to
+// the cell, with a metadata caption. Uses the slim SceneCanvas (react-three-
+// fiber) rather than the full classic SceneViewer chrome. Renders the scene
+// at the bag's mid-time; drag to orbit.
 
 export default function SceneCell({
-  bagId, topic, onRuntime,
-}: { bagId?: number; topic?: string; onRuntime?: (ms: number) => void }) {
-  const [topics, setTopics] = useState<SceneTopics | null>(null)
-  const [nPoints, setNPoints] = useState<number | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (bagId == null) return
-    let cancelled = false
-    setTopics(null); setNPoints(null); setError(null)
-    const t0 = performance.now()
-    api.listSceneTopics(bagId)
-      .then(async st => {
-        if (cancelled) return
-        setTopics(st)
-        onRuntime?.(performance.now() - t0)
-        const pc = topic ?? st.pointclouds[0]
-        if (pc) {
-          try {
-            const cloud = await api.getScenePointCloud(bagId, pc, { maxPoints: 20000 })
-            if (!cancelled) setNPoints(cloud.n_points)
-          } catch { /* point count is a nicety */ }
-        }
-      })
-      .catch(e => { if (!cancelled) setError(String(e?.message ?? e)) })
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bagId, topic])
+  bagId, topic, timeNs, onRuntime,
+}: {
+  bagId?: number
+  topic?: string
+  timeNs: number
+  onRuntime?: (ms: number) => void
+}) {
+  const [stats, setStats] = useState<{ nPoints: number; nFrames: number } | null>(null)
 
   if (bagId == null) return <div className="nb-cell-loading">No bag bound.</div>
-  if (error) return <div className="nb-cell-loading">{error}</div>
-  if (!topics) return <div className="nb-cell-loading">Reading scene topics…</div>
+  if (!topic) return <div className="nb-cell-loading">No point cloud topics on this bag.</div>
 
-  const pc = topic ?? topics.pointclouds[0]
-  const frames = [...topics.tf, ...topics.tf_static]
-  if (!pc) return <div className="nb-cell-loading">No point cloud topics on this bag.</div>
-
-  const parts = [
-    pc,
-    nPoints != null ? `${nPoints.toLocaleString()} pts` : null,
-    frames.length ? `TF ${frames.length} frame${frames.length === 1 ? '' : 's'}` : null,
-  ].filter(Boolean)
+  const caption = [
+    topic,
+    stats ? `${stats.nPoints.toLocaleString()} pts` : null,
+    stats && stats.nFrames ? `TF ${stats.nFrames} frame${stats.nFrames === 1 ? '' : 's'}` : null,
+  ].filter(Boolean).join(' · ')
 
   return (
-    <div className="nb-scene-box">
-      <div className="nb-scene-label">[ {parts.join(' · ')} ]</div>
+    <div>
+      <div className="nb-scene-box nb-scene-live">
+        <SceneCanvas
+          bagId={bagId}
+          topic={topic}
+          timeNs={timeNs}
+          onRuntime={onRuntime}
+          onStats={setStats}
+        />
+      </div>
+      <div className="nb-scene-caption">[ {caption} · drag to orbit ]</div>
     </div>
   )
 }

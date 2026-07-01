@@ -82,10 +82,10 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await page.getByRole('button', { name: /Synchronize/ }).click()
     await expect(page.getByText(/^bf\.sync\(\[/)).toBeVisible({ timeout: 10_000 })
 
-    // Scene — placeholder box with live metadata from /scene/topics.
+    // Scene — live 3D render (react-three-fiber canvas) + metadata caption.
     await page.getByRole('button', { name: /3D scene/ }).click()
-    await expect(page.locator('.nb-scene-box')).toBeVisible({ timeout: 10_000 })
-    await expect(page.locator('.nb-scene-label')).toContainText('TF')
+    await expect(page.locator('.nb-scene-live canvas')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.nb-scene-caption')).toContainText('drag to orbit')
   })
 
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {

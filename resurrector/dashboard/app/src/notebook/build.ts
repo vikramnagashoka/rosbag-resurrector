@@ -33,6 +33,7 @@ export function notebooksFromBags(bags: Bag[]): Notebook[] {
       tier: tierForScore(score),
       durationLabel: formatDuration(b.duration_sec),
       durationSec: b.duration_sec,
+      startNs: b.start_time_ns ?? 0,
       topicCount: b.topics.length,
       messageCount: b.message_count,
       bagTopics: b.topics.map(t => ({

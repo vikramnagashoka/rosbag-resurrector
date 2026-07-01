@@ -25,6 +25,7 @@ export interface Notebook {
   tier: HealthTier
   durationLabel: string // e.g. "42.8s"
   durationSec: number
+  startNs: number       // bag start timestamp (for scene time queries)
   topicCount: number
   messageCount: number
   bagTopics: { name: string; messageType: string; messageCount: number }[]
