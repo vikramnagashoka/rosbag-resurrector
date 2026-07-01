@@ -111,6 +111,27 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-palette-row').first()).toContainText('bf["/lidar/points"].plot()')
   })
 
+  test('linked time-cursor spans plots + the time toggle flips a cell to Own time', async ({ page }) => {
+    // Would catch: hover not setting the shared cursor, consumers not
+    // drawing it, or the per-cell time toggle regressing.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: /Plot signal/ }).click()
+    await page.getByRole('button', { name: /Plot signal/ }).click()
+    await expect(page.locator('.nb-chart').first()).toBeVisible({ timeout: 10_000 })
+
+    // Hovering plot [1] draws the dashed cursor on BOTH linked plots.
+    const box = await page.locator('.nb-chart-wrap').first().boundingBox()
+    await page.mouse.move(box!.x + box!.width * 0.6, box!.y + box!.height * 0.5)
+    await expect(page.locator('.nb-chart line[stroke-dasharray="4 3"]')).toHaveCount(2)
+
+    // The per-cell time toggle flips Shared time → Own time.
+    const toggle = page.locator('.nb-time-toggle').first()
+    await expect(toggle).toContainText('Shared time')
+    await toggle.click()
+    await expect(toggle).toContainText('Own time')
+  })
+
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
     // Would catch: the "+" button regressing to a no-op.
     await page.goto('/n')

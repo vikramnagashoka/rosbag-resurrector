@@ -8,8 +8,13 @@ import { api, TopicDataResponse } from '../../api'
 const HEAD_ROWS = 8
 
 export default function SyncCell({
-  bagId, topics, onRuntime,
-}: { bagId?: number; topics?: string[]; onRuntime?: (ms: number) => void }) {
+  bagId, topics, cursor, onRuntime,
+}: {
+  bagId?: number
+  topics?: string[]
+  cursor?: number | null
+  onRuntime?: (ms: number) => void
+}) {
   const [resp, setResp] = useState<TopicDataResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -33,6 +38,18 @@ export default function SyncCell({
   if (!resp.data.length) return <div className="nb-cell-loading">No aligned rows.</div>
 
   const cols = resp.columns
+  const rows = resp.data.slice(0, HEAD_ROWS)
+
+  // Row nearest the linked cursor — mapped across the shown rows' time span.
+  let cursorRow = -1
+  if (cursor != null && rows.length) {
+    const ts = rows.map(r => Number(r.timestamp_ns))
+    const tMin = Math.min(...ts), tMax = Math.max(...ts)
+    const target = tMin + cursor * (tMax - tMin || 1)
+    let bestDt = Infinity
+    ts.forEach((t, i) => { const dt = Math.abs(t - target); if (dt < bestDt) { bestDt = dt; cursorRow = i } })
+  }
+
   return (
     <div className="nb-table-scroll">
       <table className="nb-table">
@@ -40,8 +57,8 @@ export default function SyncCell({
           <tr>{cols.map(c => <th key={c}>{c.replace(/_/g, '.')}</th>)}</tr>
         </thead>
         <tbody>
-          {resp.data.slice(0, HEAD_ROWS).map((row, i) => (
-            <tr key={i}>
+          {rows.map((row, i) => (
+            <tr key={i} className={i === cursorRow ? 'nb-row-cursor' : undefined}>
               {cols.map(c => {
                 const v = row[c]
                 return <td key={c}>{typeof v === 'number' ? v.toFixed(3) : String(v ?? '—')}</td>

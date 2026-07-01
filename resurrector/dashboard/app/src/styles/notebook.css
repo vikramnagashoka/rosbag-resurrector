@@ -438,3 +438,25 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .nb-palette-empty { padding: 12px 14px; font-size: 12px; color: var(--nb-text-faint); }
+
+/* --------------------------------------------------- Linked time cursor */
+.nb-cursor-readout {
+  position: absolute; top: 6px;
+  transform: translateX(-50%);
+  background: rgba(20,17,12,0.9); color: #f6f3ea;
+  font-family: var(--nb-font-mono); font-size: 10px;
+  padding: 2px 6px; border-radius: 4px; white-space: nowrap;
+  pointer-events: none;
+}
+/* Per-cell time toggle pill (clock) in the cell header */
+.nb-time-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 10.5px; font-family: var(--nb-font-mono);
+  border-radius: 20px; padding: 3px 9px; border: 1px solid var(--nb-border-control);
+  background: var(--nb-card-bg); color: var(--nb-text-muted);
+}
+.nb-time-toggle.shared { color: var(--nb-accent); border-color: var(--nb-accent-band-border); background: var(--nb-accent-chip); }
+.nb-time-toggle.own { color: var(--nb-indep-text); border-color: var(--nb-indep-border); background: var(--nb-indep-bg); }
+/* Sync row highlight at the cursor time */
+.nb-table tr.nb-row-cursor td { background: var(--nb-accent-chip); }
+.nb-image-follow { font-size: 10.5px; font-family: var(--nb-font-mono); color: var(--nb-accent); white-space: nowrap; }

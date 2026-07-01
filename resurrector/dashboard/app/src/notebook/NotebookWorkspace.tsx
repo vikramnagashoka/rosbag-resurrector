@@ -42,6 +42,11 @@ export default function NotebookWorkspace() {
   // Per-cell UI state, keyed by cell id.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [runtime, setRuntime] = useState<Record<string, number>>({})
+  // Linked time-cursor: a shared fraction 0–1 of the plot/bag time range.
+  // Cells on "Own time" (in `unlinked`) use their own `localCursor` instead.
+  const [cursor, setCursor] = useState<number | null>(null)
+  const [localCursor, setLocalCursor] = useState<Record<string, number>>({})
+  const [unlinked, setUnlinked] = useState<Record<string, boolean>>({})
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -130,6 +135,31 @@ export default function NotebookWorkspace() {
 
   function toggleCollapse(cellId: string) {
     setCollapsed(prev => ({ ...prev, [cellId]: !prev[cellId] }))
+  }
+
+  // The cursor a given cell reads: its own when unlinked, else the shared one.
+  const cursorForCell = (cellId: string): number | null =>
+    unlinked[cellId] ? (localCursor[cellId] ?? null) : cursor
+
+  // Hovering a cell writes the cursor — shared if linked, local if not.
+  function moveCursor(cellId: string, frac: number | null) {
+    if (unlinked[cellId]) {
+      if (frac != null) setLocalCursor(prev => ({ ...prev, [cellId]: frac }))
+    } else {
+      setCursor(frac)
+    }
+  }
+
+  // Flip a cell between Shared time and Own time. Switching to Own seeds its
+  // local cursor from the current shared one so it doesn't jump.
+  function toggleLink(cellId: string) {
+    setUnlinked(prev => {
+      const nowUnlinked = !prev[cellId]
+      if (nowUnlinked && cursor != null) {
+        setLocalCursor(lc => ({ ...lc, [cellId]: cursor }))
+      }
+      return { ...prev, [cellId]: nowUnlinked }
+    })
   }
 
   function setCellRuntime(cellId: string, ms: number) {
@@ -239,11 +269,15 @@ export default function NotebookWorkspace() {
                 sceneTimeNs={active.startNs + Math.round(active.durationSec * 0.5 * 1e9)}
                 collapsed={collapsed}
                 runtime={runtime}
+                cursorForCell={cursorForCell}
+                isUnlinked={id => !!unlinked[id]}
                 onToggleCollapse={toggleCollapse}
                 onDelete={removeCell}
                 onRuntime={setCellRuntime}
                 onSetTopic={setCellTopic}
                 onSetFrame={setCellFrame}
+                onCursor={moveCursor}
+                onToggleLink={toggleLink}
               />
             )}
           </div>
