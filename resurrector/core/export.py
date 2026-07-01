@@ -445,7 +445,7 @@ class Exporter:
         except ImportError:
             raise ImportError(
                 "Frame export requires Pillow. "
-                "Install with: pip install rosbag-resurrector[vision-lite]"
+                "Install with: pip install 'rosbag-resurrector[vision-lite]'"
             )
 
         output_path = Path(output_dir)
@@ -502,7 +502,7 @@ class Exporter:
         except ImportError:
             raise ImportError(
                 "Video export requires OpenCV. "
-                "Install with: pip install rosbag-resurrector[vision-lite]"
+                "Install with: pip install 'rosbag-resurrector[vision-lite]'"
             )
 
         output_file = Path(output_path)
@@ -842,7 +842,7 @@ def _stream_rlds(
     except ImportError:
         raise ImportError(
             "RLDS export requires tensorflow. "
-            "Install with: pip install rosbag-resurrector[all-exports]"
+            "Install with: pip install 'rosbag-resurrector[all-exports]'"
         )
 
     output_path.mkdir(parents=True, exist_ok=True)

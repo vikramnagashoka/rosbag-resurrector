@@ -235,7 +235,7 @@ def _llm_narrative(evidence: dict[str, Any], model: str, client: Any = None) -> 
         except ImportError:
             raise ImportError(
                 "The copilot needs the anthropic SDK. "
-                "Install with: pip install rosbag-resurrector[copilot]"
+                "Install with: pip install 'rosbag-resurrector[copilot]'"
             )
         client = anthropic.Anthropic()
 

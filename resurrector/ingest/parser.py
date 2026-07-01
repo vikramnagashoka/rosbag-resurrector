@@ -593,7 +593,7 @@ def _parse_compressed_image(buf: bytes) -> dict[str, Any]:
 def get_compressed_image_array(msg: Message) -> np.ndarray | None:
     """Decode a CompressedImage message (JPEG/PNG) to a numpy array.
 
-    Requires Pillow: pip install rosbag-resurrector[vision-lite]
+    Requires Pillow: pip install 'rosbag-resurrector[vision-lite]'
     """
     if msg.raw_data is None or "format" not in msg.data:
         return None
@@ -606,7 +606,7 @@ def get_compressed_image_array(msg: Message) -> np.ndarray | None:
     except ImportError:
         raise ImportError(
             "CompressedImage decoding requires Pillow. "
-            "Install with: pip install rosbag-resurrector[vision-lite]"
+            "Install with: pip install 'rosbag-resurrector[vision-lite]'"
         )
 
     import io
@@ -724,7 +724,7 @@ def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
         raise NotImplementedError(
             "ROS1 .bag format requires the mcap CLI for auto-convert "
             "(https://mcap.dev/guides/cli) or the 'rosbags' package "
-            "(pip install rosbag-resurrector[ros1])."
+            "(pip install 'rosbag-resurrector[ros1]')."
         )
     if ext == ".db3":
         raise NotImplementedError(

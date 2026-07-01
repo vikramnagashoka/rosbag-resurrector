@@ -65,7 +65,7 @@ export default function SearchCell({
 
       {status === 'no_vision' && (
         <div className="nb-search-msg">
-          Semantic search needs the vision extras — <code>pip install rosbag-resurrector[vision]</code>, then restart.
+          Semantic search needs the vision extras — <code>pip install 'rosbag-resurrector[vision]'</code>, then restart.
         </div>
       )}
       {status === 'no_frames' && (

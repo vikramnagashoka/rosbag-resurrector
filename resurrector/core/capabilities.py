@@ -97,7 +97,7 @@ def get_capabilities() -> dict[str, Capability]:
         Capability(
             name="vision",
             available=_vision_available(),
-            install_command="pip install rosbag-resurrector[vision]",
+            install_command="pip install 'rosbag-resurrector[vision]'",
             description="Semantic frame search via CLIP embeddings",
         ),
         Capability(
@@ -122,19 +122,19 @@ def get_capabilities() -> dict[str, Capability]:
         Capability(
             name="all_exports",
             available=_all_exports_available(),
-            install_command="pip install rosbag-resurrector[all-exports]",
+            install_command="pip install 'rosbag-resurrector[all-exports]'",
             description="Zarr and TensorFlow Datasets (RLDS) export formats",
         ),
         Capability(
             name="publish",
             available=_publish_available(),
-            install_command="pip install rosbag-resurrector[publish]",
+            install_command="pip install 'rosbag-resurrector[publish]'",
             description="Publish datasets to the HuggingFace Hub with an auto card",
         ),
         Capability(
             name="copilot",
             available=_copilot_available(),
-            install_command="pip install rosbag-resurrector[copilot]",
+            install_command="pip install 'rosbag-resurrector[copilot]'",
             description="'Ask your bag' — grounded natural-language analysis",
         ),
     ]

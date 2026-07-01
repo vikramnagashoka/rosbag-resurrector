@@ -1124,7 +1124,7 @@ async def search_frames_api(
                 detail={
                     "kind": "vision_not_installed",
                     "message": str(e),
-                    "install_command": "pip install rosbag-resurrector[vision]",
+                    "install_command": "pip install 'rosbag-resurrector[vision]'",
                 },
             )
 
@@ -1158,7 +1158,7 @@ async def search_frames_api(
                 detail={
                     "kind": "vision_not_installed",
                     "message": str(e),
-                    "install_command": "pip install rosbag-resurrector[vision]",
+                    "install_command": "pip install 'rosbag-resurrector[vision]'",
                 },
             )
 
@@ -1260,7 +1260,7 @@ async def get_search_index_status() -> dict[str, Any]:
 
         return {
             "vision_available": vision_available,
-            "install_command": "pip install rosbag-resurrector[vision]",
+            "install_command": "pip install 'rosbag-resurrector[vision]'",
             "indexed_bags": indexed,
             "unindexed_bags": unindexed,
         }

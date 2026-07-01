@@ -4,7 +4,7 @@ Subscribes to live ROS2 topics and relays parsed messages to the bridge
 server via a callback. Uses raw CDR parsing from resurrector.ingest.parser
 to avoid needing compiled message types on the client.
 
-Requires rclpy: pip install rosbag-resurrector[bridge-live]
+Requires rclpy: pip install 'rosbag-resurrector[bridge-live]'
 """
 
 from __future__ import annotations
