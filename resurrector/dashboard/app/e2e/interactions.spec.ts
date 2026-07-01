@@ -88,6 +88,29 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-scene-caption')).toContainText('drag to orbit')
   })
 
+  test('command palette filters the catalog + Enter runs the top match', async ({ page }) => {
+    // Would catch: palette not filtering, Enter-to-run regressing, or the
+    // catalog not being topic-aware.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    const input = page.locator('.nb-cmd-input')
+    await input.click()
+    await input.fill('health')
+    await expect(page.locator('.nb-palette')).toBeVisible()
+    await expect(page.locator('.nb-palette-row').first()).toContainText('bf.health().report()')
+
+    // Enter runs the top match → a health cell appears; palette closes.
+    await input.press('Enter')
+    await expect(page.getByRole('img', { name: /Health score/ })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-palette')).toHaveCount(0)
+
+    // Filtering by topic name narrows to that topic's commands.
+    await input.fill('lidar plot')
+    await expect(page.locator('.nb-palette-row')).toHaveCount(1)
+    await expect(page.locator('.nb-palette-row').first()).toContainText('bf["/lidar/points"].plot()')
+  })
+
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
     // Would catch: the "+" button regressing to a no-op.
     await page.goto('/n')

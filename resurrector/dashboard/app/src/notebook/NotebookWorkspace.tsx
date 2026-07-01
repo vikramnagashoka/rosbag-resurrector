@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import '../styles/notebook.css'
 import { api } from '../api'
 import {
@@ -6,6 +6,8 @@ import {
   plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
 } from './types'
 import { notebooksFromBags } from './build'
+import { buildCatalog, filterCatalog, CommandEntry } from './commands'
+import CommandPalette from './CommandPalette'
 import CellFeed from './CellFeed'
 
 // The notebook workspace: rail + header + cell feed + docked command bar.
@@ -35,10 +37,12 @@ export default function NotebookWorkspace() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   // Per-cell UI state, keyed by cell id.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [runtime, setRuntime] = useState<Record<string, number>>({})
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -55,6 +59,32 @@ export default function NotebookWorkspace() {
   }, [])
 
   const active = notebooks.find(n => n.id === activeId) ?? null
+
+  const catalog = useMemo(() => buildCatalog(active), [active])
+  const filtered = useMemo(() => filterCatalog(catalog, query), [catalog, query])
+
+  function appendCell(cell: Cell) {
+    if (!active) return
+    setNotebooks(prev => prev.map(n =>
+      n.id === active.id ? { ...n, cells: [...n.cells, cell] } : n,
+    ))
+  }
+
+  function runEntry(e: CommandEntry) {
+    appendCell(e.makeCell())
+    setQuery('')
+    setPaletteOpen(false)
+  }
+
+  function onInputKeyDown(ev: React.KeyboardEvent) {
+    if (ev.key === 'Enter' && filtered.length) {
+      ev.preventDefault()
+      runEntry(filtered[0])
+    } else if (ev.key === 'Escape') {
+      setPaletteOpen(false)
+      inputRef.current?.blur()
+    }
+  }
 
   function newNotebook() {
     const id = `nb-${Date.now()}`
@@ -221,12 +251,19 @@ export default function NotebookWorkspace() {
 
         <div className="nb-cmdbar">
           <div className="nb-cmdbar-inner">
+            {paletteOpen && query.trim() && active && (
+              <CommandPalette entries={filtered} onRun={runEntry} />
+            )}
             <div className="nb-cmd-input-row">
               <span className="nb-cmd-caret">&gt;</span>
               <input
+                ref={inputRef}
                 className="nb-cmd-input"
                 value={query}
-                onChange={e => setQuery(e.target.value)}
+                onChange={e => { setQuery(e.target.value); setPaletteOpen(true) }}
+                onFocus={() => setPaletteOpen(true)}
+                onBlur={() => setPaletteOpen(false)}
+                onKeyDown={onInputKeyDown}
                 placeholder={'type a query — bf["/topic"].plot(), .sync([...]), .health(), search("…")'}
                 spellCheck={false}
               />
