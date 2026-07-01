@@ -1,31 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { api, TopicDataResponse } from '../../api'
+import { extractSeries, SERIES_COLORS } from './series'
 
 // `plot` cell body — a multi-series line chart rendered as inline SVG from
 // the existing downsampled-series endpoint. Topic dropdown lives in the
 // cell header (passed up via the workspace). Region-select + linked cursor
 // land in later PRs.
 
-const SERIES_COLORS = ['#5a57d6', '#bf8a2c', '#2f8f5f', '#3f6fb0', '#c75c4b', '#7c4dd6']
 const MAX_POINTS = 120
-
-interface Series { label: string; ts: number[]; values: number[] }
-
-function extractSeries(resp: TopicDataResponse): Series[] {
-  if (!resp.data.length) return []
-  const ts = resp.data.map(r => Number(r.timestamp_ns))
-  const out: Series[] = []
-  for (const col of resp.columns) {
-    if (col === 'timestamp_ns') continue
-    if (typeof resp.data[0][col] !== 'number') continue
-    out.push({
-      label: col,
-      ts,
-      values: resp.data.map(r => (typeof r[col] === 'number' ? (r[col] as number) : NaN)),
-    })
-  }
-  return out
-}
 
 export default function PlotCell({
   bagId, topic, onRuntime,

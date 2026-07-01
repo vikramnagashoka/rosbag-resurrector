@@ -67,6 +67,27 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText(`bf["${options[1]}"].plot()`)).toBeVisible()
   })
 
+  test('stats / sync / scene cells render real data from live endpoints', async ({ page }) => {
+    // Would catch: any of the PR 4 cell renderers regressing or their
+    // endpoint wiring breaking (stats compute, /sync, /scene/topics).
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    // Stats — table with the sampled-points footer.
+    await page.getByRole('button', { name: /Statistics/ }).click()
+    await expect(page.locator('.nb-table').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(/sampled points/)).toBeVisible()
+
+    // Sync — aligned head() via /api/bags/:id/sync.
+    await page.getByRole('button', { name: /Synchronize/ }).click()
+    await expect(page.getByText(/^bf\.sync\(\[/)).toBeVisible({ timeout: 10_000 })
+
+    // Scene — placeholder box with live metadata from /scene/topics.
+    await page.getByRole('button', { name: /3D scene/ }).click()
+    await expect(page.locator('.nb-scene-box')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-scene-label')).toContainText('TF')
+  })
+
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
     // Would catch: the "+" button regressing to a no-op.
     await page.goto('/n')

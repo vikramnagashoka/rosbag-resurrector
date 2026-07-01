@@ -35,7 +35,9 @@ export function notebooksFromBags(bags: Bag[]): Notebook[] {
       durationSec: b.duration_sec,
       topicCount: b.topics.length,
       messageCount: b.message_count,
-      bagTopics: b.topics.map(t => ({ name: t.name, messageType: t.message_type })),
+      bagTopics: b.topics.map(t => ({
+        name: t.name, messageType: t.message_type, messageCount: t.message_count,
+      })),
       cells: [],
     }
   })

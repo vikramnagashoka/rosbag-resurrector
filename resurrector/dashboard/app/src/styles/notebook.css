@@ -366,3 +366,42 @@
   font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest);
   margin-top: 4px; padding: 0 2px;
 }
+
+/* ------------------------------------------------ Stats / Sync tables */
+.nb-table { width: 100%; border-collapse: collapse; font-family: var(--nb-font-mono); font-size: 11.5px; }
+.nb-table th {
+  text-align: right; font-weight: 500; color: var(--nb-text-faintest);
+  padding: 4px 10px; border-bottom: 1px solid var(--nb-border-hair);
+}
+.nb-table th:first-child { text-align: left; }
+.nb-table td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--nb-border-hair); color: var(--nb-text-2); }
+.nb-table td:first-child { text-align: left; }
+.nb-table-field { display: inline-flex; align-items: center; gap: 7px; }
+.nb-table-swatch { width: 9px; height: 9px; border-radius: 2px; }
+.nb-table-foot { font-size: 10.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest); margin-top: 8px; }
+.nb-table-scroll { overflow-x: auto; }
+
+/* ------------------------------------------------------------ Image cell */
+.nb-image-frame {
+  aspect-ratio: 16 / 9; width: 100%; max-width: 480px;
+  background: #ece6da; border: 1px solid var(--nb-border-hair2); border-radius: 8px;
+  display: grid; place-items: center; overflow: hidden;
+}
+.nb-image-frame img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.nb-image-placeholder { color: var(--nb-text-faintest); font-size: 12px; }
+.nb-image-controls { display: flex; align-items: center; gap: 12px; margin-top: 10px; max-width: 480px; }
+.nb-image-range { flex: 1; accent-color: var(--nb-accent); }
+.nb-image-count { font-size: 11px; font-family: var(--nb-font-mono); color: var(--nb-text-muted); white-space: nowrap; }
+
+/* ------------------------------------------------------------ Scene cell */
+.nb-scene-box {
+  aspect-ratio: 2 / 1; width: 100%;
+  background: repeating-linear-gradient(45deg, #f4f0e7, #f4f0e7 10px, #f1ede4 10px, #f1ede4 20px);
+  border: 1px solid var(--nb-border-hair2); border-radius: 8px;
+  display: grid; place-items: center;
+}
+.nb-scene-label {
+  font-family: var(--nb-font-mono); font-size: 12px; color: var(--nb-text-muted);
+  background: var(--nb-card-bg); border: 1px solid var(--nb-border); border-radius: 8px;
+  padding: 8px 14px;
+}

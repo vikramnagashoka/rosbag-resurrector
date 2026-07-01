@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import '../styles/notebook.css'
 import { api } from '../api'
-import { Notebook, HealthTier, CellType, Cell, nextCellId, plottableTopics } from './types'
+import {
+  Notebook, HealthTier, CellType, Cell, nextCellId,
+  plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
+} from './types'
 import { notebooksFromBags } from './build'
 import CellFeed from './CellFeed'
 
@@ -20,11 +23,12 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
 // those land in their respective PRs alongside the command palette).
 const SUGGESTIONS: { label: string; type: CellType | null }[] = [
   { label: 'Plot signal', type: 'plot' },
+  { label: 'Statistics', type: 'stats' },
   { label: 'Health report', type: 'health' },
-  { label: 'Stats /imu/data', type: null },
-  { label: 'Synchronize', type: null },
-  { label: 'Semantic search', type: null },
-  { label: 'Camera frames', type: null },
+  { label: 'Synchronize', type: 'sync' },
+  { label: 'Camera frames', type: 'image' },
+  { label: '3D scene', type: 'scene' },
+  { label: 'Semantic search', type: null },  // PR 7
 ]
 
 export default function NotebookWorkspace() {
@@ -66,21 +70,26 @@ export default function NotebookWorkspace() {
   function addCell(type: CellType) {
     if (!active) return
     const cell: Cell = { id: nextCellId(), type }
-    // Plot cells need a starting topic — the first line-plottable one.
-    if (type === 'plot') cell.topic = plottableTopics(active)[0]
+    // Seed each cell type with a sensible default topic / topics.
+    if (type === 'plot' || type === 'stats') cell.topic = plottableTopics(active)[0]
+    else if (type === 'image') { cell.topic = imageTopics(active)[0]; cell.frame = 0 }
+    else if (type === 'scene') cell.topic = pointcloudTopics(active)[0]
+    else if (type === 'sync') cell.topics = plottableTopics(active).slice(0, 2)
     setNotebooks(prev => prev.map(n =>
       n.id === active.id ? { ...n, cells: [...n.cells, cell] } : n,
     ))
   }
 
-  function setCellTopic(cellId: string, topic: string) {
+  function patchCell(cellId: string, patch: Partial<Cell>) {
     if (!active) return
     setNotebooks(prev => prev.map(n =>
       n.id === active.id
-        ? { ...n, cells: n.cells.map(c => (c.id === cellId ? { ...c, topic } : c)) }
+        ? { ...n, cells: n.cells.map(c => (c.id === cellId ? { ...c, ...patch } : c)) }
         : n,
     ))
   }
+  const setCellTopic = (id: string, topic: string) => patchCell(id, { topic })
+  const setCellFrame = (id: string, frame: number) => patchCell(id, { frame })
 
   function removeCell(cellId: string) {
     if (!active) return
@@ -94,7 +103,10 @@ export default function NotebookWorkspace() {
   }
 
   function setCellRuntime(cellId: string, ms: number) {
-    setRuntime(prev => (prev[cellId] != null ? prev : { ...prev, [cellId]: ms }))
+    // Updates on each fetch (a topic change re-measures). onRuntime only
+    // fires after a completed fetch, and the cell effects don't depend on
+    // runtime, so this can't loop.
+    setRuntime(prev => ({ ...prev, [cellId]: ms }))
   }
 
   return (
@@ -191,12 +203,16 @@ export default function NotebookWorkspace() {
                 cells={active.cells}
                 bagId={active.bagId}
                 plottableTopics={plottableTopics(active)}
+                imageTopics={imageTopics(active)}
+                pointcloudTopics={pointcloudTopics(active)}
+                frameCountFor={t => topicMessageCount(active, t)}
                 collapsed={collapsed}
                 runtime={runtime}
                 onToggleCollapse={toggleCollapse}
                 onDelete={removeCell}
                 onRuntime={setCellRuntime}
                 onSetTopic={setCellTopic}
+                onSetFrame={setCellFrame}
               />
             )}
           </div>

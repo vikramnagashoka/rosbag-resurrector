@@ -27,17 +27,28 @@ export interface Notebook {
   durationSec: number
   topicCount: number
   messageCount: number
-  bagTopics: { name: string; messageType: string }[]
+  bagTopics: { name: string; messageType: string; messageCount: number }[]
   cells: Cell[]
 }
 
-// Image topics aren't line-plottable; everything else is offered in the
-// plot topic dropdown (numeric extraction happens after fetch).
 const IMAGE_TYPES = new Set([
   'sensor_msgs/msg/Image', 'sensor_msgs/msg/CompressedImage',
 ])
+const POINTCLOUD_TYPES = new Set(['sensor_msgs/msg/PointCloud2'])
+
+// Image topics aren't line-plottable; everything else is offered in the
+// plot/stats topic dropdown (numeric extraction happens after fetch).
 export function plottableTopics(nb: Pick<Notebook, 'bagTopics'>): string[] {
   return nb.bagTopics.filter(t => !IMAGE_TYPES.has(t.messageType)).map(t => t.name)
+}
+export function imageTopics(nb: Pick<Notebook, 'bagTopics'>): string[] {
+  return nb.bagTopics.filter(t => IMAGE_TYPES.has(t.messageType)).map(t => t.name)
+}
+export function pointcloudTopics(nb: Pick<Notebook, 'bagTopics'>): string[] {
+  return nb.bagTopics.filter(t => POINTCLOUD_TYPES.has(t.messageType)).map(t => t.name)
+}
+export function topicMessageCount(nb: Pick<Notebook, 'bagTopics'>, topic: string): number {
+  return nb.bagTopics.find(t => t.name === topic)?.messageCount ?? 0
 }
 
 export function tierForScore(score: number): HealthTier {
