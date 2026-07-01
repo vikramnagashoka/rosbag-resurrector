@@ -24,6 +24,8 @@ interface Props {
   runtime: Record<string, number>
   cursorForCell: (id: string) => number | null
   isUnlinked: (id: string) => boolean
+  selForCell: (id: string) => { a: number; b: number } | null
+  durationSec: number
   onToggleCollapse: (id: string) => void
   onDelete: (id: string) => void
   onRuntime: (id: string, ms: number) => void
@@ -31,6 +33,7 @@ interface Props {
   onSetFrame: (id: string, frame: number) => void
   onCursor: (id: string, frac: number | null) => void
   onToggleLink: (id: string) => void
+  onSelect: (id: string, sel: { a: number; b: number } | null) => void
 }
 
 // The clock pill in a time-based cell's header: Shared time ⇄ Own time.
@@ -66,9 +69,9 @@ function topicSelect(
 export default function CellFeed(props: Props) {
   const {
     cells, bagId, plottableTopics, imageTopics, pointcloudTopics, frameCountFor,
-    sceneTimeNs, collapsed, runtime, cursorForCell, isUnlinked,
+    sceneTimeNs, collapsed, runtime, cursorForCell, isUnlinked, selForCell, durationSec,
     onToggleCollapse, onDelete, onRuntime, onSetTopic, onSetFrame,
-    onCursor, onToggleLink,
+    onCursor, onToggleLink, onSelect,
   } = props
 
   return (
@@ -88,6 +91,7 @@ export default function CellFeed(props: Props) {
                 bagId={bagId} topic={cell.topic} onRuntime={rt}
                 cursor={cursorForCell(cell.id)}
                 onCursor={f => onCursor(cell.id, f)}
+                onSelect={s => onSelect(cell.id, s)}
               />
             )
             headerExtras = (
@@ -133,11 +137,20 @@ export default function CellFeed(props: Props) {
             body = <div className="nb-cell-loading">{cell.type} cell — coming in a later slice.</div>
         }
 
+        // A brushed plot shows .select(t0, t1) in its header command.
+        let command = cellCommand(cell)
+        if (cell.type === 'plot') {
+          const s = selForCell(cell.id)
+          if (s) {
+            command = `bf["${cell.topic ?? '/topic'}"].select(${(s.a * durationSec).toFixed(1)}, ${(s.b * durationSec).toFixed(1)})`
+          }
+        }
+
         return (
           <NotebookCell
             key={cell.id}
             index={i + 1}
-            command={cellCommand(cell)}
+            command={command}
             runtimeMs={runtime[cell.id] ?? null}
             collapsed={!!collapsed[cell.id]}
             onToggleCollapse={() => onToggleCollapse(cell.id)}

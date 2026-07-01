@@ -47,6 +47,8 @@ export default function NotebookWorkspace() {
   const [cursor, setCursor] = useState<number | null>(null)
   const [localCursor, setLocalCursor] = useState<Record<string, number>>({})
   const [unlinked, setUnlinked] = useState<Record<string, boolean>>({})
+  // Plot brush selection per cell (fractions), for the header command string.
+  const [sel, setSel] = useState<Record<string, { a: number; b: number } | null>>({})
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -162,6 +164,9 @@ export default function NotebookWorkspace() {
     })
   }
 
+  const setCellSel = (cellId: string, s: { a: number; b: number } | null) =>
+    setSel(prev => ({ ...prev, [cellId]: s }))
+
   function setCellRuntime(cellId: string, ms: number) {
     // Updates on each fetch (a topic change re-measures). onRuntime only
     // fires after a completed fetch, and the cell effects don't depend on
@@ -271,6 +276,8 @@ export default function NotebookWorkspace() {
                 runtime={runtime}
                 cursorForCell={cursorForCell}
                 isUnlinked={id => !!unlinked[id]}
+                selForCell={id => sel[id] ?? null}
+                durationSec={active.durationSec}
                 onToggleCollapse={toggleCollapse}
                 onDelete={removeCell}
                 onRuntime={setCellRuntime}
@@ -278,6 +285,7 @@ export default function NotebookWorkspace() {
                 onSetFrame={setCellFrame}
                 onCursor={moveCursor}
                 onToggleLink={toggleLink}
+                onSelect={setCellSel}
               />
             )}
           </div>

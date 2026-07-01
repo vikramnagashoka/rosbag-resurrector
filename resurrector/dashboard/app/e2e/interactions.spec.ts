@@ -132,6 +132,30 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(toggle).toContainText('Own time')
   })
 
+  test('brushing a plot → Explain renders a grounded card from the copilot', async ({ page }) => {
+    // Would catch: drag-select not producing a toolbar, the header command
+    // not updating to .select(), or the Explain endpoint wiring breaking.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: /Plot signal/ }).click()
+    await expect(page.locator('.nb-chart').first()).toBeVisible({ timeout: 10_000 })
+
+    const box = await page.locator('.nb-chart-wrap').first().boundingBox()
+    await page.mouse.move(box!.x + box!.width * 0.3, box!.y + box!.height * 0.5)
+    await page.mouse.down()
+    await page.mouse.move(box!.x + box!.width * 0.65, box!.y + box!.height * 0.5, { steps: 8 })
+    await page.mouse.up()
+
+    // Toolbar appears; the header command reflects the selection.
+    await expect(page.locator('.nb-sel-toolbar')).toBeVisible({ timeout: 5_000 })
+    await expect(page.getByText(/\.select\(/)).toBeVisible()
+
+    // Explain calls the real /explain endpoint → grounded narrative card.
+    await page.getByRole('button', { name: /Explain/ }).click()
+    await expect(page.locator('.nb-explain-body')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.nb-explain-body')).toContainText('window')
+  })
+
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
     // Would catch: the "+" button regressing to a no-op.
     await page.goto('/n')

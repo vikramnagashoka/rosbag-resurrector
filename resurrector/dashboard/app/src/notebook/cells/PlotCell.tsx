@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { api, TopicDataResponse } from '../../api'
+import { api, TopicDataResponse, ExplainResult } from '../../api'
 import { extractSeries, SERIES_COLORS } from './series'
 
 // `plot` cell body — a multi-series line chart (inline SVG) from the
-// downsampled-series endpoint. Hovering sets the linked time-cursor; when a
-// cursor is present the chart draws a dashed vertical line, a dot on each
-// series at that time, and a readout of the values. Region-select + Explain
-// land in PR 6.
+// downsampled-series endpoint. Hovering sets the linked time-cursor;
+// dragging brushes a region → a toolbar with ✦ Explain (the grounded
+// copilot, wired to /api/bags/:id/explain), Export range (the incident
+// report), and Clear.
 
 const MAX_POINTS = 120
+
+interface Sel { a: number; b: number }  // fractions 0–1, a<=b
 
 interface Props {
   bagId?: number
@@ -16,9 +18,15 @@ interface Props {
   cursor?: number | null              // 0–1 fraction across the time axis
   onRuntime?: (ms: number) => void
   onCursor?: (frac: number | null) => void
+  onSelect?: (sel: Sel | null) => void  // reports the brushed range for the header command
 }
 
-export default function PlotCell({ bagId, topic, cursor, onRuntime, onCursor }: Props) {
+export default function PlotCell({ bagId, topic, cursor, onRuntime, onCursor, onSelect }: Props) {
+  const [sel, setSel] = useState<Sel | null>(null)
+  const [dragStart, setDragStart] = useState<number | null>(null)
+  const [explainState, setExplainState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
+  const [explain, setExplain] = useState<ExplainResult | null>(null)
+  const [explainErr, setExplainErr] = useState<string | null>(null)
   const [resp, setResp] = useState<TopicDataResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -79,11 +87,50 @@ export default function PlotCell({ bagId, topic, cursor, onRuntime, onCursor }: 
     return { xPct: cursor * 100, tSec: cursor * chart.spanSec, dots }
   }, [chart, cursor, series])
 
-  function handleMove(e: React.MouseEvent) {
-    if (!onCursor) return
+  function fracFrom(e: React.MouseEvent): number {
     const rect = e.currentTarget.getBoundingClientRect()
-    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-    onCursor(frac)
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+  }
+  function handleMove(e: React.MouseEvent) {
+    const frac = fracFrom(e)
+    if (dragStart != null) {
+      setSel({ a: Math.min(dragStart, frac), b: Math.max(dragStart, frac) })
+    } else {
+      onCursor?.(frac)
+    }
+  }
+  function handleDown(e: React.MouseEvent) {
+    setDragStart(fracFrom(e))
+    setSel(null)
+    setExplainState('idle'); setExplain(null)
+  }
+  function finishDrag() {
+    setDragStart(null)
+    // A near-zero drag is a click, not a selection.
+    setSel(prev => {
+      const next = prev && prev.b - prev.a > 0.01 ? prev : null
+      onSelect?.(next)
+      return next
+    })
+  }
+  function clearSel() {
+    setSel(null); onSelect?.(null)
+    setExplainState('idle'); setExplain(null); setExplainErr(null)
+  }
+
+  // Selection window in seconds (the unzoomed plot spans the full topic/bag).
+  const selSecs = sel && chart ? { t0: sel.a * chart.spanSec, t1: sel.b * chart.spanSec } : null
+
+  function runExplain() {
+    if (bagId == null || !selSecs) return
+    setExplainState('loading'); setExplain(null); setExplainErr(null)
+    api.explainTimeRange(bagId, selSecs.t0, selSecs.t1, true)
+      .then(r => { setExplain(r); setExplainState('done') })
+      .catch(e => { setExplainErr(String(e?.message ?? e)); setExplainState('error') })
+  }
+  function exportRange() {
+    if (bagId == null || !selSecs) return
+    window.open(`/api/bags/${bagId}/report?start_sec=${selSecs.t0}&end_sec=${selSecs.t1}&fmt=html`, '_blank')
   }
 
   if (bagId == null || !topic) return <div className="nb-cell-loading">No topic selected.</div>
@@ -114,7 +161,13 @@ export default function PlotCell({ bagId, topic, cursor, onRuntime, onCursor }: 
         className="nb-chart-wrap"
         style={{ cursor: 'crosshair' }}
         onMouseMove={handleMove}
+        onMouseDown={handleDown}
+        onMouseUp={finishDrag}
+        onMouseLeave={() => { if (dragStart != null) finishDrag() }}
       >
+        {sel && (
+          <div className="nb-sel-band" style={{ left: `${sel.a * 100}%`, width: `${(sel.b - sel.a) * 100}%` }} />
+        )}
         <svg className="nb-chart" viewBox="0 0 1000 200" preserveAspectRatio="none">
           {[50, 100, 150].map(gy => (
             <line key={gy} x1="0" x2="1000" y1={gy} y2={gy} stroke="#f0ebe1" strokeWidth="1" />
@@ -147,6 +200,49 @@ export default function PlotCell({ bagId, topic, cursor, onRuntime, onCursor }: 
           {chart.xLabels.map((l, i) => <span key={i}>{l}</span>)}
         </div>
       </div>
+
+      {sel && selSecs && (
+        <div className="nb-sel-toolbar">
+          <span className="nb-sel-readout">{selSecs.t0.toFixed(2)}s – {selSecs.t1.toFixed(2)}s</span>
+          <button className="nb-sel-btn accent" onClick={runExplain}>✦ Explain</button>
+          <button className="nb-sel-btn" onClick={exportRange}>Export range</button>
+          <button className="nb-sel-btn nb-sel-spacer" onClick={clearSel}>Clear</button>
+        </div>
+      )}
+
+      {explainState !== 'idle' && (
+        <div className="nb-explain">
+          {explainState === 'loading' && (
+            <div className="nb-explain-loading">
+              ✦ Analyzing {selSecs?.t0.toFixed(2)}s–{selSecs?.t1.toFixed(2)}s…
+            </div>
+          )}
+          {explainState === 'error' && (
+            <div className="nb-explain-body">Couldn’t explain this window: {explainErr}</div>
+          )}
+          {explainState === 'done' && explain && (
+            <>
+              <div className="nb-explain-head">
+                <span className="nb-explain-spark">✦</span>
+                <span className="nb-explain-title">Explanation</span>
+                <span className="nb-explain-badge">
+                  {explain.source === 'llm' ? 'AI narrative' : 'rule-based'}
+                </span>
+              </div>
+              <div className="nb-explain-body">{explain.narrative}</div>
+              <div className="nb-explain-evidence">
+                {explain.evidence.totals.messages_in_window.toLocaleString()} msgs ·{' '}
+                {explain.evidence.totals.active_topics} active topics
+              </div>
+              {explain.evidence.health_issues.slice(0, 3).map((h, i) => (
+                <div className="nb-explain-finding" key={i}>
+                  {h.severity.toUpperCase()} {h.check}{h.topic ? ` [${h.topic}]` : ''}: {h.message}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }
