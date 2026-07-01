@@ -156,6 +156,20 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-explain-body')).toContainText('window')
   })
 
+  test('search cell renders + degrades gracefully to an honest state', async ({ page }) => {
+    // Would catch: search cell not rendering, or a hard crash when vision
+    // isn't installed / no frames are indexed (should be a friendly message).
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: /Semantic search/ }).click()
+    const input = page.locator('.nb-search-input')
+    await expect(input).toBeVisible({ timeout: 10_000 })
+    await input.fill('gripper near the table')
+    await page.getByRole('button', { name: /^Search$/ }).click()
+    // Either results grid or an honest message (no vision / no frames / none).
+    await expect(page.locator('.nb-search-msg, .nb-search-grid').first()).toBeVisible({ timeout: 10_000 })
+  })
+
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
     // Would catch: the "+" button regressing to a no-op.
     await page.goto('/n')

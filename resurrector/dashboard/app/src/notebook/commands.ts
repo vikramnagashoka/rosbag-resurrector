@@ -64,6 +64,12 @@ export function buildCatalog(nb: Notebook | null): CommandEntry[] {
     })
   }
 
+  out.push({
+    id: 'search', cmd: 'search("…")', kind: 'search',
+    description: 'CLIP semantic frame search', keywords: 'search semantic clip find frame',
+    makeCell: () => ({ id: nextCellId(), type: 'search' }),
+  })
+
   return out
 }
 

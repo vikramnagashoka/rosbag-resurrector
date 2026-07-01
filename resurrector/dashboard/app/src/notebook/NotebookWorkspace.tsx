@@ -30,7 +30,7 @@ const SUGGESTIONS: { label: string; type: CellType | null }[] = [
   { label: 'Synchronize', type: 'sync' },
   { label: 'Camera frames', type: 'image' },
   { label: '3D scene', type: 'scene' },
-  { label: 'Semantic search', type: null },  // PR 7
+  { label: 'Semantic search', type: 'search' },
 ]
 
 export default function NotebookWorkspace() {
@@ -167,6 +167,11 @@ export default function NotebookWorkspace() {
   const setCellSel = (cellId: string, s: { a: number; b: number } | null) =>
     setSel(prev => ({ ...prev, [cellId]: s }))
 
+  // "Open frame" from a search result → append an image cell at that frame.
+  function openFrame(_bagId: number, topic: string, frameIndex: number) {
+    appendCell({ id: nextCellId(), type: 'image', topic, frame: frameIndex })
+  }
+
   function setCellRuntime(cellId: string, ms: number) {
     // Updates on each fetch (a topic change re-measures). onRuntime only
     // fires after a completed fetch, and the cell effects don't depend on
@@ -286,6 +291,7 @@ export default function NotebookWorkspace() {
                 onCursor={moveCursor}
                 onToggleLink={toggleLink}
                 onSelect={setCellSel}
+                onOpenFrame={openFrame}
               />
             )}
           </div>

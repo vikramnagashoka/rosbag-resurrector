@@ -7,6 +7,7 @@ import StatsCell from './cells/StatsCell'
 import SyncCell from './cells/SyncCell'
 import ImageCell from './cells/ImageCell'
 import SceneCell from './cells/SceneCell'
+import SearchCell from './cells/SearchCell'
 
 // Renders the active notebook's cell list. Maps each cell to the shared
 // NotebookCell shell wrapping its type-specific body + optional header
@@ -34,6 +35,7 @@ interface Props {
   onCursor: (id: string, frac: number | null) => void
   onToggleLink: (id: string) => void
   onSelect: (id: string, sel: { a: number; b: number } | null) => void
+  onOpenFrame: (bagId: number, topic: string, frameIndex: number) => void
 }
 
 // The clock pill in a time-based cell's header: Shared time ⇄ Own time.
@@ -71,7 +73,7 @@ export default function CellFeed(props: Props) {
     cells, bagId, plottableTopics, imageTopics, pointcloudTopics, frameCountFor,
     sceneTimeNs, collapsed, runtime, cursorForCell, isUnlinked, selForCell, durationSec,
     onToggleCollapse, onDelete, onRuntime, onSetTopic, onSetFrame,
-    onCursor, onToggleLink, onSelect,
+    onCursor, onToggleLink, onSelect, onOpenFrame,
   } = props
 
   return (
@@ -132,6 +134,9 @@ export default function CellFeed(props: Props) {
             headerExtras = pointcloudTopics.length > 1
               ? topicSelect(cell.topic, pointcloudTopics, t => onSetTopic(cell.id, t))
               : null
+            break
+          case 'search':
+            body = <SearchCell bagId={bagId} query={cell.query} onOpenFrame={onOpenFrame} onRuntime={rt} />
             break
           default:
             body = <div className="nb-cell-loading">{cell.type} cell — coming in a later slice.</div>
