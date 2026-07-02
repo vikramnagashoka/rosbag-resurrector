@@ -66,6 +66,36 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-folder-kids')).toHaveCount(0)
   })
 
+  test('rail footer shows real capability status, not fabricated bars', async ({ page, request }) => {
+    // Would catch: the footer regressing to hardcoded fake "4 ready · 2
+    // partial" data (a credibility smell), or the capabilities fetch failing.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    // The backend reports N capabilities; the footer must render exactly one
+    // segment per capability and an "M of N ready" meta line that agrees.
+    const caps = await request.get('/api/system/capabilities').then(r => r.json())
+    const total = Object.keys(caps).length
+    const ready = Object.values(caps).filter((c: any) => c.available).length
+    await expect(page.locator('.nb-status-seg')).toHaveCount(total)
+    await expect(page.locator('.nb-status-meta')).toContainText(`${ready} of ${total} ready`)
+  })
+
+  test('Share copies a link and ⌘K focuses the command bar', async ({ page }) => {
+    // Would catch: Share regressing to a dead stub, or the ⌘K focus
+    // shortcut not being wired.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    const share = page.getByRole('button', { name: 'Share' })
+    await share.click()
+    await expect(page.getByRole('button', { name: 'Copied ✓' })).toBeVisible()
+
+    // Ctrl+K (matches metaKey||ctrlKey handler) focuses the command input.
+    await page.keyboard.press('Control+k')
+    await expect(page.locator('.nb-cmd-input')).toBeFocused()
+  })
+
   test('Health report chip adds a health cell that renders a real score ring', async ({ page }) => {
     // Would catch: the cell framework not appending cells, or the health
     // cell not wiring to /api/bags/:id/health.
@@ -212,10 +242,17 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     // Would catch: the "+" menu's New notebook item regressing to a no-op.
     await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
-    const before = await page.locator('.nb-list-item').count()
+    // Wait for the real-bag notebooks to finish streaming in before acting,
+    // so we're not racing the async /api/bags load.
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+
+    // No "Untitled investigation" item exists until we add one.
+    const untitled = page.locator('.nb-list-item', { hasText: 'Untitled investigation' })
+    await expect(untitled).toHaveCount(0)
     await page.locator('.nb-new-btn').click()
     await page.getByRole('menuitem', { name: /New notebook/ }).click()
-    await expect(page.locator('.nb-list-item')).toHaveCount(before + 1)
+    // The new blank notebook appears in the rail and becomes active.
+    await expect(untitled).toHaveCount(1)
     await expect(page.locator('.nb-title')).toHaveText('Untitled investigation')
   })
 })

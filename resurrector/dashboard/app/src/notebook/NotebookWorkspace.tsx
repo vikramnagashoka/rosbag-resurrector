@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import '../styles/notebook.css'
-import { api } from '../api'
+import { api, CapabilityMap } from '../api'
 import {
   Notebook, Folder, HealthTier, CellType, Cell, nextCellId, nextFolderId,
   plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
@@ -44,6 +44,9 @@ export default function NotebookWorkspace() {
   const [query, setQuery] = useState('')
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [loading, setLoading] = useState(true)
+  // Real system status for the rail footer (replaces the old fake bars).
+  const [caps, setCaps] = useState<CapabilityMap | null>(null)
+  const [copied, setCopied] = useState(false)
   // Per-cell UI state, keyed by cell id.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [runtime, setRuntime] = useState<Record<string, number>>({})
@@ -68,6 +71,28 @@ export default function NotebookWorkspace() {
       .catch(() => { /* empty rail shown on failure */ })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
+  }, [])
+
+  // Real capability status for the rail footer.
+  useEffect(() => {
+    let cancelled = false
+    api.getCapabilities()
+      .then(c => { if (!cancelled) setCaps(c) })
+      .catch(() => { /* footer degrades to "status unavailable" */ })
+    return () => { cancelled = true }
+  }, [])
+
+  // ⌘K / Ctrl+K focuses the command bar from anywhere in the workspace.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        inputRef.current?.focus()
+        setPaletteOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   const active = notebooks.find(n => n.id === activeId) ?? null
@@ -253,6 +278,19 @@ export default function NotebookWorkspace() {
 
   const topLevel = notebooks.filter(n => !n.folderId)
 
+  // Copy the current workspace URL. Honest, in-scope "Share" for a
+  // localhost dev tool — no server-side notebook persistence to link to yet.
+  function shareLink() {
+    const url = window.location.href
+    const done = () => { setCopied(true); window.setTimeout(() => setCopied(false), 1500) }
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(done).catch(done)
+    else done()
+  }
+
+  // Rail footer status derived from real capabilities.
+  const capList = caps ? Object.values(caps) : []
+  const readyCount = capList.filter(c => c.available).length
+
   return (
     <div className="nb">
       {/* ---------------------------------------------------------- Rail */}
@@ -355,14 +393,28 @@ export default function NotebookWorkspace() {
         <div className="nb-status">
           <div className="nb-status-row">
             <span className="nb-status-label">System status</span>
-            <span className="nb-status-doctor">doctor</span>
+            <span className="nb-status-doctor">capabilities</span>
           </div>
-          <div className="nb-status-bar">
-            {['#2f8f5f', '#2f8f5f', '#2f8f5f', '#bf8a2c', '#c75c4b', '#bf8a2c'].map((c, i) => (
-              <span key={i} className="nb-status-seg" style={{ background: c }} />
-            ))}
-          </div>
-          <div className="nb-status-meta">4 ready · 2 partial</div>
+          {capList.length === 0 ? (
+            <div className="nb-status-meta">{caps ? 'no capabilities reported' : 'checking…'}</div>
+          ) : (
+            <>
+              <div className="nb-status-bar">
+                {capList.map(c => (
+                  <span
+                    key={c.name}
+                    className="nb-status-seg"
+                    title={`${c.name}: ${c.available ? 'ready' : 'not installed'} — ${c.description}`}
+                    style={{ background: c.available ? 'var(--nb-health-good)' : '#d8cfba' }}
+                  />
+                ))}
+              </div>
+              <div className="nb-status-meta">
+                {readyCount} of {capList.length} ready
+                {readyCount < capList.length && ` · ${capList.length - readyCount} optional not installed`}
+              </div>
+            </>
+          )}
         </div>
       </aside>
 
@@ -388,8 +440,14 @@ export default function NotebookWorkspace() {
             )}
           </div>
           <div className="nb-header-actions">
-            <button className="nb-btn">Share</button>
-            <button className="nb-btn nb-btn-accent">Export ▾</button>
+            <button
+              className="nb-btn"
+              title="Copy a link to this workspace"
+              onClick={shareLink}
+            >{copied ? 'Copied ✓' : 'Share'}</button>
+            {/* Notebook-level export isn't wired yet — the real export path is
+                per-cell (select a range on a plot → Export range). A phantom
+                header button would be worse than none; add when it's real. */}
           </div>
         </header>
 
@@ -449,7 +507,9 @@ export default function NotebookWorkspace() {
                 placeholder={'type a query — bf["/topic"].plot(), .sync([...]), .health(), search("…")'}
                 spellCheck={false}
               />
-              <span className="nb-cmd-keyhint">⏎ run</span>
+              <span className="nb-cmd-keyhint" title="Press ⌘K (Ctrl+K) to focus, ⏎ to run">
+                {query.trim() ? '⏎ run' : '⌘K'}
+              </span>
             </div>
             <div className="nb-chips">
               {SUGGESTIONS.map(s => (
