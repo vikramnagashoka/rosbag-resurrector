@@ -158,7 +158,88 @@
 .nb-list-item.active .nb-item-title { color: var(--nb-text); }
 .nb-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
 .nb-item-file { font-size: 10px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest); margin-top: 3px; }
-.nb-item-cells { font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3); margin-top: 2px; }
+.nb-item-cells { font-size: 9.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3); }
+.nb-item-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 2px; }
+
+/* Move-to-folder select — subdued until the item is hovered/focused. */
+.nb-move-select {
+  font-size: 9.5px;
+  font-family: var(--nb-font-mono);
+  color: var(--nb-text-faintest);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 1px 3px;
+  max-width: 96px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.nb-list-item:hover .nb-move-select,
+.nb-list-item:focus-within .nb-move-select { opacity: 1; }
+.nb-move-select:hover { border-color: var(--nb-border-control); background: #fffdf9; }
+
+/* Rail "+" add menu (New notebook / New folder) */
+.nb-add-wrap { position: relative; }
+.nb-add-backdrop { position: fixed; inset: 0; z-index: 20; }
+.nb-add-menu {
+  position: absolute; top: 26px; right: 0; z-index: 21;
+  min-width: 158px;
+  background: #fffdf9;
+  border: 1px solid #e3ddcf;
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(60, 50, 30, 0.14);
+  padding: 4px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.nb-add-menu button {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  background: transparent; border: none; border-radius: 6px;
+  padding: 7px 9px; font-size: 12.5px; color: var(--nb-text);
+  cursor: pointer;
+}
+.nb-add-menu button:hover { background: #f1ebdf; }
+.nb-add-glyph { color: var(--nb-accent); font-size: 12px; }
+
+/* Folder groups */
+.nb-folder { margin-bottom: 2px; }
+.nb-folder-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 3px 5px 3px 6px; border-radius: 7px;
+}
+.nb-folder-head:hover { background: #f1ebdf; }
+.nb-folder-toggle {
+  display: flex; align-items: center; gap: 6px;
+  flex: 1; min-width: 0;
+  background: transparent; border: none; padding: 3px 2px;
+  font-size: 12px; font-weight: 600; color: #6b6457; cursor: pointer;
+  text-align: left;
+}
+.nb-folder-chevron { font-size: 9px; color: var(--nb-text-faintest); width: 9px; flex: 0 0 9px; }
+.nb-folder-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nb-folder-count {
+  font-size: 9px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3);
+  background: #ece5d6; border-radius: 8px; padding: 0 6px; margin-left: 2px;
+}
+.nb-folder-rename {
+  font-size: 12px; font-weight: 600; color: var(--nb-text);
+  border: 1px solid var(--nb-accent); border-radius: 5px;
+  padding: 1px 5px; background: #fffdf9; min-width: 0; flex: 1;
+}
+.nb-folder-actions { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity 0.12s ease; }
+.nb-folder-head:hover .nb-folder-actions { opacity: 1; }
+.nb-folder-btn {
+  width: 20px; height: 20px; border-radius: 5px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--nb-text-faint); font-size: 13px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.nb-folder-btn:hover { background: #e6dfce; color: var(--nb-text); }
+.nb-folder-kids { padding-left: 12px; border-left: 1px solid #ece5d6; margin: 1px 0 3px 10px; }
+.nb-folder-empty {
+  font-size: 10px; font-style: italic; color: var(--nb-text-faintest3);
+  padding: 5px 9px;
+}
 
 .nb-status {
   border-top: 1px solid var(--nb-border);

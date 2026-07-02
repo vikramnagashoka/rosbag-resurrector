@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import '../styles/notebook.css'
 import { api } from '../api'
 import {
-  Notebook, HealthTier, CellType, Cell, nextCellId,
+  Notebook, Folder, HealthTier, CellType, Cell, nextCellId, nextFolderId,
   plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
 } from './types'
 import { notebooksFromBags } from './build'
@@ -35,6 +35,11 @@ const SUGGESTIONS: { label: string; type: CellType | null }[] = [
 
 export default function NotebookWorkspace() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([])
+  const [folders, setFolders] = useState<Folder[]>([])
+  const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({})
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
+  // The rail "+" popover (New notebook / New folder).
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -93,15 +98,43 @@ export default function NotebookWorkspace() {
     }
   }
 
-  function newNotebook() {
+  function newNotebook(folderId: string | null = null) {
     const id = `nb-${Date.now()}`
     const blank: Notebook = {
-      id, title: 'Untitled investigation', bag: '—',
+      id, title: 'Untitled investigation', folderId, bag: '—',
       health: 0, tier: 'warn', durationLabel: '—', durationSec: 0, startNs: 0,
       topicCount: 0, messageCount: 0, bagTopics: [], cells: [],
     }
     setNotebooks(prev => [...prev, blank])
     setActiveId(id)
+    setAddMenuOpen(false)
+  }
+
+  function newFolder() {
+    const id = nextFolderId()
+    setFolders(prev => [...prev, { id, name: 'New folder' }])
+    setRenamingFolderId(id)   // open inline rename immediately
+    setAddMenuOpen(false)
+  }
+
+  function commitFolderName(id: string, name: string) {
+    const clean = name.trim() || 'New folder'
+    setFolders(prev => prev.map(f => (f.id === id ? { ...f, name: clean } : f)))
+    setRenamingFolderId(null)
+  }
+
+  // Delete a folder; its notebooks fall back to the top level (never lost).
+  function deleteFolder(id: string) {
+    setNotebooks(prev => prev.map(n => (n.folderId === id ? { ...n, folderId: null } : n)))
+    setFolders(prev => prev.filter(f => f.id !== id))
+  }
+
+  function moveNotebook(nbId: string, folderId: string | null) {
+    setNotebooks(prev => prev.map(n => (n.id === nbId ? { ...n, folderId } : n)))
+  }
+
+  function toggleFolder(id: string) {
+    setCollapsedFolders(prev => ({ ...prev, [id]: !prev[id] }))
   }
 
   function addCell(type: CellType) {
@@ -179,6 +212,47 @@ export default function NotebookWorkspace() {
     setRuntime(prev => ({ ...prev, [cellId]: ms }))
   }
 
+  // One rail entry. A div (not a button) so the folder-move <select> can
+  // nest without an invalid button-in-button. The select stops propagation
+  // so changing folder doesn't also switch the active notebook.
+  function renderItem(nb: Notebook) {
+    return (
+      <div
+        key={nb.id}
+        role="button"
+        tabIndex={0}
+        className={`nb-list-item${nb.id === activeId ? ' active' : ''}`}
+        onClick={() => setActiveId(nb.id)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveId(nb.id) } }}
+      >
+        <div className="nb-item-title">
+          <span className="nb-dot" style={{ background: TIER_VARS[nb.tier].color }} />
+          {nb.title}
+        </div>
+        <div className="nb-item-file">{nb.bag}</div>
+        <div className="nb-item-row">
+          <span className="nb-item-cells">{nb.cells.length} cells</span>
+          {folders.length > 0 && (
+            <select
+              className="nb-move-select"
+              title="Move to folder"
+              value={nb.folderId ?? ''}
+              onClick={e => e.stopPropagation()}
+              onChange={e => moveNotebook(nb.id, e.target.value || null)}
+            >
+              <option value="">Top level</option>
+              {folders.map(f => (
+                <option key={f.id} value={f.id}>{f.name}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const topLevel = notebooks.filter(n => !n.folderId)
+
   return (
     <div className="nb">
       {/* ---------------------------------------------------------- Rail */}
@@ -193,29 +267,89 @@ export default function NotebookWorkspace() {
 
         <div className="nb-section-label">
           <span>INVESTIGATIONS</span>
-          <button className="nb-new-btn" title="New notebook" onClick={newNotebook}>+</button>
+          <div className="nb-add-wrap">
+            <button
+              className="nb-new-btn"
+              title="Add notebook or folder"
+              aria-haspopup="menu"
+              aria-expanded={addMenuOpen}
+              onClick={() => setAddMenuOpen(o => !o)}
+            >+</button>
+            {addMenuOpen && (
+              <>
+                <div className="nb-add-backdrop" onClick={() => setAddMenuOpen(false)} />
+                <div className="nb-add-menu" role="menu">
+                  <button role="menuitem" onClick={() => newNotebook(null)}>
+                    <span className="nb-add-glyph">▧</span> New notebook
+                  </button>
+                  <button role="menuitem" onClick={newFolder}>
+                    <span className="nb-add-glyph">▤</span> New folder
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="nb-list">
-          {notebooks.length === 0 && !loading && (
+          {notebooks.length === 0 && folders.length === 0 && !loading && (
             <div style={{ padding: '10px 11px', fontSize: 12, color: 'var(--nb-text-faint)' }}>
               No indexed bags. Scan some from the classic Library, then reload.
             </div>
           )}
-          {notebooks.map(nb => (
-            <button
-              key={nb.id}
-              className={`nb-list-item${nb.id === activeId ? ' active' : ''}`}
-              onClick={() => setActiveId(nb.id)}
-            >
-              <div className="nb-item-title">
-                <span className="nb-dot" style={{ background: TIER_VARS[nb.tier].color }} />
-                {nb.title}
+
+          {/* Folder groups first, each collapsible with its own new-notebook + */}
+          {folders.map(f => {
+            const kids = notebooks.filter(n => n.folderId === f.id)
+            const isCollapsed = !!collapsedFolders[f.id]
+            return (
+              <div className="nb-folder" key={f.id}>
+                <div className="nb-folder-head">
+                  <button
+                    className="nb-folder-toggle"
+                    onClick={() => toggleFolder(f.id)}
+                    title={isCollapsed ? 'Expand' : 'Collapse'}
+                  >
+                    <span className="nb-folder-chevron">{isCollapsed ? '▸' : '▾'}</span>
+                    {renamingFolderId === f.id ? (
+                      <input
+                        className="nb-folder-rename"
+                        autoFocus
+                        defaultValue={f.name}
+                        onClick={e => e.stopPropagation()}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') commitFolderName(f.id, (e.target as HTMLInputElement).value)
+                          else if (e.key === 'Escape') setRenamingFolderId(null)
+                        }}
+                        onBlur={e => commitFolderName(f.id, e.target.value)}
+                      />
+                    ) : (
+                      <span
+                        className="nb-folder-name"
+                        onDoubleClick={e => { e.stopPropagation(); setRenamingFolderId(f.id) }}
+                        title="Double-click to rename"
+                      >{f.name}</span>
+                    )}
+                    <span className="nb-folder-count">{kids.length}</span>
+                  </button>
+                  <span className="nb-folder-actions">
+                    <button className="nb-folder-btn" title="New notebook in folder" onClick={() => newNotebook(f.id)}>+</button>
+                    <button className="nb-folder-btn" title="Delete folder (keeps notebooks)" onClick={() => deleteFolder(f.id)}>×</button>
+                  </span>
+                </div>
+                {!isCollapsed && (
+                  <div className="nb-folder-kids">
+                    {kids.length === 0
+                      ? <div className="nb-folder-empty">Empty — use + to add a notebook</div>
+                      : kids.map(renderItem)}
+                  </div>
+                )}
               </div>
-              <div className="nb-item-file">{nb.bag}</div>
-              <div className="nb-item-cells">{nb.cells.length} cells</div>
-            </button>
-          ))}
+            )
+          })}
+
+          {/* Ungrouped notebooks below the folders */}
+          {topLevel.map(renderItem)}
         </div>
 
         <div className="nb-status">

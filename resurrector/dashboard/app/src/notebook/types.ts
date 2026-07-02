@@ -16,9 +16,17 @@ export interface Cell {
 
 export type HealthTier = 'good' | 'warn' | 'bad'
 
+// A rail folder for organizing notebooks. In-memory only — the notebook
+// model itself isn't persisted server-side, so neither is its grouping.
+export interface Folder {
+  id: string
+  name: string
+}
+
 export interface Notebook {
   id: string
   title: string
+  folderId?: string | null  // null / undefined = top level (ungrouped)
   bag: string          // bag filename shown in the rail + header chip
   bagId?: number       // backend bag id (wired in later PRs)
   health: number       // 0–100 score
@@ -75,4 +83,9 @@ export function cellCommand(cell: Cell): string {
 let _cellSeq = 0
 export function nextCellId(): string {
   return `cell-${Date.now()}-${_cellSeq++}`
+}
+
+let _folderSeq = 0
+export function nextFolderId(): string {
+  return `folder-${Date.now()}-${_folderSeq++}`
 }

@@ -19,13 +19,51 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     const items = page.locator('.nb-list-item')
     await expect(items.first()).toBeVisible()
 
-    // Add a blank investigation → it becomes active (Untitled in header).
+    // Add a blank investigation via the + menu → it becomes active.
     await page.locator('.nb-new-btn').click()
+    await page.getByRole('menuitem', { name: /New notebook/ }).click()
     await expect(page.locator('.nb-title')).toHaveText('Untitled investigation')
 
     // Click the first (real-bag) notebook → header swaps away from Untitled.
     await items.first().click()
     await expect(page.locator('.nb-title')).not.toHaveText('Untitled investigation')
+  })
+
+  test('rail + menu creates folders and notebooks can be organized into them', async ({ page }) => {
+    // Would catch: the + menu not offering folder creation, folders not
+    // rendering as collapsible groups, or the move-to-folder control not
+    // re-parenting a notebook.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    // Open the + menu → New folder. A folder group appears with an inline
+    // rename input focused; commit a name with Enter.
+    await page.locator('.nb-new-btn').click()
+    await page.getByRole('menuitem', { name: /New folder/ }).click()
+    const rename = page.locator('.nb-folder-rename')
+    await expect(rename).toBeVisible()
+    await rename.fill('Sensors')
+    await rename.press('Enter')
+    await expect(page.locator('.nb-folder-name', { hasText: 'Sensors' })).toBeVisible()
+
+    // The folder starts empty.
+    await expect(page.getByText('Empty — use + to add a notebook')).toBeVisible()
+
+    // Add a notebook directly into the folder via the folder's own +.
+    await page.locator('.nb-folder .nb-folder-btn[title="New notebook in folder"]').click()
+    await expect(page.locator('.nb-title')).toHaveText('Untitled investigation')
+    // Folder now shows a child item and its count badge reads 1.
+    await expect(page.locator('.nb-folder-kids .nb-list-item')).toHaveCount(1)
+    await expect(page.locator('.nb-folder-count')).toHaveText('1')
+
+    // Move a top-level (real-bag) notebook into the folder via its select.
+    const topLevelItem = page.locator('.nb-list > .nb-list-item').first()
+    await topLevelItem.locator('.nb-move-select').selectOption({ label: 'Sensors' })
+    await expect(page.locator('.nb-folder-kids .nb-list-item')).toHaveCount(2)
+
+    // Collapsing the folder hides its children.
+    await page.locator('.nb-folder-toggle').click()
+    await expect(page.locator('.nb-folder-kids')).toHaveCount(0)
   })
 
   test('Health report chip adds a health cell that renders a real score ring', async ({ page }) => {
@@ -171,11 +209,12 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
   })
 
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
-    // Would catch: the "+" button regressing to a no-op.
+    // Would catch: the "+" menu's New notebook item regressing to a no-op.
     await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
     const before = await page.locator('.nb-list-item').count()
     await page.locator('.nb-new-btn').click()
+    await page.getByRole('menuitem', { name: /New notebook/ }).click()
     await expect(page.locator('.nb-list-item')).toHaveCount(before + 1)
     await expect(page.locator('.nb-title')).toHaveText('Untitled investigation')
   })
