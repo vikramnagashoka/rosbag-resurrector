@@ -32,6 +32,9 @@ fi
 
 E2E_ROOT="$(mktemp -d -t resurrector-e2e-XXXXXX)"
 export RESURRECTOR_ALLOWED_ROOTS="${E2E_ROOT}"
+# Keep uploaded bags inside the hermetic root (cleaned up on exit, and within
+# the allowed roots so post-upload path validation passes).
+export RESURRECTOR_UPLOADS_DIR="${E2E_ROOT}/uploads"
 
 # Generate the scene demo bag directly into the hermetic root. Script
 # accepts an output path arg so we don't touch the user's $HOME cache.

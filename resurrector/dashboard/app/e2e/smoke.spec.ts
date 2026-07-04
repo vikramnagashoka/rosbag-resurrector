@@ -112,6 +112,8 @@ test.describe('Bridge page', () => {
 test.describe('Library page', () => {
   test('loads and lists indexed bags', async ({ page }) => {
     await page.goto('/')
-    await expect(page.getByText(/scene_demo\.mcap/i)).toBeVisible({ timeout: 10_000 })
+    // .first() — other specs (notebook upload/scan) can add extra bags to the
+    // shared hermetic index, so scene_demo may appear more than once.
+    await expect(page.getByText(/scene_demo\.mcap/i).first()).toBeVisible({ timeout: 10_000 })
   })
 })

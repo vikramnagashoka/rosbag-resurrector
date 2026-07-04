@@ -392,6 +392,24 @@ export const api = {
     scanned: number; indexed: number; errors: ScanError[]
   }>('POST', `/api/scan`, { query: { path } }),
 
+  // Upload a single bag file (raw body — the generic request() helper
+  // JSON-encodes bodies, so this goes straight through fetch). Returns the
+  // indexed Bag record so the caller can attach it to a notebook.
+  uploadBag: async (file: File): Promise<Bag> => {
+    const q = `?filename=${encodeURIComponent(file.name)}`
+    const res = await fetch(`/api/bags/upload${q}`, {
+      method: 'POST',
+      body: file,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    })
+    if (!res.ok) {
+      let detail: unknown = res.statusText
+      try { detail = await res.json() } catch { /* keep statusText */ }
+      throw new ApiError(res.status, detail, `Upload failed (${res.status})`)
+    }
+    return (await res.json()) as Bag
+  },
+
   // Search
   searchFrames: (
     q: string,

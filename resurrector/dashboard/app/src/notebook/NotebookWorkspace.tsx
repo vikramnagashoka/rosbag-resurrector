@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import '../styles/notebook.css'
-import { api, CapabilityMap, Bag } from '../api'
+import { api, CapabilityMap, Bag, ApiError } from '../api'
 import {
   Notebook, Folder, HealthTier, CellType, Cell, nextCellId, nextFolderId,
   plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
@@ -39,8 +39,17 @@ export default function NotebookWorkspace() {
   const [folders, setFolders] = useState<Folder[]>([])
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({})
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
-  // The rail "+" popover (New notebook / New folder).
+  // The rail "+" popover (New notebook / New folder / Scan folder).
   const [addMenuOpen, setAddMenuOpen] = useState(false)
+  // Rail "Scan folder" form — bulk-import bags from a server-side directory.
+  const [scanOpen, setScanOpen] = useState(false)
+  const [scanPath, setScanPath] = useState('')
+  const [scanBusy, setScanBusy] = useState(false)
+  const [scanMsg, setScanMsg] = useState<string | null>(null)
+  // Bag-picker single-file upload state (per active notebook attach flow).
+  const [uploadBusy, setUploadBusy] = useState(false)
+  const [uploadErr, setUploadErr] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -141,6 +150,56 @@ export default function NotebookWorkspace() {
   // analyze. Preserves the notebook's id, folder, and any cells.
   function attachBag(nbId: string, bag: Bag) {
     setNotebooks(prev => prev.map(n => (n.id === nbId ? attachBagToNotebook(n, bag) : n)))
+  }
+
+  // Merge freshly-indexed bags in without disturbing existing notebooks,
+  // folders, or blank investigations. Only bags that don't already back a
+  // notebook get a new starter notebook.
+  function mergeBags(loaded: Bag[]) {
+    setBags(loaded)
+    setNotebooks(prev => {
+      const have = new Set(prev.map(n => n.bagId).filter(Boolean) as number[])
+      const additions = notebooksFromBags(loaded.filter(b => !have.has(b.id)))
+      return additions.length ? [...prev, ...additions] : prev
+    })
+  }
+
+  // Rail "Scan folder": bulk-import every bag under a server-side directory.
+  async function runScan(ev: React.FormEvent) {
+    ev.preventDefault()
+    const path = scanPath.trim()
+    if (!path || scanBusy) return
+    setScanBusy(true); setScanMsg(null)
+    try {
+      const res = await api.triggerScan(path)
+      const loaded = await api.listBags()
+      mergeBags(loaded)
+      const failed = res.errors.length ? `, ${res.errors.length} failed` : ''
+      setScanMsg(`Indexed ${res.indexed} of ${res.scanned} bag(s)${failed}.`)
+      if (res.indexed > 0) setScanPath('')
+    } catch (e) {
+      setScanMsg(e instanceof ApiError ? e.message : `Scan failed: ${String(e)}`)
+    } finally {
+      setScanBusy(false)
+    }
+  }
+
+  // Bag-picker "Import a new bag": upload one file, index it, attach it to
+  // the active notebook (and add it to the pickable library).
+  async function onUploadFile(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0]
+    ev.target.value = ''   // allow re-selecting the same file later
+    if (!file || !active) return
+    setUploadBusy(true); setUploadErr(null)
+    try {
+      const bag = await api.uploadBag(file)
+      setBags(prev => (prev.some(b => b.id === bag.id) ? prev : [...prev, bag]))
+      attachBag(active.id, bag)
+    } catch (e) {
+      setUploadErr(e instanceof ApiError ? e.message : `Upload failed: ${String(e)}`)
+    } finally {
+      setUploadBusy(false)
+    }
   }
 
   function newFolder() {
@@ -331,16 +390,40 @@ export default function NotebookWorkspace() {
                   <button role="menuitem" onClick={newFolder}>
                     <span className="nb-add-glyph">▤</span> New folder
                   </button>
+                  <button role="menuitem" onClick={() => { setAddMenuOpen(false); setScanOpen(true) }}>
+                    <span className="nb-add-glyph">⌕</span> Scan folder…
+                  </button>
                 </div>
               </>
             )}
           </div>
         </div>
 
+        {scanOpen && (
+          <form className="nb-scan-form" onSubmit={runScan}>
+            <div className="nb-scan-head">
+              <span>Scan a folder for bags</span>
+              <button type="button" className="nb-scan-x" title="Close" onClick={() => { setScanOpen(false); setScanMsg(null) }}>×</button>
+            </div>
+            <input
+              className="nb-scan-input"
+              autoFocus
+              value={scanPath}
+              onChange={e => setScanPath(e.target.value)}
+              placeholder="/path/to/bags"
+              spellCheck={false}
+            />
+            <button type="submit" className="nb-scan-go" disabled={scanBusy || !scanPath.trim()}>
+              {scanBusy ? 'Scanning…' : 'Scan + import all'}
+            </button>
+            {scanMsg && <div className="nb-scan-msg">{scanMsg}</div>}
+          </form>
+        )}
+
         <div className="nb-list">
           {notebooks.length === 0 && folders.length === 0 && !loading && (
             <div style={{ padding: '10px 11px', fontSize: 12, color: 'var(--nb-text-faint)' }}>
-              No indexed bags. Scan some from the classic Library, then reload.
+              No indexed bags yet. Use <strong>+ → Scan folder</strong> to import a directory of bags.
             </div>
           )}
 
@@ -476,14 +559,30 @@ export default function NotebookWorkspace() {
                   topics, health, and duration load in.
                 </div>
 
-                {/* Two equal-weight paths: import new, or pick indexed. */}
-                <a href="/" className="nb-bagpick-import-card">
+                {/* Two equal-weight paths: upload a new bag, or pick indexed. */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".mcap,.bag,.db3"
+                  style={{ display: 'none' }}
+                  onChange={onUploadFile}
+                />
+                <button
+                  className="nb-bagpick-import-card"
+                  disabled={uploadBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                >
                   <span className="nb-bagpick-import-icon">↥</span>
                   <span className="nb-bagpick-import-text">
-                    <span className="nb-bagpick-import-head">Import a new bag</span>
-                    <span className="nb-bagpick-import-desc">Scan a folder into your library →</span>
+                    <span className="nb-bagpick-import-head">
+                      {uploadBusy ? 'Uploading + indexing…' : 'Upload a new bag'}
+                    </span>
+                    <span className="nb-bagpick-import-desc">
+                      Pick a .mcap / .bag / .db3 from any folder — it gets indexed and attached
+                    </span>
                   </span>
-                </a>
+                </button>
+                {uploadErr && <div className="nb-bagpick-uploaderr">{uploadErr}</div>}
 
                 <div className="nb-bagpick-or">
                   <span>{bags.length > 0 ? `or pick from your library (${bags.length})` : 'your library is empty'}</span>
@@ -491,7 +590,7 @@ export default function NotebookWorkspace() {
 
                 {bags.length === 0 ? (
                   <div className="nb-bagpick-empty">
-                    No bags indexed yet — use <strong>Import a new bag</strong> above, then reload.
+                    No bags indexed yet — <strong>Upload a new bag</strong> above, or use the rail's <strong>+ → Scan folder</strong> to import a whole directory.
                   </div>
                 ) : (
                   <div className="nb-bagpick-list">

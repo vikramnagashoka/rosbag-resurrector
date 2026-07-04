@@ -79,9 +79,10 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('no bag attached')).toBeVisible()
     // The bag picker is shown and the command input is disabled until attach.
     await expect(page.getByText('Point this notebook at a bag')).toBeVisible()
-    // Both paths are presented: import a new bag, and pick an indexed one.
+    // Both paths are presented: upload a new bag, and pick an indexed one.
     await expect(page.locator('.nb-bagpick-import-card')).toBeVisible()
-    await expect(page.locator('.nb-bagpick-import-card')).toHaveAttribute('href', '/')
+    await expect(page.locator('.nb-bagpick-import-card')).toContainText('Upload a new bag')
+    await expect(page.locator('.nb-bagpick input[type="file"]')).toHaveCount(1)
     await expect(page.locator('.nb-bagpick-item').first()).toBeVisible()
     await expect(page.locator('.nb-cmd-input')).toBeDisabled()
 
@@ -94,6 +95,49 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
 
     await page.getByRole('button', { name: /Health report/ }).click()
     await expect(page.getByText('bf.health().report()')).toBeVisible()
+  })
+
+  test('uploading a bag file in the picker indexes + attaches it', async ({ page, request }) => {
+    // Would catch: the upload endpoint or the picker's file-input wiring
+    // breaking — a blank notebook must be attachable by uploading a file,
+    // not only by picking an already-indexed bag.
+    const bags = await request.get('/api/bags').then(r => r.json())
+    const bagPath = bags[0].path as string   // a real bag file on this machine
+
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+    await page.locator('.nb-new-btn').click()
+    await page.getByRole('menuitem', { name: /New notebook/ }).click()
+    await expect(page.getByText('Point this notebook at a bag')).toBeVisible()
+
+    // Set the file on the hidden input (bypasses the OS file dialog).
+    await page.locator('.nb-bagpick input[type="file"]').setInputFiles(bagPath)
+
+    // Upload → index → attach: picker disappears, header stats populate.
+    await expect(page.getByText('Point this notebook at a bag')).toHaveCount(0, { timeout: 20_000 })
+    await expect(page.locator('.nb-header-meta')).toContainText('topics')
+    await expect(page.locator('.nb-cmd-input')).toBeEnabled()
+  })
+
+  test('rail + → Scan folder imports bags from a directory', async ({ page, request }) => {
+    // Would catch: the rail Scan-folder form not wiring to /api/scan or not
+    // merging newly-indexed bags into the rail.
+    const bags = await request.get('/api/bags').then(r => r.json())
+    const bagPath = bags[0].path as string
+    const dir = bagPath.replace(/[/\\][^/\\]+$/, '')   // parent directory
+
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.locator('.nb-new-btn').click()
+    await page.getByRole('menuitem', { name: /Scan folder/ }).click()
+
+    const form = page.locator('.nb-scan-form')
+    await expect(form).toBeVisible()
+    await form.locator('.nb-scan-input').fill(dir)
+    await form.locator('.nb-scan-go').click()
+    // The scan reports how many bags it indexed from the directory.
+    await expect(page.locator('.nb-scan-msg')).toContainText(/Indexed \d+ of \d+/, { timeout: 20_000 })
   })
 
   test('rail footer shows real capability status, not fabricated bars', async ({ page, request }) => {

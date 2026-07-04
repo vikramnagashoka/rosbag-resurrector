@@ -201,6 +201,37 @@
 .nb-add-menu button:hover { background: #f1ebdf; }
 .nb-add-glyph { color: var(--nb-accent); font-size: 12px; }
 
+/* Rail "Scan folder" inline form */
+.nb-scan-form {
+  margin: 2px 12px 8px;
+  padding: 11px 12px;
+  background: #fffdf9;
+  border: 1px solid #e3ddcf;
+  border-radius: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.nb-scan-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; font-weight: 600; color: var(--nb-text-muted);
+}
+.nb-scan-x {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--nb-text-faintest); font-size: 15px; line-height: 1; padding: 0 2px;
+}
+.nb-scan-x:hover { color: var(--nb-text); }
+.nb-scan-input {
+  font-size: 12px; font-family: var(--nb-font-mono);
+  border: 1px solid var(--nb-border-control); border-radius: 6px;
+  padding: 6px 8px; background: var(--nb-field-bg); color: var(--nb-text);
+}
+.nb-scan-go {
+  font-size: 12px; font-weight: 500;
+  background: var(--nb-accent); color: #fff;
+  border: none; border-radius: 6px; padding: 7px 10px; cursor: pointer;
+}
+.nb-scan-go:disabled { opacity: 0.5; cursor: not-allowed; }
+.nb-scan-msg { font-size: 10.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faint); }
+
 /* Folder groups */
 .nb-folder { margin-bottom: 2px; }
 .nb-folder-head {
@@ -335,6 +366,7 @@
 /* Import-a-new-bag path — an accent card given equal weight to the list. */
 .nb-bagpick-import-card {
   display: flex; align-items: center; gap: 12px;
+  width: 100%; text-align: left; cursor: pointer;
   text-decoration: none;
   background: var(--nb-accent-chip);
   border: 1px solid var(--nb-accent-band-border);
@@ -342,7 +374,12 @@
   padding: 13px 15px;
   transition: background 0.12s ease;
 }
-.nb-bagpick-import-card:hover { background: var(--nb-accent-band); }
+.nb-bagpick-import-card:hover:not(:disabled) { background: var(--nb-accent-band); }
+.nb-bagpick-import-card:disabled { opacity: 0.65; cursor: progress; }
+.nb-bagpick-uploaderr {
+  font-size: 11.5px; color: var(--nb-health-bad, #c0392b);
+  margin-top: 8px;
+}
 .nb-bagpick-import-icon {
   display: flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; flex: 0 0 30px;
