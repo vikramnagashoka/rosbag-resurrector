@@ -472,12 +472,26 @@ export default function NotebookWorkspace() {
               <div className="nb-bagpick">
                 <div className="nb-bagpick-title">Point this notebook at a bag</div>
                 <div className="nb-bagpick-sub">
-                  Pick an indexed bag to analyze. Its topics, health, and duration load in.
+                  Pick one already in your library, or import a new bag. Either way its
+                  topics, health, and duration load in.
                 </div>
+
+                {/* Two equal-weight paths: import new, or pick indexed. */}
+                <a href="/" className="nb-bagpick-import-card">
+                  <span className="nb-bagpick-import-icon">↥</span>
+                  <span className="nb-bagpick-import-text">
+                    <span className="nb-bagpick-import-head">Import a new bag</span>
+                    <span className="nb-bagpick-import-desc">Scan a folder into your library →</span>
+                  </span>
+                </a>
+
+                <div className="nb-bagpick-or">
+                  <span>{bags.length > 0 ? `or pick from your library (${bags.length})` : 'your library is empty'}</span>
+                </div>
+
                 {bags.length === 0 ? (
                   <div className="nb-bagpick-empty">
-                    No indexed bags yet. Import one in the{' '}
-                    <a href="/" className="nb-bagpick-link">Library</a>, then reload.
+                    No bags indexed yet — use <strong>Import a new bag</strong> above, then reload.
                   </div>
                 ) : (
                   <div className="nb-bagpick-list">
@@ -497,9 +511,6 @@ export default function NotebookWorkspace() {
                     })}
                   </div>
                 )}
-                <div className="nb-bagpick-import">
-                  Need a bag that isn't here? <a href="/" className="nb-bagpick-link">Import it in the Library →</a>
-                </div>
               </div>
             ) : !active || active.cells.length === 0 ? (
               <div className="nb-empty">

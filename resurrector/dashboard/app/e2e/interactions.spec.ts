@@ -79,6 +79,10 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('no bag attached')).toBeVisible()
     // The bag picker is shown and the command input is disabled until attach.
     await expect(page.getByText('Point this notebook at a bag')).toBeVisible()
+    // Both paths are presented: import a new bag, and pick an indexed one.
+    await expect(page.locator('.nb-bagpick-import-card')).toBeVisible()
+    await expect(page.locator('.nb-bagpick-import-card')).toHaveAttribute('href', '/')
+    await expect(page.locator('.nb-bagpick-item').first()).toBeVisible()
     await expect(page.locator('.nb-cmd-input')).toBeDisabled()
 
     // Attach the first indexed bag → header stats populate, picker disappears,
