@@ -18,28 +18,46 @@ function formatDuration(sec: number): string {
   return `${m}m ${String(s).padStart(2, '0')}s`
 }
 
+// The bag-derived fields of a notebook (everything except id / folderId /
+// title / cells). Shared by the starter-notebook builder and by attaching a
+// bag to a blank investigation.
+export function bagFields(b: Bag) {
+  const score = b.health_score ?? 0
+  return {
+    bag: basename(b.path),
+    bagId: b.id,
+    health: score,
+    tier: tierForScore(score),
+    durationLabel: formatDuration(b.duration_sec),
+    durationSec: b.duration_sec,
+    startNs: b.start_time_ns ?? 0,
+    topicCount: b.topics.length,
+    messageCount: b.message_count,
+    bagTopics: b.topics.map(t => ({
+      name: t.name, messageType: t.message_type, messageCount: t.message_count,
+    })),
+  }
+}
+
 // One starter notebook per indexed bag. The rail's "+" adds blank
 // investigations on top of these.
 export function notebooksFromBags(bags: Bag[]): Notebook[] {
-  return bags.map(b => {
-    const file = basename(b.path)
-    const score = b.health_score ?? 0
-    return {
-      id: `nb-bag-${b.id}`,
-      title: prettyTitle(file),
-      bag: file,
-      bagId: b.id,
-      health: score,
-      tier: tierForScore(score),
-      durationLabel: formatDuration(b.duration_sec),
-      durationSec: b.duration_sec,
-      startNs: b.start_time_ns ?? 0,
-      topicCount: b.topics.length,
-      messageCount: b.message_count,
-      bagTopics: b.topics.map(t => ({
-        name: t.name, messageType: t.message_type, messageCount: t.message_count,
-      })),
-      cells: [],
-    }
-  })
+  return bags.map(b => ({
+    id: `nb-bag-${b.id}`,
+    title: prettyTitle(basename(b.path)),
+    ...bagFields(b),
+    cells: [],
+  }))
+}
+
+// Attach an indexed bag to an existing (usually blank) notebook, preserving
+// its identity, folder, and any cells. A still-default title adopts the bag
+// stem so the rail stops reading "Untitled investigation".
+export function attachBagToNotebook(nb: Notebook, b: Bag): Notebook {
+  const retitle = nb.title === 'Untitled investigation'
+  return {
+    ...nb,
+    ...bagFields(b),
+    title: retitle ? prettyTitle(basename(b.path)) : nb.title,
+  }
 }

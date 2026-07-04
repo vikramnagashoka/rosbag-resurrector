@@ -66,6 +66,32 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-folder-kids')).toHaveCount(0)
   })
 
+  test('a blank notebook can be pointed at an indexed bag before analysis', async ({ page }) => {
+    // Would catch: blank investigations being a dead end — no way to attach
+    // a bag, so the command bar/chips have no data to act on.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+
+    // Create a blank notebook via the + menu → it has no bag.
+    await page.locator('.nb-new-btn').click()
+    await page.getByRole('menuitem', { name: /New notebook/ }).click()
+    await expect(page.getByText('no bag attached')).toBeVisible()
+    // The bag picker is shown and the command input is disabled until attach.
+    await expect(page.getByText('Point this notebook at a bag')).toBeVisible()
+    await expect(page.locator('.nb-cmd-input')).toBeDisabled()
+
+    // Attach the first indexed bag → header stats populate, picker disappears,
+    // command bar enables, and a suggestion chip now works.
+    await page.locator('.nb-bagpick-item').first().click()
+    await expect(page.getByText('Point this notebook at a bag')).toHaveCount(0)
+    await expect(page.locator('.nb-cmd-input')).toBeEnabled()
+    await expect(page.locator('.nb-header-meta')).toContainText('topics')
+
+    await page.getByRole('button', { name: /Health report/ }).click()
+    await expect(page.getByText('bf.health().report()')).toBeVisible()
+  })
+
   test('rail footer shows real capability status, not fabricated bars', async ({ page, request }) => {
     // Would catch: the footer regressing to hardcoded fake "4 ready · 2
     // partial" data (a credibility smell), or the capabilities fetch failing.

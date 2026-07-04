@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import '../styles/notebook.css'
-import { api, CapabilityMap } from '../api'
+import { api, CapabilityMap, Bag } from '../api'
 import {
   Notebook, Folder, HealthTier, CellType, Cell, nextCellId, nextFolderId,
   plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
 } from './types'
-import { notebooksFromBags } from './build'
+import { notebooksFromBags, attachBagToNotebook } from './build'
 import { buildCatalog, filterCatalog, CommandEntry } from './commands'
 import CommandPalette from './CommandPalette'
 import CellFeed from './CellFeed'
@@ -35,6 +35,7 @@ const SUGGESTIONS: { label: string; type: CellType | null }[] = [
 
 export default function NotebookWorkspace() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([])
+  const [bags, setBags] = useState<Bag[]>([])   // indexed bags, for the attach picker
   const [folders, setFolders] = useState<Folder[]>([])
   const [collapsedFolders, setCollapsedFolders] = useState<Record<string, boolean>>({})
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
@@ -62,9 +63,10 @@ export default function NotebookWorkspace() {
   useEffect(() => {
     let cancelled = false
     api.listBags()
-      .then(bags => {
+      .then(loaded => {
         if (cancelled) return
-        const nbs = notebooksFromBags(bags)
+        setBags(loaded)
+        const nbs = notebooksFromBags(loaded)
         setNotebooks(nbs)
         setActiveId(nbs[0]?.id ?? null)
       })
@@ -133,6 +135,12 @@ export default function NotebookWorkspace() {
     setNotebooks(prev => [...prev, blank])
     setActiveId(id)
     setAddMenuOpen(false)
+  }
+
+  // Bind an indexed bag to the active (blank) notebook so it has data to
+  // analyze. Preserves the notebook's id, folder, and any cells.
+  function attachBag(nbId: string, bag: Bag) {
+    setNotebooks(prev => prev.map(n => (n.id === nbId ? attachBagToNotebook(n, bag) : n)))
   }
 
   function newFolder() {
@@ -423,7 +431,13 @@ export default function NotebookWorkspace() {
         <header className="nb-header">
           <div>
             <div className="nb-title">{active?.title ?? (loading ? 'Loading…' : 'No notebook')}</div>
-            {active && (
+            {active && !active.bagId && (
+              <div className="nb-header-meta">
+                <span className="nb-bag-chip nb-bag-chip-empty">no bag attached</span>
+                <span className="nb-duration">pick one below to begin</span>
+              </div>
+            )}
+            {active && active.bagId && (
               <div className="nb-header-meta">
                 <span className="nb-bag-chip">{active.bag}</span>
                 <span
@@ -453,7 +467,41 @@ export default function NotebookWorkspace() {
 
         <div className="nb-feed">
           <div className="nb-feed-inner">
-            {!active || active.cells.length === 0 ? (
+            {active && !active.bagId ? (
+              // Blank investigation — bind it to an indexed bag before analysis.
+              <div className="nb-bagpick">
+                <div className="nb-bagpick-title">Point this notebook at a bag</div>
+                <div className="nb-bagpick-sub">
+                  Pick an indexed bag to analyze. Its topics, health, and duration load in.
+                </div>
+                {bags.length === 0 ? (
+                  <div className="nb-bagpick-empty">
+                    No indexed bags yet. Import one in the{' '}
+                    <a href="/" className="nb-bagpick-link">Library</a>, then reload.
+                  </div>
+                ) : (
+                  <div className="nb-bagpick-list">
+                    {bags.map(b => {
+                      const file = b.path.split(/[/\\]/).pop() || b.path
+                      const score = b.health_score ?? 0
+                      const tier: HealthTier = score >= 90 ? 'good' : score >= 80 ? 'warn' : 'bad'
+                      return (
+                        <button key={b.id} className="nb-bagpick-item" onClick={() => attachBag(active.id, b)}>
+                          <span className="nb-dot" style={{ background: TIER_VARS[tier].color }} />
+                          <span className="nb-bagpick-name">{file}</span>
+                          <span className="nb-bagpick-meta">
+                            {b.topics.length} topics · {b.message_count.toLocaleString()} msgs
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                <div className="nb-bagpick-import">
+                  Need a bag that isn't here? <a href="/" className="nb-bagpick-link">Import it in the Library →</a>
+                </div>
+              </div>
+            ) : !active || active.cells.length === 0 ? (
               <div className="nb-empty">
                 <div className="nb-empty-title">Start your analysis</div>
                 <div className="nb-empty-sub">
@@ -504,7 +552,10 @@ export default function NotebookWorkspace() {
                 onFocus={() => setPaletteOpen(true)}
                 onBlur={() => setPaletteOpen(false)}
                 onKeyDown={onInputKeyDown}
-                placeholder={'type a query — bf["/topic"].plot(), .sync([...]), .health(), search("…")'}
+                disabled={!active?.bagId}
+                placeholder={active && !active.bagId
+                  ? 'attach a bag above to start querying'
+                  : 'type a query — bf["/topic"].plot(), .sync([...]), .health(), search("…")'}
                 spellCheck={false}
               />
               <span className="nb-cmd-keyhint" title="Press ⌘K (Ctrl+K) to focus, ⏎ to run">
@@ -516,8 +567,8 @@ export default function NotebookWorkspace() {
                 <button
                   key={s.label}
                   className="nb-chip"
-                  disabled={!s.type || !active}
-                  title={s.type ? `Add a ${s.type} cell` : 'Lands in a later slice'}
+                  disabled={!s.type || !active?.bagId}
+                  title={!active?.bagId ? 'Attach a bag first' : s.type ? `Add a ${s.type} cell` : 'Lands in a later slice'}
                   style={!s.type ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
                   onClick={() => s.type && addCell(s.type)}
                 >

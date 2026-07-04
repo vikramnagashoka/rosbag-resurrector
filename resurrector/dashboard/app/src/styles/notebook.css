@@ -302,6 +302,39 @@
 .nb-empty-title { font-size: 14px; font-weight: 600; color: var(--nb-text-muted); margin-bottom: 6px; }
 .nb-empty-sub { font-size: 12px; }
 
+/* Empty-bag chip in the header (blank notebook, no bag attached) */
+.nb-bag-chip-empty { color: var(--nb-text-faintest); font-style: italic; border-style: dashed; }
+
+/* Bag picker — shown in the feed when a blank notebook has no bag yet */
+.nb-bagpick {
+  border: 1.5px dashed var(--nb-border-control);
+  border-radius: 13px;
+  padding: 28px 26px;
+}
+.nb-bagpick-title { font-size: 15px; font-weight: 600; color: var(--nb-text); }
+.nb-bagpick-sub { font-size: 12.5px; color: var(--nb-text-faint); margin: 4px 0 16px; }
+.nb-bagpick-list { display: flex; flex-direction: column; gap: 6px; }
+.nb-bagpick-item {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left;
+  background: var(--nb-card-bg);
+  border: 1px solid var(--nb-border);
+  border-radius: 9px;
+  padding: 10px 13px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.nb-bagpick-item:hover { background: #fffdf9; border-color: var(--nb-accent); }
+.nb-bagpick-name { font-size: 13px; font-weight: 600; color: var(--nb-text); }
+.nb-bagpick-meta {
+  margin-left: auto; font-size: 10.5px; font-family: var(--nb-font-mono);
+  color: var(--nb-text-faintest);
+}
+.nb-bagpick-empty { font-size: 12.5px; color: var(--nb-text-faint); padding: 8px 0; }
+.nb-bagpick-import { font-size: 11.5px; color: var(--nb-text-faintest); margin-top: 16px; }
+.nb-bagpick-link { color: var(--nb-accent); text-decoration: none; }
+.nb-bagpick-link:hover { text-decoration: underline; }
+
 /* --------------------------------------------------------- Command bar */
 .nb-cmdbar { background: var(--nb-card-bg); border-top: 1px solid var(--nb-border); }
 .nb-cmdbar-inner { max-width: 900px; margin: 0 auto; padding: 14px 20px 16px; position: relative; }
