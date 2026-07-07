@@ -522,6 +522,42 @@
   border: 1px solid var(--nb-border-control); border-radius: 7px;
   padding: 3px 6px;
 }
+/* Transform cell — op/column/expression controls above an inline preview */
+.nb-tf-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.nb-tf-tab {
+  font-size: 12px; padding: 5px 13px; cursor: pointer;
+  background: var(--nb-card-bg); color: var(--nb-text-2);
+  border: 1px solid var(--nb-border-control); border-radius: 7px;
+}
+.nb-tf-tab.active {
+  background: var(--nb-accent-chip); color: var(--nb-accent);
+  border-color: var(--nb-accent-band-border);
+}
+.nb-tf-controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.nb-tf-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.nb-tf-field > span { font-size: 10.5px; color: var(--nb-text-faint); }
+.nb-tf-field select, .nb-tf-field input {
+  font-family: var(--nb-font-mono); font-size: 12px;
+  background: var(--nb-field-bg); color: var(--nb-text);
+  border: 1px solid var(--nb-border-control); border-radius: 6px;
+  padding: 5px 8px;
+}
+.nb-tf-field select { min-width: 190px; }
+.nb-tf-param input { width: 96px; }
+.nb-tf-expr { margin-bottom: 12px; }
+.nb-tf-expr-input {
+  width: 100%; font-family: var(--nb-font-mono); font-size: 12.5px;
+  background: var(--nb-field-bg); color: var(--nb-text);
+  border: 1px solid var(--nb-border-control); border-radius: 7px;
+  padding: 8px 10px; box-sizing: border-box;
+}
+.nb-tf-expr-hint { font-size: 10.5px; color: var(--nb-text-faintest); margin-top: 6px; }
+.nb-tf-legend {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 10.5px; font-family: var(--nb-font-mono); color: var(--nb-text-2);
+  margin-bottom: 8px;
+}
+
 .nb-plot-legend {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
   margin-bottom: 10px;

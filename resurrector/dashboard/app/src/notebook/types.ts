@@ -3,7 +3,7 @@
 // The notebook model is the design DNA: every analysis capability is one
 // more cell type, so the surface scales by adding cell renderers, not pages.
 
-export type CellType = 'plot' | 'stats' | 'sync' | 'health' | 'image' | 'search' | 'scene'
+export type CellType = 'plot' | 'stats' | 'sync' | 'health' | 'image' | 'search' | 'scene' | 'transform'
 
 export interface Cell {
   id: string
@@ -12,6 +12,10 @@ export interface Cell {
   topics?: string[]
   frame?: number
   query?: string
+  // transform cell: derived-series op on one topic column
+  op?: string
+  column?: string
+  expression?: string
 }
 
 export type HealthTier = 'good' | 'warn' | 'bad'
@@ -77,6 +81,12 @@ export function cellCommand(cell: Cell): string {
     case 'image': return `bf["${cell.topic ?? '/camera/rgb'}"].frame(${cell.frame ?? 0})`
     case 'search': return `search("${cell.query ?? ''}")`
     case 'scene': return `bf["${cell.topic ?? '/lidar/points'}"].scene()`
+    case 'transform': {
+      const t = cell.topic ?? '/topic'
+      if (cell.expression) return `bf["${t}"].transform(${JSON.stringify(cell.expression)})`
+      const col = cell.column ? `"${cell.column}"` : ''
+      return `bf["${t}"].${cell.op ?? 'derivative'}(${col})`
+    }
   }
 }
 

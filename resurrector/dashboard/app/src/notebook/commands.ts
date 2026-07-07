@@ -37,6 +37,12 @@ export function buildCatalog(nb: Notebook | null): CommandEntry[] {
       description: `min / mean / max / σ of ${t}`, keywords: `stats describe summary ${t}`,
       makeCell: () => ({ id: nextCellId(), type: 'stats', topic: t }),
     })
+    out.push({
+      id: `transform:${t}`, cmd: `bf["${t}"].derivative()`, kind: 'transform',
+      description: `Derived signal from ${t} — derivative, integral, filter…`,
+      keywords: `transform derivative integral derived filter moving average low pass expression ${t}`,
+      makeCell: () => ({ id: nextCellId(), type: 'transform', topic: t, op: 'derivative' }),
+    })
   }
 
   const two = plottableTopics(nb).slice(0, 2)

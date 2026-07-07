@@ -8,6 +8,7 @@ import SyncCell from './cells/SyncCell'
 import ImageCell from './cells/ImageCell'
 import SceneCell from './cells/SceneCell'
 import SearchCell from './cells/SearchCell'
+import TransformCell from './cells/TransformCell'
 
 // Renders the active notebook's cell list. Maps each cell to the shared
 // NotebookCell shell wrapping its type-specific body + optional header
@@ -32,6 +33,7 @@ interface Props {
   onRuntime: (id: string, ms: number) => void
   onSetTopic: (id: string, topic: string) => void
   onSetFrame: (id: string, frame: number) => void
+  onPatchCell: (id: string, patch: Partial<Cell>) => void
   onCursor: (id: string, frac: number | null) => void
   onToggleLink: (id: string) => void
   onSelect: (id: string, sel: { a: number; b: number } | null) => void
@@ -72,7 +74,7 @@ export default function CellFeed(props: Props) {
   const {
     cells, bagId, plottableTopics, imageTopics, pointcloudTopics, frameCountFor,
     sceneTimeNs, collapsed, runtime, cursorForCell, isUnlinked, selForCell, durationSec,
-    onToggleCollapse, onDelete, onRuntime, onSetTopic, onSetFrame,
+    onToggleCollapse, onDelete, onRuntime, onSetTopic, onSetFrame, onPatchCell,
     onCursor, onToggleLink, onSelect, onOpenFrame,
   } = props
 
@@ -137,6 +139,17 @@ export default function CellFeed(props: Props) {
             break
           case 'search':
             body = <SearchCell bagId={bagId} query={cell.query} onOpenFrame={onOpenFrame} onRuntime={rt} />
+            break
+          case 'transform':
+            body = (
+              <TransformCell
+                bagId={bagId} topic={cell.topic}
+                op={cell.op} column={cell.column} expression={cell.expression}
+                onRuntime={rt}
+                onPatch={patch => onPatchCell(cell.id, patch)}
+              />
+            )
+            headerExtras = topicSelect(cell.topic, plottableTopics, t => onSetTopic(cell.id, t))
             break
           default:
             body = <div className="nb-cell-loading">{cell.type} cell — coming in a later slice.</div>

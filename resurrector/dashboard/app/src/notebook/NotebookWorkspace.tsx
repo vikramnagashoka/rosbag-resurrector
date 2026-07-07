@@ -25,6 +25,7 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
 // those land in their respective PRs alongside the command palette).
 const SUGGESTIONS: { label: string; type: CellType | null }[] = [
   { label: 'Plot signal', type: 'plot' },
+  { label: 'Transform', type: 'transform' },
   { label: 'Statistics', type: 'stats' },
   { label: 'Health report', type: 'health' },
   { label: 'Synchronize', type: 'sync' },
@@ -233,7 +234,7 @@ export default function NotebookWorkspace() {
     if (!active) return
     const cell: Cell = { id: nextCellId(), type }
     // Seed each cell type with a sensible default topic / topics.
-    if (type === 'plot' || type === 'stats') cell.topic = plottableTopics(active)[0]
+    if (type === 'plot' || type === 'stats' || type === 'transform') cell.topic = plottableTopics(active)[0]
     else if (type === 'image') { cell.topic = imageTopics(active)[0]; cell.frame = 0 }
     else if (type === 'scene') cell.topic = pointcloudTopics(active)[0]
     else if (type === 'sync') cell.topics = plottableTopics(active).slice(0, 2)
@@ -638,6 +639,7 @@ export default function NotebookWorkspace() {
                 onRuntime={setCellRuntime}
                 onSetTopic={setCellTopic}
                 onSetFrame={setCellFrame}
+                onPatchCell={patchCell}
                 onCursor={moveCursor}
                 onToggleLink={toggleLink}
                 onSelect={setCellSel}

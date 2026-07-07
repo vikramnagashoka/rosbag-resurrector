@@ -298,6 +298,33 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-explain-body')).toContainText('window')
   })
 
+  test('Transform chip adds a transform cell that previews a derived series', async ({ page }) => {
+    // Would catch: the classic Transform editor's op/column/expression flow
+    // not being ported into the notebook — the capability the user flagged
+    // as missing from /n.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.locator('.nb-chip', { hasText: 'Transform' }).click()
+
+    // Cell shell shows the derived-signal command, defaulting to derivative.
+    await expect(page.getByText(/\.derivative\(/)).toBeVisible()
+
+    // Common-mode controls exist: operation + column selects.
+    const opSelect = page.locator('.nb-tf-field', { hasText: 'Operation' }).locator('select')
+    await expect(opSelect).toBeVisible()
+
+    // The live preview renders the derived series (real /transforms/preview).
+    await expect(page.locator('.nb-transform .nb-chart')).toBeVisible({ timeout: 15_000 })
+
+    // Switching the op re-drives the header command string.
+    await opSelect.selectOption('integral')
+    await expect(page.getByText(/\.integral\(/)).toBeVisible()
+
+    // Expression mode swaps in the Polars expression input.
+    await page.getByRole('button', { name: 'Expression' }).click()
+    await expect(page.locator('.nb-tf-expr-input')).toBeVisible()
+  })
+
   test('search cell renders + degrades gracefully to an honest state', async ({ page }) => {
     // Would catch: search cell not rendering, or a hard crash when vision
     // isn't installed / no frames are indexed (should be a friendly message).
