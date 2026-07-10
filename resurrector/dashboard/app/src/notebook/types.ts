@@ -3,7 +3,7 @@
 // The notebook model is the design DNA: every analysis capability is one
 // more cell type, so the surface scales by adding cell renderers, not pages.
 
-export type CellType = 'plot' | 'stats' | 'sync' | 'health' | 'image' | 'search' | 'scene' | 'transform'
+export type CellType = 'plot' | 'stats' | 'sync' | 'health' | 'image' | 'search' | 'scene' | 'transform' | 'compare'
 
 export interface Cell {
   id: string
@@ -16,6 +16,8 @@ export interface Cell {
   op?: string
   column?: string
   expression?: string
+  // compare cell: overlay one topic across these bag ids
+  bagIds?: number[]
 }
 
 export type HealthTier = 'good' | 'warn' | 'bad'
@@ -86,6 +88,10 @@ export function cellCommand(cell: Cell): string {
       if (cell.expression) return `bf["${t}"].transform(${JSON.stringify(cell.expression)})`
       const col = cell.column ? `"${cell.column}"` : ''
       return `bf["${t}"].${cell.op ?? 'derivative'}(${col})`
+    }
+    case 'compare': {
+      const n = cell.bagIds?.length ?? 0
+      return `compare(bf["${cell.topic ?? '/topic'}"], ${n} bag${n === 1 ? '' : 's'})`
     }
   }
 }

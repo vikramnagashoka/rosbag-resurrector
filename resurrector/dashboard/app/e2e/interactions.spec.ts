@@ -349,6 +349,29 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-tf-expr-input')).toBeVisible()
   })
 
+  test('Compare bags chip overlays a topic across bags (native, not the old UI)', async ({ page }) => {
+    // Would catch: the classic Compare-runs page not being ported into the
+    // notebook — cross-bag overlay must be a native cell, and it must render
+    // one series per selected bag from /api/compare/topics.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await page.locator('.nb-chip', { hasText: 'Compare bags' }).click()
+
+    // Bag chips appear; the cell auto-seeds two bags selected.
+    const onChips = page.locator('.nb-cmp-bagchip.on')
+    await expect(onChips).toHaveCount(2, { timeout: 10_000 })
+
+    // The overlay renders one polyline per selected bag (two series).
+    await expect(page.locator('.nb-compare .nb-chart')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.nb-compare .nb-chart polyline')).toHaveCount(2)
+    // Legend carries a chip per bag.
+    await expect(page.locator('.nb-compare .nb-legend-chip')).toHaveCount(2)
+
+    // Deselecting a bag drops it below the 2-bag minimum → prompt returns.
+    await page.locator('.nb-cmp-bagchip.on').first().click()
+    await expect(page.getByText('Select at least two bags to overlay.')).toBeVisible()
+  })
+
   test('search cell renders + degrades gracefully to an honest state', async ({ page }) => {
     // Would catch: search cell not rendering, or a hard crash when vision
     // isn't installed / no frames are indexed (should be a friendly message).

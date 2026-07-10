@@ -42,6 +42,7 @@ const SUGGESTIONS: { label: string; type: CellType | null }[] = [
   { label: 'Statistics', type: 'stats' },
   { label: 'Health report', type: 'health' },
   { label: 'Synchronize', type: 'sync' },
+  { label: 'Compare bags', type: 'compare' },
   { label: 'Camera frames', type: 'image' },
   { label: '3D scene', type: 'scene' },
   { label: 'Semantic search', type: 'search' },
@@ -251,6 +252,7 @@ export default function NotebookWorkspace() {
     else if (type === 'image') { cell.topic = imageTopics(active)[0]; cell.frame = 0 }
     else if (type === 'scene') cell.topic = pointcloudTopics(active)[0]
     else if (type === 'sync') cell.topics = plottableTopics(active).slice(0, 2)
+    else if (type === 'compare') cell.topic = plottableTopics(active)[0]
     setNotebooks(prev => prev.map(n =>
       n.id === active.id ? { ...n, cells: [...n.cells, cell] } : n,
     ))
@@ -646,6 +648,7 @@ export default function NotebookWorkspace() {
               <CellFeed
                 cells={active.cells}
                 bagId={active.bagId}
+                allBags={bags}
                 plottableTopics={plottableTopics(active)}
                 imageTopics={imageTopics(active)}
                 pointcloudTopics={pointcloudTopics(active)}

@@ -581,6 +581,22 @@
   margin-bottom: 8px;
 }
 
+/* Compare cell — bag chips + shared controls */
+.nb-cmp-bags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+.nb-cmp-lbl { font-size: 10.5px; color: var(--nb-text-faint); margin-right: 2px; }
+.nb-cmp-bagchip {
+  font-size: 11.5px; font-family: var(--nb-font-mono);
+  padding: 4px 10px; border-radius: 20px; cursor: pointer;
+  background: var(--nb-card-bg); color: var(--nb-text-2);
+  border: 1px solid var(--nb-border-control);
+}
+.nb-cmp-bagchip:hover { background: #faf6ec; }
+.nb-cmp-bagchip.on {
+  background: var(--nb-accent-chip); color: var(--nb-accent);
+  border-color: var(--nb-accent-band-border); font-weight: 600;
+}
+.nb-cmp-controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+
 .nb-plot-legend {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
   margin-bottom: 10px;

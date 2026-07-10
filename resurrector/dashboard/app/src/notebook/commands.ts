@@ -54,6 +54,16 @@ export function buildCatalog(nb: Notebook | null): CommandEntry[] {
     })
   }
 
+  const firstPlottable = plottableTopics(nb)[0]
+  if (firstPlottable) {
+    out.push({
+      id: 'compare', cmd: `compare(bf["${firstPlottable}"], bags)`, kind: 'compare',
+      description: 'Overlay one topic across multiple bags',
+      keywords: 'compare overlay cross-bag runs across bags versus diff',
+      makeCell: () => ({ id: nextCellId(), type: 'compare', topic: firstPlottable }),
+    })
+  }
+
   for (const t of imageTopics(nb)) {
     out.push({
       id: `image:${t}`, cmd: `bf["${t}"].frame(0)`, kind: 'image',

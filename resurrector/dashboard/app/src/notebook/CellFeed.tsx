@@ -1,4 +1,5 @@
 import React from 'react'
+import { Bag } from '../api'
 import { Cell, cellCommand } from './types'
 import NotebookCell from './NotebookCell'
 import HealthCell from './cells/HealthCell'
@@ -9,6 +10,7 @@ import ImageCell from './cells/ImageCell'
 import SceneCell from './cells/SceneCell'
 import SearchCell from './cells/SearchCell'
 import TransformCell from './cells/TransformCell'
+import CompareCell from './cells/CompareCell'
 
 // Renders the active notebook's cell list. Maps each cell to the shared
 // NotebookCell shell wrapping its type-specific body + optional header
@@ -17,6 +19,7 @@ import TransformCell from './cells/TransformCell'
 interface Props {
   cells: Cell[]
   bagId?: number
+  allBags: Bag[]
   plottableTopics: string[]
   imageTopics: string[]
   pointcloudTopics: string[]
@@ -72,7 +75,7 @@ function topicSelect(
 
 export default function CellFeed(props: Props) {
   const {
-    cells, bagId, plottableTopics, imageTopics, pointcloudTopics, frameCountFor,
+    cells, bagId, allBags, plottableTopics, imageTopics, pointcloudTopics, frameCountFor,
     sceneTimeNs, collapsed, runtime, cursorForCell, isUnlinked, selForCell, durationSec,
     onToggleCollapse, onDelete, onRuntime, onSetTopic, onSetFrame, onPatchCell,
     onCursor, onToggleLink, onSelect, onOpenFrame,
@@ -150,6 +153,16 @@ export default function CellFeed(props: Props) {
               />
             )
             headerExtras = topicSelect(cell.topic, plottableTopics, t => onSetTopic(cell.id, t))
+            break
+          case 'compare':
+            body = (
+              <CompareCell
+                topic={cell.topic} column={cell.column} bagIds={cell.bagIds}
+                allBags={allBags} defaultBagId={bagId}
+                onRuntime={rt}
+                onPatch={patch => onPatchCell(cell.id, patch)}
+              />
+            )
             break
           default:
             body = <div className="nb-cell-loading">{cell.type} cell — coming in a later slice.</div>
