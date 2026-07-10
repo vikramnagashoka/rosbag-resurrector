@@ -115,7 +115,7 @@ export default function DatasetsPage() {
                   <code>resurrector dataset add-version {selected.name} 1.0 …</code>
                 </div>
               ) : (
-                <table className="nb-table">
+                <table className="nb-dtable">
                   <thead>
                     <tr><th>Version</th><th>Format</th><th>Created</th><th /></tr>
                   </thead>

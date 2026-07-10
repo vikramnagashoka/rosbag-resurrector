@@ -855,13 +855,14 @@
 .nb-ds-exportrow > span { font-size: 12.5px; color: var(--nb-text-faint); white-space: nowrap; }
 .nb-ds-exportrow .nb-scan-input { flex: 1; }
 
-/* Tables */
-.nb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.nb-table th {
+/* Data tables for the warm pages (Datasets versions, Help docs). Distinct
+   from `.nb-table` — that's the mono, right-aligned stats/sync numeric table. */
+.nb-dtable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.nb-dtable th {
   text-align: left; padding: 7px 8px; color: var(--nb-text-faint);
   font-weight: 500; border-bottom: 1px solid var(--nb-border);
 }
-.nb-table td { padding: 7px 8px; border-bottom: 1px solid var(--nb-border-hair2, #ece5d6); }
+.nb-dtable td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--nb-border-hair2, #ece5d6); vertical-align: top; }
 .nb-td-accent { color: var(--nb-accent); font-family: var(--nb-font-mono); }
 .nb-td-muted { color: var(--nb-text-faintest); font-family: var(--nb-font-mono); font-size: 11.5px; }
 .nb-td-right { text-align: right; white-space: nowrap; }
@@ -905,3 +906,78 @@
   font-size: 11.5px; background: var(--nb-field-bg); border: 1px solid var(--nb-border-control);
   border-radius: 5px; padding: 3px 7px; display: inline-block; color: var(--nb-text-2);
 }
+
+/* Export dialog (warm) */
+.nb-export { width: 560px; max-height: 82vh; overflow-y: auto; }
+.nb-export-row { display: flex; gap: 12px; }
+.nb-export-hint { font-size: 11.5px; color: var(--nb-text-faintest); margin-top: 6px; }
+.nb-export-topics {
+  max-height: 168px; overflow-y: auto;
+  border: 1px solid var(--nb-border-control); border-radius: 8px;
+  padding: 8px 10px; background: var(--nb-field-bg);
+}
+.nb-export-topic {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; font-family: var(--nb-font-mono); color: var(--nb-text-2);
+  padding: 2px 0; cursor: pointer;
+}
+/* Checkboxes must not inherit the modal's full-width text-input sizing. */
+.nb-export-topic input[type="checkbox"], .nb-export-sync input[type="checkbox"] { width: auto; flex: 0 0 auto; margin: 0; }
+.nb-export-sync {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--nb-text-2); margin: 12px 0 4px; cursor: pointer;
+}
+.nb-export-result {
+  background: var(--nb-health-good-bg); border: 1px solid var(--nb-health-good);
+  color: var(--nb-health-good); border-radius: 7px; padding: 8px 12px;
+  font-size: 12.5px; font-family: var(--nb-font-mono); margin-top: 12px;
+  word-break: break-all;
+}
+
+/* Help & Docs page (warm) */
+.nb-doc { max-width: 860px; }
+.nb-doc-card { margin-bottom: 18px; }
+.nb-doc p { font-size: 13.5px; line-height: 1.6; color: var(--nb-text-2); margin: 0 0 12px; }
+.nb-doc-h2 { font-size: 17px; font-weight: 600; margin: 0 0 10px; }
+.nb-doc-h3 { font-size: 13.5px; font-weight: 600; margin: 16px 0 5px; color: var(--nb-text); }
+.nb-doc-muted { color: var(--nb-text-faint) !important; font-size: 12.5px !important; }
+.nb-doc-code {
+  font-family: var(--nb-font-mono); font-size: 12px;
+  background: var(--nb-field-bg); border: 1px solid var(--nb-border-control);
+  border-radius: 4px; padding: 1px 6px; color: var(--nb-accent);
+}
+.nb-doc-block {
+  background: var(--nb-field-bg); border: 1px solid var(--nb-border-control);
+  border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+  font-family: var(--nb-font-mono); font-size: 12.5px; line-height: 1.55;
+  color: var(--nb-text-2); white-space: pre; margin: 0 0 12px;
+}
+.nb-doc-table { margin-bottom: 4px; }
+.nb-doc-cmd { font-size: 12px; }
+.nb-doc-link { color: var(--nb-accent); text-decoration: none; }
+.nb-doc-link:hover { text-decoration: underline; }
+.nb-doc-links { margin: 0; padding-left: 20px; font-size: 13.5px; line-height: 1.7; color: var(--nb-text-2); }
+
+/* Library page (warm) */
+.nb-lib-scan { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+.nb-lib-scan-input { flex: 1; min-width: 260px; padding: 9px 12px; }
+.nb-lib-scan-msg { font-size: 12px; font-family: var(--nb-font-mono); color: var(--nb-text-faint); flex-basis: 100%; }
+.nb-lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.nb-lib-card {
+  text-align: left; cursor: pointer;
+  background: var(--nb-card-bg); border: 1px solid var(--nb-border);
+  border-radius: 11px; padding: 14px 15px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.nb-lib-card:hover { border-color: var(--nb-accent); background: #fffdf9; }
+.nb-lib-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.nb-lib-name { font-size: 13.5px; font-weight: 600; color: var(--nb-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nb-lib-badge {
+  font-size: 11px; font-weight: 700; font-family: var(--nb-font-mono);
+  border-radius: 14px; padding: 2px 9px; flex: 0 0 auto; color: #fff;
+}
+.nb-lib-badge.good { background: var(--nb-health-good); }
+.nb-lib-badge.warn { background: var(--nb-health-warn); }
+.nb-lib-badge.bad { background: var(--nb-health-bad); }
+.nb-lib-meta { font-size: 11.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faint); margin-top: 8px; }
+.nb-lib-sub { font-size: 10.5px; font-family: var(--nb-font-mono); color: var(--nb-text-faintest3); margin-top: 3px; }

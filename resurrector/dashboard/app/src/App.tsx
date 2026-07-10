@@ -22,6 +22,8 @@ const NotebookWorkspace = React.lazy(() => import('./notebook/NotebookWorkspace'
 // Datasets + Bridge). Full-screen like the workspace, scoped `.nb` theme.
 const DatasetsPage = React.lazy(() => import('./notebook/pages/DatasetsPage'))
 const BridgePage = React.lazy(() => import('./notebook/pages/BridgePage'))
+const LibraryPage = React.lazy(() => import('./notebook/pages/LibraryPage'))
+const HelpPage = React.lazy(() => import('./notebook/pages/HelpPage'))
 
 const loadingStyle: React.CSSProperties = {
   color: 'var(--color-text-secondary)',
@@ -63,6 +65,8 @@ export default function App() {
             <Route path="/n" element={<NotebookWorkspace />} />
             <Route path="/n/datasets" element={<DatasetsPage />} />
             <Route path="/n/bridge" element={<BridgePage />} />
+            <Route path="/n/library" element={<LibraryPage />} />
+            <Route path="/n/help" element={<HelpPage />} />
             <Route path="/n/:notebookId" element={<NotebookWorkspace />} />
             {/* Everything else keeps the classic NavBar + main layout. */}
             <Route path="/*" element={<ClassicLayout />} />

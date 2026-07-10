@@ -97,38 +97,59 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('bf.health().report()')).toBeVisible()
   })
 
-  test('rail reaches the workflow pages — warm-themed Datasets, classic Library', async ({ page }) => {
-    // Would catch: workflow pages unreachable from /n, the warm Datasets/Bridge
-    // ports regressing, or the return-path Notebook link missing.
+  test('rail reaches all workflow pages, warm-themed under /n', async ({ page }) => {
+    // Would catch: any workflow page dropping back to the old dark UI, or a
+    // rail link / back-to-notebook path regressing.
     await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
 
     const nav = page.locator('.nb-railnav')
     await expect(nav.getByText('MORE TOOLS')).toBeVisible()
-    for (const label of ['Datasets', 'Bridge', 'Library', 'Help & Docs']) {
-      await expect(nav.getByRole('link', { name: label })).toBeVisible()
+
+    // Every rail link opens a NATIVE warm page (.nb-page shell, no classic
+    // navbar) with the expected title, and the back link returns to /n.
+    const pages: [string, RegExp, string][] = [
+      ['Library', /\/n\/library$/, 'Library'],
+      ['Datasets', /\/n\/datasets$/, 'Datasets'],
+      ['Bridge', /\/n\/bridge$/, 'Bridge control'],
+      ['Help & Docs', /\/n\/help$/, 'Help & Docs'],
+    ]
+    for (const [label, url, title] of pages) {
+      await nav.getByRole('link', { name: label }).click()
+      await page.waitForURL(url)
+      await expect(page.locator('.nb-page')).toBeVisible()
+      await expect(page.locator('.nb-page-title')).toHaveText(title)
+      await page.locator('.nb-page-back').click()
+      await page.waitForURL(/\/n$/)
+      await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
     }
+  })
 
-    // Datasets is now a NATIVE warm page under /n (not the dark classic page):
-    // no classic navbar, a page title, and a back-to-notebook link.
-    await nav.getByRole('link', { name: 'Datasets' }).click()
-    await page.waitForURL(/\/n\/datasets$/)
-    await expect(page.locator('.nb-page')).toBeVisible()          // warm shell, not dark chrome
-    await expect(page.locator('.nb-page-title')).toHaveText('Datasets')
-    const back = page.locator('.nb-page-back')
-    await expect(back).toBeVisible()
-    await back.click()
-    await page.waitForURL(/\/n$/)
-    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+  test('Library card opens the bag in the notebook workspace', async ({ page }) => {
+    // Would catch: the warm Library not deep-linking a bag into /n/<id>.
+    await page.goto('/n/library')
+    await expect(page.locator('.nb-page-title')).toHaveText('Library')
+    const card = page.locator('.nb-lib-card').first()
+    await expect(card).toBeVisible({ timeout: 10_000 })
+    await card.click()
+    await page.waitForURL(/\/n\/nb-bag-\d+$/)
+    // Lands in the notebook with that bag active (header shows real stats).
+    await expect(page.locator('.nb-header-meta')).toContainText('topics')
+  })
 
-    // Library is still the classic page; its navbar carries the ✦ Notebook link back.
-    await nav.getByRole('link', { name: 'Library' }).click()
-    await page.waitForURL(/\/$/)
-    const notebookLink = page.getByRole('link', { name: /Notebook/ })
-    await expect(notebookLink).toBeVisible({ timeout: 10_000 })
-    await notebookLink.click()
-    await page.waitForURL(/\/n$/)
+  test('Export button opens the warm export dialog for the active bag', async ({ page }) => {
+    // Would catch: the notebook Export (the gap the classic Explorer had but
+    // /n lacked) not opening or not listing formats/topics.
+    await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const modal = page.locator('.nb-export')
+    await expect(modal).toBeVisible()
+    await expect(modal.getByText('Export data')).toBeVisible()
+    // Format dropdown + at least one topic checkbox present.
+    await expect(modal.locator('select').first()).toBeVisible()
+    await expect(modal.locator('.nb-export-topic').first()).toBeVisible()
   })
 
   test('Datasets warm page creates a dataset (native, not the dark UI)', async ({ page }) => {

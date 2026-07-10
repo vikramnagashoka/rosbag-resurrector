@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import '../styles/notebook.css'
 import { api, CapabilityMap, Bag, ApiError } from '../api'
 import {
@@ -10,6 +10,7 @@ import { notebooksFromBags, attachBagToNotebook } from './build'
 import { buildCatalog, filterCatalog, CommandEntry } from './commands'
 import CommandPalette from './CommandPalette'
 import CellFeed from './CellFeed'
+import ExportDialog from './ExportDialog'
 
 // The notebook workspace: rail + header + cell feed + docked command bar.
 // PR 1 wires it to real indexed bags and adds the cell framework + the
@@ -25,14 +26,14 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
 // Links to the classic (dark-themed) workflow pages that don't yet have a
 // notebook-cell equivalent. Kept in the rail so nothing is unreachable from
 // the notebook workspace. These navigate out to the classic ClassicLayout.
-// Warm-themed notebook pages live under /n; Library + Help are still the
-// classic (dark) pages. Cross-bag Compare is now the in-notebook Compare
-// cell, so the old /compare + /compare-runs pages aren't linked here.
+// All warm-themed notebook pages under /n. Cross-bag Compare is the
+// in-notebook Compare cell, so the old /compare + /compare-runs pages
+// aren't linked here.
 const RAIL_LINKS = [
+  { to: '/n/library', label: 'Library', glyph: '▤' },
   { to: '/n/datasets', label: 'Datasets', glyph: '⊞' },
   { to: '/n/bridge', label: 'Bridge', glyph: '⇉' },
-  { to: '/', label: 'Library', glyph: '▤' },
-  { to: '/help', label: 'Help & Docs', glyph: '?' },
+  { to: '/n/help', label: 'Help & Docs', glyph: '?' },
 ]
 
 // Suggestion chips. `type` is the cell they add (null = not wired yet —
@@ -50,6 +51,7 @@ const SUGGESTIONS: { label: string; type: CellType | null }[] = [
 ]
 
 export default function NotebookWorkspace() {
+  const { notebookId } = useParams()   // /n/<id> preselects that notebook (e.g. from the Library)
   const [notebooks, setNotebooks] = useState<Notebook[]>([])
   const [bags, setBags] = useState<Bag[]>([])   // indexed bags, for the attach picker
   const [folders, setFolders] = useState<Folder[]>([])
@@ -73,6 +75,7 @@ export default function NotebookWorkspace() {
   // Real system status for the rail footer (replaces the old fake bars).
   const [caps, setCaps] = useState<CapabilityMap | null>(null)
   const [copied, setCopied] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   // Per-cell UI state, keyed by cell id.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [runtime, setRuntime] = useState<Record<string, number>>({})
@@ -93,7 +96,10 @@ export default function NotebookWorkspace() {
         setBags(loaded)
         const nbs = notebooksFromBags(loaded)
         setNotebooks(nbs)
-        setActiveId(nbs[0]?.id ?? null)
+        // Honor a /n/<id> deep-link (e.g. opening a bag from the Library),
+        // else default to the first notebook.
+        const preferred = notebookId && nbs.some(n => n.id === notebookId) ? notebookId : nbs[0]?.id
+        setActiveId(preferred ?? null)
       })
       .catch(() => { /* empty rail shown on failure */ })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -569,9 +575,12 @@ export default function NotebookWorkspace() {
               title="Copy a link to this workspace"
               onClick={shareLink}
             >{copied ? 'Copied ✓' : 'Share'}</button>
-            {/* Notebook-level export isn't wired yet — the real export path is
-                per-cell (select a range on a plot → Export range). A phantom
-                header button would be worse than none; add when it's real. */}
+            <button
+              className="nb-btn nb-btn-accent"
+              disabled={!active?.bagId}
+              title={active?.bagId ? 'Export this bag to Parquet / HDF5 / CSV / LeRobot / RLDS…' : 'Attach a bag first'}
+              onClick={() => setExportOpen(true)}
+            >Export</button>
           </div>
         </header>
 
@@ -718,6 +727,14 @@ export default function NotebookWorkspace() {
           </div>
         </div>
       </div>
+
+      {exportOpen && active?.bagId != null && (
+        <ExportDialog
+          bagId={active.bagId}
+          availableTopics={active.bagTopics.map(t => t.name)}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
     </div>
   )
 }
