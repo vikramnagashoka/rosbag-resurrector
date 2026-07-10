@@ -25,12 +25,13 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
 // Links to the classic (dark-themed) workflow pages that don't yet have a
 // notebook-cell equivalent. Kept in the rail so nothing is unreachable from
 // the notebook workspace. These navigate out to the classic ClassicLayout.
+// Warm-themed notebook pages live under /n; Library + Help are still the
+// classic (dark) pages. Cross-bag Compare is now the in-notebook Compare
+// cell, so the old /compare + /compare-runs pages aren't linked here.
 const RAIL_LINKS = [
+  { to: '/n/datasets', label: 'Datasets', glyph: '⊞' },
+  { to: '/n/bridge', label: 'Bridge', glyph: '⇉' },
   { to: '/', label: 'Library', glyph: '▤' },
-  { to: '/datasets', label: 'Datasets', glyph: '⊞' },
-  { to: '/compare', label: 'Compare bags', glyph: '⇄' },
-  { to: '/compare-runs', label: 'Compare runs', glyph: '⊟' },
-  { to: '/bridge', label: 'Bridge', glyph: '⇉' },
   { to: '/help', label: 'Help & Docs', glyph: '?' },
 ]
 

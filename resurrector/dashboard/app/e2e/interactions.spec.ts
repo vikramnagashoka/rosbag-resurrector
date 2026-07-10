@@ -97,28 +97,71 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('bf.health().report()')).toBeVisible()
   })
 
-  test('rail links out to the classic workflows (and the navbar links back)', async ({ page }) => {
-    // Would catch: the classic workflows (Datasets / Compare / Compare runs /
-    // Bridge / Help) being unreachable from /n, or the return-path Notebook
-    // link missing from the classic navbar.
+  test('rail reaches the workflow pages — warm-themed Datasets, classic Library', async ({ page }) => {
+    // Would catch: workflow pages unreachable from /n, the warm Datasets/Bridge
+    // ports regressing, or the return-path Notebook link missing.
     await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
 
     const nav = page.locator('.nb-railnav')
     await expect(nav.getByText('MORE TOOLS')).toBeVisible()
-    for (const label of ['Datasets', 'Compare bags', 'Compare runs', 'Bridge', 'Help & Docs']) {
+    for (const label of ['Datasets', 'Bridge', 'Library', 'Help & Docs']) {
       await expect(nav.getByRole('link', { name: label })).toBeVisible()
     }
 
-    // Navigating to a classic page lands on it with the classic navbar…
+    // Datasets is now a NATIVE warm page under /n (not the dark classic page):
+    // no classic navbar, a page title, and a back-to-notebook link.
     await nav.getByRole('link', { name: 'Datasets' }).click()
-    await page.waitForURL(/\/datasets$/)
-    // …and the navbar carries a link back into the notebook workspace.
-    const back = page.getByRole('link', { name: /Notebook/ })
-    await expect(back).toBeVisible({ timeout: 10_000 })
+    await page.waitForURL(/\/n\/datasets$/)
+    await expect(page.locator('.nb-page')).toBeVisible()          // warm shell, not dark chrome
+    await expect(page.locator('.nb-page-title')).toHaveText('Datasets')
+    const back = page.locator('.nb-page-back')
+    await expect(back).toBeVisible()
     await back.click()
     await page.waitForURL(/\/n$/)
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    // Library is still the classic page; its navbar carries the ✦ Notebook link back.
+    await nav.getByRole('link', { name: 'Library' }).click()
+    await page.waitForURL(/\/$/)
+    const notebookLink = page.getByRole('link', { name: /Notebook/ })
+    await expect(notebookLink).toBeVisible({ timeout: 10_000 })
+    await notebookLink.click()
+    await page.waitForURL(/\/n$/)
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+  })
+
+  test('Datasets warm page creates a dataset (native, not the dark UI)', async ({ page }) => {
+    // Would catch: the Datasets port not rendering in the warm theme, or the
+    // create flow (modal → /api/datasets) breaking.
+    await page.goto('/n/datasets')
+    await expect(page.locator('.nb-page-title')).toHaveText('Datasets')
+
+    await page.getByRole('button', { name: 'New dataset' }).click()
+    const modal = page.locator('.nb-modal')
+    await expect(modal).toBeVisible()
+    const name = `nb-e2e-${Date.now()}`
+    await modal.locator('input').first().fill(name)
+    await modal.getByRole('button', { name: 'Create' }).click()
+
+    // The new dataset appears in the warm list.
+    await expect(page.locator('.nb-ds-item', { hasText: name })).toBeVisible({ timeout: 10_000 })
+  })
+
+  test('Bridge warm page loads with status + live-mode install banner', async ({ page }) => {
+    // Would catch: the Bridge port not rendering in the warm theme, or the
+    // live-mode rclpy gate regressing.
+    await page.goto('/n/bridge')
+    await expect(page.locator('.nb-page-title')).toHaveText('Bridge control')
+    // Status panel + start form present in the warm shell.
+    await expect(page.locator('.nb-bridge-status')).toBeVisible()
+    await expect(page.getByRole('button', { name: /Start bridge/ })).toBeVisible()
+
+    // Switching to live mode surfaces the rclpy install banner (extras absent
+    // in the hermetic env) and disables Start.
+    await page.getByRole('button', { name: /^live$/ }).click()
+    await expect(page.getByText('Bridge live mode needs rclpy (ROS 2).')).toBeVisible()
+    await expect(page.getByRole('button', { name: /Start bridge/ })).toBeDisabled()
   })
 
   test('uploading a bag file in the picker indexes + attaches it', async ({ page, request }) => {

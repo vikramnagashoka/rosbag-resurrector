@@ -18,6 +18,10 @@ const CompareRuns = React.lazy(() => import('./pages/CompareRuns'))
 // pages. Lazy so its scoped theme + future Plotly cells don't load until
 // visited. Becomes the default surface only once it reaches parity.
 const NotebookWorkspace = React.lazy(() => import('./notebook/NotebookWorkspace'))
+// Notebook-native warm-themed workflow pages (ports of the classic
+// Datasets + Bridge). Full-screen like the workspace, scoped `.nb` theme.
+const DatasetsPage = React.lazy(() => import('./notebook/pages/DatasetsPage'))
+const BridgePage = React.lazy(() => import('./notebook/pages/BridgePage'))
 
 const loadingStyle: React.CSSProperties = {
   color: 'var(--color-text-secondary)',
@@ -53,8 +57,12 @@ export default function App() {
       <BrowserRouter>
         <Suspense fallback={<div style={loadingStyle}>Loading…</div>}>
           <Routes>
-            {/* Notebook workspace — full-screen, no NavBar/main chrome. */}
+            {/* Notebook workspace + its warm-themed workflow pages —
+                full-screen, no NavBar/main chrome. Static paths rank above
+                the :notebookId param, so /n/datasets wins over /n/:id. */}
             <Route path="/n" element={<NotebookWorkspace />} />
+            <Route path="/n/datasets" element={<DatasetsPage />} />
+            <Route path="/n/bridge" element={<BridgePage />} />
             <Route path="/n/:notebookId" element={<NotebookWorkspace />} />
             {/* Everything else keeps the classic NavBar + main layout. */}
             <Route path="/*" element={<ClassicLayout />} />
