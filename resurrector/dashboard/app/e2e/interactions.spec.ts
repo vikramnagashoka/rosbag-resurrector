@@ -97,6 +97,30 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('bf.health().report()')).toBeVisible()
   })
 
+  test('rail links out to the classic workflows (and the navbar links back)', async ({ page }) => {
+    // Would catch: the classic workflows (Datasets / Compare / Compare runs /
+    // Bridge / Help) being unreachable from /n, or the return-path Notebook
+    // link missing from the classic navbar.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+
+    const nav = page.locator('.nb-railnav')
+    await expect(nav.getByText('MORE TOOLS')).toBeVisible()
+    for (const label of ['Datasets', 'Compare bags', 'Compare runs', 'Bridge', 'Help & Docs']) {
+      await expect(nav.getByRole('link', { name: label })).toBeVisible()
+    }
+
+    // Navigating to a classic page lands on it with the classic navbar…
+    await nav.getByRole('link', { name: 'Datasets' }).click()
+    await page.waitForURL(/\/datasets$/)
+    // …and the navbar carries a link back into the notebook workspace.
+    const back = page.getByRole('link', { name: /Notebook/ })
+    await expect(back).toBeVisible({ timeout: 10_000 })
+    await back.click()
+    await page.waitForURL(/\/n$/)
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+  })
+
   test('uploading a bag file in the picker indexes + attaches it', async ({ page, request }) => {
     // Would catch: the upload endpoint or the picker's file-input wiring
     // breaking — a blank notebook must be attachable by uploading a file,

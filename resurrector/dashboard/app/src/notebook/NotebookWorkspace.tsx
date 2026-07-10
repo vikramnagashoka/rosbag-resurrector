@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import '../styles/notebook.css'
 import { api, CapabilityMap, Bag, ApiError } from '../api'
 import {
@@ -20,6 +21,18 @@ const TIER_VARS: Record<HealthTier, { color: string; bg: string }> = {
   warn: { color: 'var(--nb-health-warn)', bg: 'var(--nb-health-warn-bg)' },
   bad: { color: 'var(--nb-health-bad)', bg: 'var(--nb-health-bad-bg)' },
 }
+
+// Links to the classic (dark-themed) workflow pages that don't yet have a
+// notebook-cell equivalent. Kept in the rail so nothing is unreachable from
+// the notebook workspace. These navigate out to the classic ClassicLayout.
+const RAIL_LINKS = [
+  { to: '/', label: 'Library', glyph: '▤' },
+  { to: '/datasets', label: 'Datasets', glyph: '⊞' },
+  { to: '/compare', label: 'Compare bags', glyph: '⇄' },
+  { to: '/compare-runs', label: 'Compare runs', glyph: '⊟' },
+  { to: '/bridge', label: 'Bridge', glyph: '⇉' },
+  { to: '/help', label: 'Help & Docs', glyph: '?' },
+]
 
 // Suggestion chips. `type` is the cell they add (null = not wired yet —
 // those land in their respective PRs alongside the command palette).
@@ -481,6 +494,16 @@ export default function NotebookWorkspace() {
           {/* Ungrouped notebooks below the folders */}
           {topLevel.map(renderItem)}
         </div>
+
+        {/* Classic workflows without a notebook-cell equivalent yet. */}
+        <nav className="nb-railnav">
+          <div className="nb-railnav-label">MORE TOOLS</div>
+          {RAIL_LINKS.map(l => (
+            <Link key={l.to} to={l.to} className="nb-railnav-item" title={`Open ${l.label} (classic view)`}>
+              <span className="nb-railnav-glyph">{l.glyph}</span>{l.label}
+            </Link>
+          ))}
+        </nav>
 
         <div className="nb-status">
           <div className="nb-status-row">

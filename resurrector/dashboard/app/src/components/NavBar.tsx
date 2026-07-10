@@ -36,6 +36,13 @@ export default function NavBar() {
       ))}
       <div className={styles.spacer} />
       <Link
+        to="/n"
+        className={`${styles.link} ${pathname.startsWith('/n') ? styles.linkActive : ''}`}
+        title="The new notebook workspace (experimental)"
+      >
+        ✦ Notebook
+      </Link>
+      <Link
         to="/help"
         className={`${styles.link} ${pathname === '/help' ? styles.linkActive : ''}`}
       >

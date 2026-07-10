@@ -29,7 +29,9 @@ test.describe('Visual baselines', () => {
     // health-badge color/contrast changes. The demo bag is fixed so
     // every field (name, size, msg count, duration) is deterministic.
     await page.goto('/')
-    await expect(page.getByText(/scene_demo\.mcap/)).toBeVisible({ timeout: 10_000 })
+    // .first() — the shared hermetic index can hold more than one scene_demo
+    // (other specs upload/scan), so don't assume a unique match.
+    await expect(page.getByText(/scene_demo\.mcap/).first()).toBeVisible({ timeout: 10_000 })
     await page.waitForLoadState('networkidle')
     await expect(page).toHaveScreenshot('library-with-demo-bag.png', {
       fullPage: true,
@@ -45,9 +47,16 @@ test.describe('Visual baselines', () => {
     await expect(nav).toHaveScreenshot('navbar-active-help.png')
   })
 
-  test('Search page empty state with install banner', async ({ page }) => {
+  test('Search page empty state with install banner', async ({ page, request }) => {
     // Would catch: the install-banner styling regressing (border color,
     // copy block layout, copy button alignment).
+    //
+    // This baseline only exists when the vision extras are ABSENT (the
+    // banner is the subject). On a dev box with [vision] installed there's
+    // no banner to snapshot, so skip rather than fail.
+    const caps = await request.get('/api/system/capabilities').then(r => r.ok() ? r.json() : null)
+    test.skip(caps?.vision?.available === true, 'vision installed — no install banner to snapshot')
+
     await page.goto('/search')
     await expect(
       page.getByText('Semantic search needs the vision extras.'),
