@@ -31,7 +31,7 @@ export default function Health() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <div>
-          <Link to={`/bag/${id}`} style={{ color: '#8b949e', fontSize: '13px' }}>Back to Explorer</Link>
+          <Link to={`/classic/bag/${id}`} style={{ color: '#8b949e', fontSize: '13px' }}>Back to Explorer</Link>
           <h1 style={{ fontSize: '24px', fontWeight: 600, marginTop: '4px' }}>Health Report</h1>
         </div>
         <HealthBadge score={report.score} size="large" />

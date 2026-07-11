@@ -20,7 +20,7 @@ test.describe('Search page', () => {
     const caps = await request.get('/api/system/capabilities').then(r => r.ok() ? r.json() : null)
     const visionInstalled = caps?.vision?.available === true
 
-    await page.goto('/search')
+    await page.goto('/classic/search')
 
     const banner = page.getByText('Semantic search needs the vision extras.')
     if (visionInstalled) {
@@ -42,7 +42,7 @@ test.describe('Bridge page', () => {
   test('live mode shows install banner when rclpy missing', async ({ page }) => {
     // Would have caught: live mode used to spawn a subprocess that
     // died silently. Now we pre-check + render an install banner.
-    await page.goto('/bridge')
+    await page.goto('/classic/bridge')
 
     await page.getByRole('button', { name: /^live$/i }).click()
 
@@ -64,7 +64,7 @@ test.describe('Bridge page', () => {
     const TEST_BRIDGE_PORT = 9991
     await request.post('/api/bridge/stop').catch(() => {})
 
-    await page.goto('/bridge')
+    await page.goto('/classic/bridge')
 
     // Stop any pre-existing bridge from a previous test run.
     const stopButton = page.getByRole('button', { name: /^stop$/i })
@@ -109,11 +109,22 @@ test.describe('Bridge page', () => {
   })
 })
 
-test.describe('Library page', () => {
-  test('loads and lists indexed bags', async ({ page }) => {
+test.describe('Default route (post-swap)', () => {
+  test('/ loads the notebook workspace, not the classic dark UI', async ({ page }) => {
+    // Would catch: the route swap regressing — `/` must render the warm
+    // notebook workspace now, with the classic UI behind /classic.
     await page.goto('/')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    // The classic dark NavBar must NOT be present at the root.
+    await expect(page.locator('nav').filter({ hasText: 'RosBag Resurrector' })).toHaveCount(0)
+  })
+
+  test('/classic still serves the classic Library with its navbar', async ({ page }) => {
+    await page.goto('/classic')
     // .first() — other specs (notebook upload/scan) can add extra bags to the
     // shared hermetic index, so scene_demo may appear more than once.
     await expect(page.getByText(/scene_demo\.mcap/i).first()).toBeVisible({ timeout: 10_000 })
+    // The classic navbar carries the ✦ Notebook link back to the default UI.
+    await expect(page.getByRole('link', { name: /Notebook/ })).toBeVisible()
   })
 })

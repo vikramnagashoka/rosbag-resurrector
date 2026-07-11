@@ -473,12 +473,12 @@ test.describe('Library → Explorer navigation', () => {
   test('clicking a bag card lands on its Explorer view with topics listed', async ({ page }) => {
     // Would catch: SPA-route regressions (e.g. v0.5.x SPA fallback
     // broke direct nav to /bag/N before commit 40bfb9e fixed it).
-    await page.goto('/')
+    await page.goto('/classic')
     const card = page.getByText(/scene_demo\.mcap/).first()
     await expect(card).toBeVisible({ timeout: 10_000 })
     await card.click()
 
-    await page.waitForURL(/\/bag\/\d+/)
+    await page.waitForURL(/\/classic\/bag\/\d+/)
     // Topics-panel rows have a unique "<msg-type> | N msgs" subtitle that
     // doesn't appear in the Topic Timeline strip up top — anchor on it
     // to dodge the strict-mode violation `/tf` would cause otherwise.
@@ -493,9 +493,9 @@ test.describe('Ask your bag — Explain', () => {
     // or wired so it's always enabled/disabled regardless of selection.
     // (Brushing Plotly's canvas is flaky, so we assert the disabled-until-
     // selection wiring; the panel content is API-driven + backend-tested.)
-    await page.goto('/')
+    await page.goto('/classic')
     await page.getByText(/scene_demo\.mcap/).first().click()
-    await page.waitForURL(/\/bag\/\d+/)
+    await page.waitForURL(/\/classic\/bag\/\d+/)
 
     const explain = page.getByRole('button', { name: /^Explain/ })
     await expect(explain).toBeVisible({ timeout: 10_000 })
@@ -540,11 +540,11 @@ test.describe('Explorer Scene tab', () => {
   test('Hide button clears the active Cloud topic', async ({ page }) => {
     // Would catch: the Hide button (added in v0.6.1) regressing to no-op,
     // or the dropdown failing to reflect the cleared state.
-    await page.goto('/')
+    await page.goto('/classic')
     const card = page.getByText(/scene_demo\.mcap/).first()
     await expect(card).toBeVisible({ timeout: 10_000 })
     await card.click()
-    await page.waitForURL(/\/bag\/\d+/)
+    await page.waitForURL(/\/classic\/bag\/\d+/)
 
     // Open the Scene tab. Need to pick the /lidar/points topic in the
     // left Topics panel first because the tab controls are gated on a
@@ -570,9 +570,9 @@ test.describe('Explorer Scene tab', () => {
 
   test('Max points dropdown changes the rendered cap', async ({ page }) => {
     // Would catch: the Max points control losing its onChange wiring.
-    await page.goto('/')
+    await page.goto('/classic')
     await page.getByText(/scene_demo\.mcap/).first().click()
-    await page.waitForURL(/\/bag\/\d+/)
+    await page.waitForURL(/\/classic\/bag\/\d+/)
     // Click the Topics-panel row for /lidar/points — anchor on the
     // unique subtitle to avoid matching the Topic Timeline label.
     await page.getByText('sensor_msgs/msg/PointCloud2 | 80 msgs').click()
@@ -605,7 +605,7 @@ test.describe('Library scan with .bag file', () => {
     expect(bags.length).toBeGreaterThan(0)
     const scanDir = bags[0].path.replace(/\/[^/]+$/, '')
 
-    await page.goto('/')
+    await page.goto('/classic')
     // Use the scan form. Library has a collapsed scan header — toggle
     // it open if needed.
     const headerToggle = page.getByTitle(/scan a folder for bag files/i)

@@ -16,7 +16,7 @@ test.describe('Visual baselines', () => {
   test('Help page renders the full content card layout', async ({ page }) => {
     // Would catch: regressions in static-content cards (recent CSS-token
     // changes silently broke the card border / shadow on this page once).
-    await page.goto('/help')
+    await page.goto('/classic/help')
     // Wait for content; nothing async to load, but let layout settle.
     await page.waitForLoadState('networkidle')
     await expect(page).toHaveScreenshot('help-full.png', {
@@ -28,7 +28,7 @@ test.describe('Visual baselines', () => {
     // Would catch: bag card padding regressions, header layout drift,
     // health-badge color/contrast changes. The demo bag is fixed so
     // every field (name, size, msg count, duration) is deterministic.
-    await page.goto('/')
+    await page.goto('/classic')
     // .first() — the shared hermetic index can hold more than one scene_demo
     // (other specs upload/scan), so don't assume a unique match.
     await expect(page.getByText(/scene_demo\.mcap/).first()).toBeVisible({ timeout: 10_000 })
@@ -41,7 +41,7 @@ test.describe('Visual baselines', () => {
   test('NavBar across the dashboard with active-route underline', async ({ page }) => {
     // Would catch: nav active-state indicator (cyan underline) breaking
     // — past UI refresh shipped without the indicator on one route.
-    await page.goto('/help')
+    await page.goto('/classic/help')
     await page.waitForLoadState('networkidle')
     const nav = page.locator('nav').first()
     await expect(nav).toHaveScreenshot('navbar-active-help.png')
@@ -57,7 +57,7 @@ test.describe('Visual baselines', () => {
     const caps = await request.get('/api/system/capabilities').then(r => r.ok() ? r.json() : null)
     test.skip(caps?.vision?.available === true, 'vision installed — no install banner to snapshot')
 
-    await page.goto('/search')
+    await page.goto('/classic/search')
     await expect(
       page.getByText('Semantic search needs the vision extras.'),
     ).toBeVisible({ timeout: 10_000 })
@@ -70,7 +70,7 @@ test.describe('Visual baselines', () => {
   test('Bridge page with live-mode install banner expanded', async ({ page }) => {
     // Would catch: live-mode banner layout, disabled-Start-button styling,
     // tab active-state color when "live" is selected.
-    await page.goto('/bridge')
+    await page.goto('/classic/bridge')
     await page.getByRole('button', { name: /^live$/i }).click()
     await expect(
       page.getByText('Bridge live mode needs rclpy (ROS 2).'),
@@ -84,12 +84,12 @@ test.describe('Visual baselines', () => {
   test('Health page with the scene-demo bag', async ({ page }) => {
     // Would catch: HealthBadge color regressions across score buckets,
     // per-topic table layout, freq/drop column formatting.
-    await page.goto('/')
+    await page.goto('/classic')
     const card = page.getByText(/scene_demo\.mcap/).first()
     await expect(card).toBeVisible({ timeout: 10_000 })
     // Click into Explorer first, then navigate to Health for that bag.
     await card.click()
-    await page.waitForURL(/\/bag\/\d+/)
+    await page.waitForURL(/\/classic\/bag\/\d+/)
     // The Health link might be in the bag's sidebar OR top nav. Adapt.
     const healthLink = page.getByRole('link', { name: /^health$/i })
     if (await healthLink.isVisible().catch(() => false)) {
