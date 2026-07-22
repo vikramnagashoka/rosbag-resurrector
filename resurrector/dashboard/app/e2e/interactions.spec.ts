@@ -428,6 +428,11 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     // The overlay renders one polyline per selected bag (two series).
     await expect(page.locator('.nb-compare .nb-chart')).toBeVisible({ timeout: 15_000 })
     await expect(page.locator('.nb-compare .nb-chart polyline')).toHaveCount(2)
+    // The auto-picked Value column must be a real signal, never a wall-clock
+    // field — stamp_sec as the default draws meaningless monotonic staircases.
+    const valueSel = page.locator('.nb-cmp-controls .nb-tf-field:nth-child(2) select')
+    await expect(valueSel).toBeVisible()
+    expect(await valueSel.inputValue()).not.toMatch(/stamp|_ns$|timestamp/)
     // Legend carries a chip per bag.
     await expect(page.locator('.nb-compare .nb-legend-chip')).toHaveCount(2)
 

@@ -9,8 +9,10 @@ import { SERIES_COLORS } from './series'
 // the plot/transform cells.
 
 // Columns that are never useful to overlay (join keys + raw metadata).
+// stamp_sec/stamp_nsec are wall-clock fields — overlaying them just draws
+// monotonic staircases, so they lose the "useful default" race too.
 const NON_VALUE = new Set(['bag_label', 'relative_t_sec', 'timestamp_ns'])
-const META_RE = /(_offset$|^data_length$|sequence|frame_id|stamp_nsec|_ns$)/i
+const META_RE = /(_offset$|^data_length$|sequence|frame_id|stamp_sec|stamp_nsec|_ns$)/i
 
 function basename(p: string): string { return p.split(/[/\\]/).pop() || p }
 
@@ -77,9 +79,27 @@ export default function CompareCell({
     })
   }, [resp])
   const usefulColumns = valueColumns.filter(c => !META_RE.test(c))
-  const valueCol = column && valueColumns.includes(column)
-    ? column
-    : (usefulColumns[0] ?? valueColumns[0])
+
+  // Default column: the first non-metadata column whose values actually vary.
+  // A flat default (orientation.x pinned at 0, say) renders as an empty-looking
+  // chart and reads as broken; a varying signal is what the user meant to see.
+  const defaultCol = useMemo(() => {
+    if (!resp) return undefined
+    const ranked = [...usefulColumns, ...valueColumns.filter(c => !usefulColumns.includes(c))]
+    for (const c of ranked) {
+      let first: number | null = null
+      for (const r of resp.data) {
+        const v = r[c]
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue
+        if (first === null) first = v
+        else if (v !== first) return c
+      }
+    }
+    return ranked[0]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resp, valueColumns.join(',')])
+
+  const valueCol = column && valueColumns.includes(column) ? column : defaultCol
 
   // One series per bag label: x = relative_t_sec, y = value column.
   const chart = useMemo(() => {
