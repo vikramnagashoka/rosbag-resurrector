@@ -8,6 +8,26 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-07-26
+
+### What's new
+
+A small notebook-UX patch found while recording the v0.8 demo videos.
+
+### Fixed
+
+- **Adding a cell scrolls it into view.** Adding a cell from a suggestion chip
+  or the command palette while scrolled up appended it below the fold with no
+  scroll — the click looked like a no-op. The feed now smooth-scrolls to a cell
+  appended to the active notebook; switching notebooks or deleting cells does
+  not scroll.
+
+### Test counts
+
+- Backend: **822 passed** (unchanged)
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **35 behavioural** (was 34; + newly-added-cell-lands-in-viewport) plus 5 visual
+
 ## [0.8.0] — 2026-07-26
 
 ### What's new
