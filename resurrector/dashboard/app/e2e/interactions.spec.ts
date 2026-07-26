@@ -413,6 +413,24 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-tf-expr-input')).toBeVisible()
   })
 
+  test('adding a cell scrolls it into view (no invisible appends)', async ({ page }) => {
+    // Would catch: cells appending below the fold with no scroll — clicking
+    // "+ Transform" while scrolled up looked like a no-op (spotted in the
+    // v0.8 demo recording: the tour clicked chips but the UI showed nothing).
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+
+    // Health (tall) then two more cells — the feed must overflow, and each
+    // newly added cell must end up visible in the viewport.
+    await page.getByRole('button', { name: /Health report/ }).click()
+    await expect(page.getByRole('img', { name: /Health score/ })).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: /Plot signal/ }).click()
+    await expect(page.locator('.nb-cell').nth(1)).toBeInViewport({ timeout: 10_000 })
+    await page.getByRole('button', { name: /Statistics/ }).click()
+    await expect(page.locator('.nb-cell').nth(2)).toBeInViewport({ timeout: 10_000 })
+  })
+
   test('Compare bags chip overlays a topic across bags (native, not the old UI)', async ({ page }) => {
     // Would catch: the classic Compare-runs page not being ported into the
     // notebook — cross-bag overlay must be a native cell, and it must render

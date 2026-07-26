@@ -87,6 +87,9 @@ export default function NotebookWorkspace() {
   // Plot brush selection per cell (fractions), for the header command string.
   const [sel, setSel] = useState<Record<string, { a: number; b: number } | null>>({})
   const inputRef = useRef<HTMLInputElement>(null)
+  const feedRef = useRef<HTMLDivElement>(null)
+  // Last seen (notebook id, cell count) — drives the append auto-scroll.
+  const prevCells = useRef<{ id: string | null; n: number }>({ id: null, n: 0 })
 
   useEffect(() => {
     let cancelled = false
@@ -129,6 +132,19 @@ export default function NotebookWorkspace() {
   }, [])
 
   const active = notebooks.find(n => n.id === activeId) ?? null
+
+  // A cell appended to the ACTIVE notebook scrolls into view — otherwise
+  // adding from a chip while scrolled up appends invisibly below the fold
+  // and looks like the click did nothing. Switching notebooks (or deleting
+  // cells) must not scroll, hence the (id, count) comparison.
+  useEffect(() => {
+    const n = active?.cells.length ?? 0
+    const prev = prevCells.current
+    if (active && prev.id === active.id && n > prev.n) {
+      feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' })
+    }
+    prevCells.current = { id: active?.id ?? null, n }
+  }, [active, active?.cells.length])
 
   const catalog = useMemo(() => buildCatalog(active), [active])
   const filtered = useMemo(() => filterCatalog(catalog, query), [catalog, query])
@@ -584,7 +600,7 @@ export default function NotebookWorkspace() {
           </div>
         </header>
 
-        <div className="nb-feed">
+        <div className="nb-feed" ref={feedRef}>
           <div className="nb-feed-inner">
             {active && !active.bagId ? (
               // Blank investigation — bind it to an indexed bag before analysis.
