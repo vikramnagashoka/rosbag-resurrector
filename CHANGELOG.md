@@ -8,6 +8,82 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-26
+
+### What's new
+
+**The notebook UI.** The dashboard is redesigned around an analysis-notebook
+paradigm and it's now the **default surface at `/`**: pick a bag, ask questions,
+and every answer is a cell in a feed — a health report, an inline chart, a
+derived signal, a 3D scene, a semantic search. One warm, coherent workbench
+instead of a page per feature. The previous dark UI remains fully available
+at `/classic`.
+
+### The notebook workspace
+
+- **Every indexed bag opens as a notebook** — rail of investigations on the
+  left, cell feed in the middle, a command bar docked at the bottom. The header
+  shows the bag, its health score, duration, topic and message counts.
+- **Command bar + palette**: type `bf["/imu/data"].plot()`-style queries with a
+  topic-aware autocomplete catalog (`⌘K` focuses it, `⏎` runs the top match),
+  or use the suggestion chips.
+- **Folders**: organize investigations into collapsible groups from the rail's
+  `+` menu — create, rename inline, move notebooks between folders.
+- **Blank investigations attach a bag** two equal ways: pick from the indexed
+  library, or **upload a bag file** straight from the browser (new
+  `POST /api/bags/upload`, streamed to disk with bounded memory). The rail also
+  grew a **Scan folder** action for bulk import.
+- **Honest capability status** in the rail footer: each optional extra
+  (vision, exports, publish, copilot…) shown ready / not-installed from the
+  live `/api/system/capabilities` probe.
+
+### Cells — every capability is one more cell type
+
+- **plot** — multi-series inline SVG chart from the downsampled-series
+  endpoint. Hovering drives a **linked time-cursor shared across cells** (each
+  cell can detach to its own time). **Brush a region → ✦ Explain** runs the
+  grounded copilot on that window, and **Export range** produces the incident
+  report — the v0.7 features, now one drag away.
+- **transform** — the classic Transform editor as a cell: derivative /
+  integral / moving-average / low-pass / scale / abs / shift on any numeric
+  column, or a sandboxed free-form Polars expression, live-previewed inline.
+- **compare** — cross-bag overlay: pick 2+ bags and one topic, each bag
+  renders as a series on a shared relative-time axis (ports the Compare-runs
+  page). Defaults to a column whose values actually vary.
+- **health** — the score ring plus an enriched report: **per-check breakdown**
+  (worst-score-per-dimension) and a summary row, backed by new `checks` +
+  `summary` fields on `GET /api/bags/{id}/health`.
+- **stats / sync / image / scene / search** — descriptive statistics,
+  time-aligned topic preview, camera-frame viewer that follows the shared
+  cursor, a **live 3D point-cloud + TF scene** (react-three-fiber), and CLIP
+  **semantic frame search** with "Open frame →" dropping results into the feed.
+
+### Warm workflow pages (no more dark-UI jumps)
+
+- **Export** moved into the notebook header: presets, format
+  (Parquet/HDF5/CSV/NumPy/Zarr/LeRobot/RLDS), topic selection, sync +
+  downsample — the full classic dialog, warm-themed.
+- **Library, Datasets, Bridge, Help** are now notebook-native warm pages under
+  `/n/*`; the Library's bag cards deep-link into a notebook via `/n/<id>`.
+- The classic dark pages all moved to `/classic/*` with their internal links
+  rebased; the classic NavBar links back to the notebook.
+
+### Fixes
+
+- Install commands for optional extras are quoted everywhere
+  (`pip install 'rosbag-resurrector[vision]'`) — the unquoted form fails in
+  zsh with "no matches found".
+- The Compare cell never defaults to a wall-clock column (`header.stamp_sec`
+  staircases) or an all-constant one (empty-looking chart).
+
+### Test counts
+
+- Backend: **822 passed** (was 820; + upload endpoint + health enrichment)
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **34 behavioural** (was 11) plus 5 visual — the notebook workspace,
+  folders, bag attach/upload, all cell types, export, warm pages, and the
+  default-route swap are all covered
+
 ## [0.7.1] — 2026-06-26
 
 ### What's new
