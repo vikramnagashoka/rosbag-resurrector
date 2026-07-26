@@ -32,11 +32,20 @@ fi
 
 E2E_ROOT="$(mktemp -d -t resurrector-e2e-XXXXXX)"
 export RESURRECTOR_ALLOWED_ROOTS="${E2E_ROOT}"
+# Keep uploaded bags inside the hermetic root (cleaned up on exit, and within
+# the allowed roots so post-upload path validation passes).
+export RESURRECTOR_UPLOADS_DIR="${E2E_ROOT}/uploads"
 
 # Generate the scene demo bag directly into the hermetic root. Script
 # accepts an output path arg so we don't touch the user's $HOME cache.
 "${PYTHON_CMD}" "${REPO_ROOT}/tests/fixtures/make_scene_demo_bag.py" \
   "${E2E_ROOT}/scene_demo.mcap"
+
+# A second bag with the SAME topics but a different duration (distinct
+# fingerprint so it doesn't dedup) — gives the cross-bag Compare cell two
+# runs to overlay.
+"${PYTHON_CMD}" "${REPO_ROOT}/tests/fixtures/make_scene_demo_bag.py" \
+  "${E2E_ROOT}/scene_run_b.mcap" 6.0
 
 # Pre-index so the Library page shows the bag immediately.
 "${RESURRECTOR_CMD}" scan "${E2E_ROOT}" --db "${E2E_ROOT}/index.db" >/dev/null 2>&1 || true

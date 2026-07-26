@@ -5,8 +5,8 @@ Provides:
 - CLIPEmbedder: generate CLIP embeddings (local or OpenAI API)
 - FrameSearchEngine: index bags and search by natural language
 
-Requires: pip install rosbag-resurrector[vision] (local CLIP)
-     or:  pip install rosbag-resurrector[vision-openai] (API-based)
+Requires: pip install 'rosbag-resurrector[vision]' (local CLIP)
+     or:  pip install 'rosbag-resurrector[vision-openai]' (API-based)
 """
 
 from __future__ import annotations
@@ -137,8 +137,8 @@ class CLIPEmbedder:
     """Generate CLIP embeddings for images and text.
 
     Supports two backends:
-    - "local": sentence-transformers (requires pip install rosbag-resurrector[vision])
-    - "openai": OpenAI CLIP API (requires pip install rosbag-resurrector[vision-openai])
+    - "local": sentence-transformers (requires pip install 'rosbag-resurrector[vision]')
+    - "openai": OpenAI CLIP API (requires pip install 'rosbag-resurrector[vision-openai]')
     - "auto": try local first, fall back to openai
     """
 
@@ -174,7 +174,7 @@ class CLIPEmbedder:
                 if self.backend == "local":
                     raise ImportError(
                         "Local CLIP requires sentence-transformers. "
-                        "Install with: pip install rosbag-resurrector[vision]"
+                        "Install with: pip install 'rosbag-resurrector[vision]'"
                     )
 
         if self.backend in ("auto", "openai"):
@@ -188,13 +188,13 @@ class CLIPEmbedder:
                 if self.backend == "openai":
                     raise ImportError(
                         "OpenAI backend requires the openai package. "
-                        "Install with: pip install rosbag-resurrector[vision-openai]"
+                        "Install with: pip install 'rosbag-resurrector[vision-openai]'"
                     )
 
         raise ImportError(
             "Semantic search requires either:\n"
-            "  pip install rosbag-resurrector[vision]         # Local CLIP (recommended)\n"
-            "  pip install rosbag-resurrector[vision-openai]  # OpenAI API (lighter install)"
+            "  pip install 'rosbag-resurrector[vision]'         # Local CLIP (recommended)\n"
+            "  pip install 'rosbag-resurrector[vision-openai]'  # OpenAI API (lighter install)"
         )
 
     def embed_image(self, image: np.ndarray) -> np.ndarray:

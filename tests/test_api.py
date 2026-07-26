@@ -92,6 +92,23 @@ class TestBagsAPI:
             assert "issues" in data
             assert "recommendations" in data
 
+    async def test_get_health_enriched_fields(self, app_client, indexed_bag):
+        # v0.8: per-check breakdown + aggregate summary for the notebook
+        # health cell. checks must be aggregated to one row per dimension
+        # (report.results is per-topic-per-check, so no duplicate names).
+        _, _, bag_id = indexed_bag
+        async with app_client as client:
+            data = (await client.get(f"/api/bags/{bag_id}/health")).json()
+            assert "summary" in data
+            for k in ("errors", "warnings", "topics_checked"):
+                assert isinstance(data["summary"][k], int)
+            assert "checks" in data
+            names = [c["check"] for c in data["checks"]]
+            assert len(names) == len(set(names)), "checks must be one row per dimension"
+            for c in data["checks"]:
+                assert 0 <= c["score"] <= 100
+                assert {"check", "score", "passed", "issue_count"} <= set(c)
+
     async def test_get_topic_data(self, app_client, indexed_bag):
         _, _, bag_id = indexed_bag
         async with app_client as client:

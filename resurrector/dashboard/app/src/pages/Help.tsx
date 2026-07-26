@@ -143,7 +143,7 @@ export default function Help() {
           <h2 style={h2Style}>Quick start</h2>
           <p style={pStyle}>
             Open{' '}
-            <Link to="/" style={linkStyle}>
+            <Link to="/classic" style={linkStyle}>
               Library
             </Link>
             , paste a folder path into the <b>Scan folder</b> input, and click{' '}
@@ -178,7 +178,7 @@ export default function Help() {
             <tbody>
               <tr>
                 <td style={tdStyle}>
-                  <Link to="/" style={linkStyle}>
+                  <Link to="/classic" style={linkStyle}>
                     Library
                   </Link>
                 </td>
@@ -202,7 +202,7 @@ export default function Help() {
               </tr>
               <tr>
                 <td style={tdStyle}>
-                  <Link to="/search" style={linkStyle}>
+                  <Link to="/classic/search" style={linkStyle}>
                     Search
                   </Link>
                 </td>
@@ -217,7 +217,7 @@ export default function Help() {
               </tr>
               <tr>
                 <td style={tdStyle}>
-                  <Link to="/datasets" style={linkStyle}>
+                  <Link to="/classic/datasets" style={linkStyle}>
                     Datasets
                   </Link>
                 </td>
@@ -231,7 +231,7 @@ export default function Help() {
               </tr>
               <tr>
                 <td style={tdStyle}>
-                  <Link to="/compare" style={linkStyle}>
+                  <Link to="/classic/compare" style={linkStyle}>
                     Compare
                   </Link>
                 </td>
@@ -244,7 +244,7 @@ export default function Help() {
               </tr>
               <tr>
                 <td style={tdStyle}>
-                  <Link to="/compare-runs" style={linkStyle}>
+                  <Link to="/classic/compare-runs" style={linkStyle}>
                     Compare runs
                   </Link>
                 </td>
@@ -259,7 +259,7 @@ export default function Help() {
               </tr>
               <tr>
                 <td style={tdStyle}>
-                  <Link to="/bridge" style={linkStyle}>
+                  <Link to="/classic/bridge" style={linkStyle}>
                     Bridge
                   </Link>
                 </td>

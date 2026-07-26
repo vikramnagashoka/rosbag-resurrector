@@ -6,18 +6,33 @@ import { test, expect } from '@playwright/test'
 // rationale stays attached to the test.
 
 test.describe('Search page', () => {
-  test('shows install banner when vision extras missing', async ({ page }) => {
+  test('search degrades cleanly by vision state (banner or working search, never an opaque toast)', async ({ page, request }) => {
     // Would have caught: opaque 500 toast when /api/search/frames
     // failed because sentence-transformers wasn't installed.
-    await page.goto('/search')
+    //
+    // The bug class is "opaque error toast", which must never appear in
+    // EITHER vision state. Whether the friendly install banner shows depends
+    // on whether the backend actually has the vision extras — so we detect
+    // that first (via /api/capabilities) and assert the correct branch
+    // strictly. In CI the extras are absent → the banner must show. On a dev
+    // box with [vision] installed → no banner, search works. Both are healthy.
+    // /api/system/capabilities returns a dict keyed by capability name.
+    const caps = await request.get('/api/system/capabilities').then(r => r.ok() ? r.json() : null)
+    const visionInstalled = caps?.vision?.available === true
 
-    // The banner title is unique to the install-banner — won't collide
-    // with the page heading or the install-command text inside the banner.
-    await expect(
-      page.getByText('Semantic search needs the vision extras.'),
-    ).toBeVisible({ timeout: 10_000 })
+    await page.goto('/classic/search')
 
-    // No raw error toast should appear within the first few seconds.
+    const banner = page.getByText('Semantic search needs the vision extras.')
+    if (visionInstalled) {
+      // Healthy state: no install banner; search UI is live.
+      await page.waitForTimeout(800)
+      await expect(banner).toHaveCount(0)
+    } else {
+      // Missing extras: the friendly banner is what the user must see.
+      await expect(banner).toBeVisible({ timeout: 10_000 })
+    }
+
+    // The invariant that holds in BOTH states: no raw error toast.
     await expect(page.getByText(/Internal Server Error/i)).toHaveCount(0)
     await expect(page.getByText(/\[object Object\]/)).toHaveCount(0)
   })
@@ -27,7 +42,7 @@ test.describe('Bridge page', () => {
   test('live mode shows install banner when rclpy missing', async ({ page }) => {
     // Would have caught: live mode used to spawn a subprocess that
     // died silently. Now we pre-check + render an install banner.
-    await page.goto('/bridge')
+    await page.goto('/classic/bridge')
 
     await page.getByRole('button', { name: /^live$/i }).click()
 
@@ -49,7 +64,7 @@ test.describe('Bridge page', () => {
     const TEST_BRIDGE_PORT = 9991
     await request.post('/api/bridge/stop').catch(() => {})
 
-    await page.goto('/bridge')
+    await page.goto('/classic/bridge')
 
     // Stop any pre-existing bridge from a previous test run.
     const stopButton = page.getByRole('button', { name: /^stop$/i })
@@ -94,9 +109,22 @@ test.describe('Bridge page', () => {
   })
 })
 
-test.describe('Library page', () => {
-  test('loads and lists indexed bags', async ({ page }) => {
+test.describe('Default route (post-swap)', () => {
+  test('/ loads the notebook workspace, not the classic dark UI', async ({ page }) => {
+    // Would catch: the route swap regressing — `/` must render the warm
+    // notebook workspace now, with the classic UI behind /classic.
     await page.goto('/')
-    await expect(page.getByText(/scene_demo\.mcap/i)).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    // The classic dark NavBar must NOT be present at the root.
+    await expect(page.locator('nav').filter({ hasText: 'RosBag Resurrector' })).toHaveCount(0)
+  })
+
+  test('/classic still serves the classic Library with its navbar', async ({ page }) => {
+    await page.goto('/classic')
+    // .first() — other specs (notebook upload/scan) can add extra bags to the
+    // shared hermetic index, so scene_demo may appear more than once.
+    await expect(page.getByText(/scene_demo\.mcap/i).first()).toBeVisible({ timeout: 10_000 })
+    // The classic navbar carries the ✦ Notebook link back to the default UI.
+    await expect(page.getByRole('link', { name: /Notebook/ })).toBeVisible()
   })
 })

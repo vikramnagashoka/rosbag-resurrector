@@ -189,7 +189,7 @@ export default function Search() {
           {result.results.map((r: any, i: number) => (
             <Link
               key={i}
-              to={`/bag/${r.bag_id}`}
+              to={`/classic/bag/${r.bag_id}`}
               style={{ textDecoration: 'none', color: 'inherit' }}
             >
               <div
@@ -229,7 +229,7 @@ export default function Search() {
           {result.results.map((r: any, i: number) => (
             <Link
               key={i}
-              to={`/bag/${r.bag_id}`}
+              to={`/classic/bag/${r.bag_id}`}
               style={{ textDecoration: 'none', color: 'inherit' }}
             >
               <div

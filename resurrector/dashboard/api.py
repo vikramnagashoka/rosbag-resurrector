@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -285,6 +286,25 @@ async def get_bag(bag_id: int) -> dict[str, Any]:
         index.close()
 
 
+def _aggregate_checks(results: list[Any]) -> list[dict[str, Any]]:
+    """Collapse per-topic-per-check HealthResults into one row per check
+    dimension. Score = worst (min) across topics so the failing dimension
+    is visible; issue_count = total across topics. Order is preserved by
+    first appearance (matches the configured check order)."""
+    agg: dict[str, dict[str, Any]] = {}
+    for r in results:
+        e = agg.get(r.check_name)
+        if e is None:
+            e = {"check": r.check_name, "score": r.score,
+                 "passed": r.passed, "issue_count": 0}
+            agg[r.check_name] = e
+        else:
+            e["score"] = min(e["score"], r.score)
+            e["passed"] = e["passed"] and r.passed
+        e["issue_count"] += len(r.issues)
+    return list(agg.values())
+
+
 @app.get("/api/bags/{bag_id}/health")
 async def get_bag_health(bag_id: int) -> dict[str, Any]:
     """Run the full health report for one bag — score, issues, recommendations.
@@ -322,6 +342,17 @@ async def get_bag_health(bag_id: int) -> dict[str, Any]:
             "topic_scores": {
                 k: {"score": v.score, "issue_count": len(v.issues)}
                 for k, v in report.topic_scores.items()
+            },
+            # Per-check breakdown (the 5 health dimensions). report.results
+            # is per-topic-per-check, so aggregate by check name: worst score
+            # across topics (the informative one — surfaces the failing
+            # dimension) + total issues for that dimension.
+            "checks": _aggregate_checks(report.results),
+            # Cheap aggregate counts so the UI doesn't recompute them.
+            "summary": {
+                "errors": len(report.errors),
+                "warnings": len(report.warnings),
+                "topics_checked": len(report.topic_scores),
             },
         }
     finally:
@@ -842,6 +873,90 @@ async def _scan_stream(scan_path_obj: Path):
     yield f"data: {json.dumps({'event': 'complete', 'scanned': total, 'indexed': indexed, 'errors': errors})}\n\n"
 
 
+@app.post("/api/bags/upload")
+async def upload_bag(request: Request, filename: str = Query(description="Original bag filename")) -> dict[str, Any]:
+    """Upload a single bag file and index it, returning the indexed bag.
+
+    For the notebook "Import a new bag" flow: a browser can't hand the
+    server a filesystem path, so it POSTs the raw file bytes (not
+    multipart — avoids the python-multipart dependency). We stream the
+    body to ``~/.resurrector/uploads/<uuid>/<name>`` (under the home
+    allowed-root, so later frame/export path validation passes) in
+    bounded-memory chunks, then scan + index that one file.
+
+    ``filename`` (query) carries the original name + extension so we can
+    reject non-bag files up front and keep a human-readable path.
+    """
+    from resurrector.ingest.scanner import scan_path, BAG_EXTENSIONS
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.core.bag_frame import BagFrame
+    import uuid
+
+    name = Path(filename).name
+    if not name:
+        raise HTTPException(400, "No filename provided")
+    if Path(name).suffix.lower() not in BAG_EXTENSIONS:
+        raise HTTPException(
+            400,
+            f"Unsupported file type '{Path(name).suffix}'. "
+            f"Expected one of: {', '.join(sorted(BAG_EXTENSIONS))}",
+        )
+
+    # Unique subdir per upload avoids clobbering same-named files and lets
+    # scan_path target exactly this one bag. Base defaults to the home cache
+    # (always inside the allowed roots so later frame/export path validation
+    # passes); override with RESURRECTOR_UPLOADS_DIR.
+    uploads_base = Path(
+        os.environ.get("RESURRECTOR_UPLOADS_DIR", str(Path.home() / ".resurrector" / "uploads"))
+    )
+    dest_dir = (uploads_base / uuid.uuid4().hex).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+
+    # Stream the raw body to disk. request.stream() yields chunks as they
+    # arrive — never materializes the whole (possibly multi-GB) bag in RAM.
+    wrote = 0
+    try:
+        with dest.open("wb") as out:
+            async for chunk in request.stream():
+                out.write(chunk)
+                wrote += len(chunk)
+    except Exception as e:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(500, f"Failed to save upload: {e}")
+
+    if wrote == 0:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(400, "Empty upload — no bytes received")
+
+    scanned_files = scan_path(dest)
+    if not scanned_files:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        raise HTTPException(400, "Uploaded file is not a readable bag")
+
+    index = _get_index()
+    try:
+        scanned = scanned_files[0]
+        try:
+            parser = parse_bag(scanned.path)
+            metadata = parser.get_metadata()
+            bag_id = index.upsert_bag(scanned, metadata)
+            bf = BagFrame(scanned.path)
+            report = bf.health_report()
+            index.update_health_score(bag_id, report.score)
+        except Exception as e:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            err = _classify_scan_error(scanned.path, e)
+            raise HTTPException(422, err["error"])
+        bag = index.get_bag(bag_id)
+    finally:
+        index.close()
+
+    if bag is None:
+        raise HTTPException(500, "Bag indexed but could not be read back")
+    return bag
+
+
 # ============================================================================
 # Async job system (v0.7 — Feature E)
 # ============================================================================
@@ -1094,7 +1209,7 @@ async def search_frames_api(
                 detail={
                     "kind": "vision_not_installed",
                     "message": str(e),
-                    "install_command": "pip install rosbag-resurrector[vision]",
+                    "install_command": "pip install 'rosbag-resurrector[vision]'",
                 },
             )
 
@@ -1128,7 +1243,7 @@ async def search_frames_api(
                 detail={
                     "kind": "vision_not_installed",
                     "message": str(e),
-                    "install_command": "pip install rosbag-resurrector[vision]",
+                    "install_command": "pip install 'rosbag-resurrector[vision]'",
                 },
             )
 
@@ -1230,7 +1345,7 @@ async def get_search_index_status() -> dict[str, Any]:
 
         return {
             "vision_available": vision_available,
-            "install_command": "pip install rosbag-resurrector[vision]",
+            "install_command": "pip install 'rosbag-resurrector[vision]'",
             "indexed_bags": indexed,
             "unindexed_bags": unindexed,
         }

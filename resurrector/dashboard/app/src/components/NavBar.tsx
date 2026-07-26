@@ -7,13 +7,14 @@
 import { Link, useLocation } from 'react-router-dom'
 import styles from './NavBar.module.css'
 
+// The classic UI lives under /classic/*. These are its absolute links.
 const PRIMARY_LINKS = [
-  { to: '/', label: 'Library', match: (p: string) => p === '/' || p.startsWith('/bag/') },
-  { to: '/search', label: 'Search', match: (p: string) => p === '/search' },
-  { to: '/datasets', label: 'Datasets', match: (p: string) => p.startsWith('/datasets') },
-  { to: '/compare', label: 'Compare', match: (p: string) => p === '/compare' },
-  { to: '/compare-runs', label: 'Compare runs', match: (p: string) => p === '/compare-runs' },
-  { to: '/bridge', label: 'Bridge', match: (p: string) => p === '/bridge' },
+  { to: '/classic', label: 'Library', match: (p: string) => p === '/classic' || p.startsWith('/classic/bag/') },
+  { to: '/classic/search', label: 'Search', match: (p: string) => p === '/classic/search' },
+  { to: '/classic/datasets', label: 'Datasets', match: (p: string) => p.startsWith('/classic/datasets') },
+  { to: '/classic/compare', label: 'Compare', match: (p: string) => p === '/classic/compare' },
+  { to: '/classic/compare-runs', label: 'Compare runs', match: (p: string) => p === '/classic/compare-runs' },
+  { to: '/classic/bridge', label: 'Bridge', match: (p: string) => p === '/classic/bridge' },
 ] as const
 
 export default function NavBar() {
@@ -21,7 +22,7 @@ export default function NavBar() {
 
   return (
     <nav className={styles.nav}>
-      <Link to="/" className={styles.logo}>
+      <Link to="/classic" className={styles.logo}>
         <span className={styles.logoMark} />
         RosBag Resurrector
       </Link>
@@ -36,8 +37,15 @@ export default function NavBar() {
       ))}
       <div className={styles.spacer} />
       <Link
-        to="/help"
-        className={`${styles.link} ${pathname === '/help' ? styles.linkActive : ''}`}
+        to="/"
+        className={styles.link}
+        title="The notebook workspace (now the default UI)"
+      >
+        ✦ Notebook
+      </Link>
+      <Link
+        to="/classic/help"
+        className={`${styles.link} ${pathname === '/classic/help' ? styles.linkActive : ''}`}
       >
         Help & Docs
       </Link>

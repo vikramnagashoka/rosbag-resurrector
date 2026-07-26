@@ -42,7 +42,7 @@ interface BagRowProps {
 const BagRow = memo(function BagRow({ bag }: BagRowProps) {
   return (
     <Link
-      to={`/bag/${bag.id}`}
+      to={`/classic/bag/${bag.id}`}
       style={{ textDecoration: 'none', color: 'inherit', display: 'block' }}
     >
       <div

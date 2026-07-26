@@ -276,7 +276,7 @@ export default function Explorer() {
             Export
           </button>
           <Link
-            to={`/bag/${bagId}/health`}
+            to={`/classic/bag/${bagId}/health`}
             style={{
               background: '#21262d',
               border: '1px solid #30363d',

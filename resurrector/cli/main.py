@@ -660,7 +660,7 @@ def publish(
     quality so consumers can judge the dataset before training — and credits
     rosbag-resurrector.
 
-    Needs the publish extra:  `pip install rosbag-resurrector[publish]`
+    Needs the publish extra:  `pip install 'rosbag-resurrector[publish]'`
 
     Examples:
       Preview the card without uploading:

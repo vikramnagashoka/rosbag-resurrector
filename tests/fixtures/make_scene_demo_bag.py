@@ -95,10 +95,9 @@ def _yaw_quat(yaw_rad: float) -> tuple[float, float, float, float]:
     return (0.0, 0.0, math.sin(yaw_rad / 2.0), math.cos(yaw_rad / 2.0))
 
 
-def make_bag(out: Path) -> Path:
+def make_bag(out: Path, duration_sec: float = 8.0) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     base_ns = 1_700_000_000_000_000_000
-    duration_sec = 8.0
     tf_hz = 30.0
     pc_hz = 10.0
 
@@ -183,7 +182,11 @@ if __name__ == "__main__":
         out_path = Path(sys.argv[1])
     else:
         out_path = Path.home() / "rosbag-demo" / "scene_demo.mcap"
-    p = make_bag(out_path)
+    # Optional 2nd arg: duration in seconds. A different duration yields a
+    # distinct fingerprint (so two bags don't dedup) with identical topics —
+    # handy for the cross-bag Compare cell's e2e fixture.
+    dur = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
+    p = make_bag(out_path, duration_sec=dur)
     size_mb = p.stat().st_size / (1024 * 1024)
     print(f"wrote {p}  ({size_mb:.1f} MB)")
     print(f"  /tf: 30 Hz x 8s = 240 messages (world→base_link→arm_link→arm_tip)")

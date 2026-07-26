@@ -263,7 +263,7 @@ def publish_dataset(
     except ImportError:
         raise ImportError(
             "Publishing needs the huggingface_hub package. "
-            "Install with: pip install rosbag-resurrector[publish]"
+            "Install with: pip install 'rosbag-resurrector[publish]'"
         )
 
     api = HfApi(token=token)
