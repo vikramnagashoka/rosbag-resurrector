@@ -143,7 +143,13 @@ export default function CellFeed(props: Props) {
               : null
             break
           case 'search':
-            body = <SearchCell bagId={bagId} query={cell.query} onOpenFrame={onOpenFrame} onRuntime={rt} />
+            body = (
+              <SearchCell
+                bagId={bagId}
+                bagFile={allBags.find(b => b.id === bagId)?.path.split(/[/\\]/).pop()}
+                query={cell.query} onOpenFrame={onOpenFrame} onRuntime={rt}
+              />
+            )
             break
           case 'transform':
             body = (
