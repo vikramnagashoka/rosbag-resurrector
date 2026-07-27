@@ -8,6 +8,36 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-07-26
+
+### What's new
+
+The notebook grows a free-form **query cell** and **inline guides on every
+cell** — write your own Polars expressions against any topic, and discover
+each cell's parameters without leaving the feed.
+
+### Added
+
+- **Query cell** — free-form exploration: pick a topic, write any Polars
+  expression, run it (⌘⏎ or the Run button), get a chart plus a
+  head-of-the-data table. The topic's numeric columns render as clickable
+  chips that insert `pl.col("…")` at the cursor. Powered by the existing
+  server-side sandboxed evaluator — imports, dunders, and IO are rejected
+  server-side with the error surfaced in-cell. The command bar now offers
+  **"Run as a free Polars expression"** for any input the catalog doesn't
+  recognize, so typing an expression lands in a query cell that runs it.
+- **Cell guides** — every cell header has a `?` toggle expanding an inline
+  guide: what the cell does, its interactions, and every parameter (all 10
+  cell types). Content is verified against the implementations — sampling
+  sizes, tolerances, caps, and honest limitations included.
+
+### Test counts
+
+- Backend: **822 passed** (unchanged)
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **38 behavioural** (was 35; + query run + palette fallback + guide
+  toggle) plus 5 visual (notebook-shell baseline refreshed for the Query chip)
+
 ## [0.8.1] — 2026-07-26
 
 ### What's new
