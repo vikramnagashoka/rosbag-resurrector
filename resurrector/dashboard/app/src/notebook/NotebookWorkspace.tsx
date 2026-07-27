@@ -48,6 +48,7 @@ const SUGGESTIONS: { label: string; type: CellType | null }[] = [
   { label: 'Camera frames', type: 'image' },
   { label: '3D scene', type: 'scene' },
   { label: 'Semantic search', type: 'search' },
+  { label: 'Query', type: 'query' },
 ]
 
 export default function NotebookWorkspace() {
@@ -147,7 +148,25 @@ export default function NotebookWorkspace() {
   }, [active, active?.cells.length])
 
   const catalog = useMemo(() => buildCatalog(active), [active])
-  const filtered = useMemo(() => filterCatalog(catalog, query), [catalog, query])
+  const filtered = useMemo(() => {
+    const base = filterCatalog(catalog, query)
+    // Free-form fallback: whatever the user typed can always run as a query
+    // cell (sandboxed Polars expression). Appended last so real catalog
+    // matches keep the Enter shortcut; when nothing matches, this is the
+    // top entry and Enter opens the query cell with their text.
+    const q = query.trim()
+    if (q && active?.bagId) {
+      const topic = plottableTopics(active)[0]
+      base.push({
+        id: '__query', kind: 'query',
+        cmd: `query(${q.length > 30 ? `${q.slice(0, 30)}…` : q})`,
+        description: 'Run as a free Polars expression in a query cell',
+        keywords: '',
+        makeCell: () => ({ id: nextCellId(), type: 'query', topic, expression: q }),
+      })
+    }
+    return base
+  }, [catalog, query, active])
 
   function appendCell(cell: Cell) {
     if (!active) return
@@ -276,6 +295,7 @@ export default function NotebookWorkspace() {
     else if (type === 'scene') cell.topic = pointcloudTopics(active)[0]
     else if (type === 'sync') cell.topics = plottableTopics(active).slice(0, 2)
     else if (type === 'compare') cell.topic = plottableTopics(active)[0]
+    else if (type === 'query') cell.topic = plottableTopics(active)[0]
     setNotebooks(prev => prev.map(n =>
       n.id === active.id ? { ...n, cells: [...n.cells, cell] } : n,
     ))

@@ -581,6 +581,31 @@
   margin-bottom: 8px;
 }
 
+/* Query cell — free-form Polars expression editor */
+.nb-query-cols { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 9px; }
+.nb-query-colhint { font-size: 11px; color: var(--nb-text-faintest3); font-style: italic; }
+.nb-query-col {
+  font-size: 11px; font-family: var(--nb-font-mono);
+  padding: 2px 8px; border-radius: 5px; cursor: pointer;
+  background: var(--nb-field-bg); color: var(--nb-text-2);
+  border: 1px solid var(--nb-border-control);
+}
+.nb-query-col:hover { background: var(--nb-accent-chip); color: var(--nb-accent); border-color: var(--nb-accent-band-border); }
+.nb-query-editor {
+  width: 100%; min-height: 64px; resize: vertical;
+  font-family: var(--nb-font-mono); font-size: 12.5px; line-height: 1.55;
+  color: var(--nb-text); background: var(--nb-field-bg);
+  border: 1px solid var(--nb-border-control); border-radius: 8px;
+  padding: 10px 12px;
+}
+.nb-query-editor:focus { outline: none; border-color: var(--nb-accent); background: #fffdf9; }
+.nb-query-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 4px; }
+.nb-query-hint { font-size: 11px; color: var(--nb-text-faintest); }
+.nb-query-hint code { font-size: 10.5px; }
+.nb-query-error { color: var(--nb-health-bad); white-space: pre-wrap; }
+.nb-query-out { margin-top: 10px; }
+.nb-query-table { margin-top: 10px; max-width: 420px; }
+
 /* Compare cell — bag chips + shared controls */
 .nb-cmp-bags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
 .nb-cmp-lbl { font-size: 10.5px; color: var(--nb-text-faint); margin-right: 2px; }

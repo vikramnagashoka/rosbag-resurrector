@@ -335,10 +335,13 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByRole('img', { name: /Health score/ })).toBeVisible({ timeout: 10_000 })
     await expect(page.locator('.nb-palette')).toHaveCount(0)
 
-    // Filtering by topic name narrows to that topic's commands.
+    // Filtering by topic name narrows to that topic's commands. The catalog
+    // match stays FIRST (Enter runs it); the free-form "run as query cell"
+    // fallback is always appended LAST for non-empty input.
     await input.fill('lidar plot')
-    await expect(page.locator('.nb-palette-row')).toHaveCount(1)
+    await expect(page.locator('.nb-palette-row')).toHaveCount(2)
     await expect(page.locator('.nb-palette-row').first()).toContainText('bf["/lidar/points"].plot()')
+    await expect(page.locator('.nb-palette-row').last()).toContainText('Run as a free Polars expression')
   })
 
   test('linked time-cursor spans plots + the time toggle flips a cell to Own time', async ({ page }) => {
@@ -411,6 +414,60 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     // Expression mode swaps in the Polars expression input.
     await page.getByRole('button', { name: 'Expression' }).click()
     await expect(page.locator('.nb-tf-expr-input')).toBeVisible()
+  })
+
+  test('query cell: write a free Polars expression, run it, see chart + table', async ({ page }) => {
+    // Would catch: the free-form exploration path breaking — the Query chip
+    // not adding a cell, column chips not inserting, the sandboxed
+    // /api/transforms/preview run failing, or results not rendering.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+
+    await page.getByRole('button', { name: /^\+ Query$/ }).click()
+    const editor = page.locator('.nb-query-editor')
+    await expect(editor).toBeVisible()
+
+    // Build an expression from a real column via the clickable chip, so the
+    // test doesn't hardcode this bag's field names.
+    const firstCol = page.locator('.nb-query-col').first()
+    await expect(firstCol).toBeVisible({ timeout: 10_000 })
+    await firstCol.click()
+    await editor.click()
+    await editor.press('End')
+    await editor.pressSequentially(' * 2')
+    await page.locator('.nb-query .nb-search-go').click()
+
+    // Result: legend + the head-of-data table with real rows.
+    await expect(page.locator('.nb-query .nb-tf-legend')).toBeVisible({ timeout: 15_000 })
+    const rows = page.locator('.nb-query-table tbody tr')
+    await expect(rows.first()).toBeVisible()
+
+    // A bad expression surfaces the sandbox error instead of dying silently.
+    await editor.fill('import os')
+    await page.locator('.nb-query .nb-search-go').click()
+    await expect(page.locator('.nb-query-error')).toBeVisible({ timeout: 10_000 })
+  })
+
+  test('command bar: unrecognized input offers "run as query cell"', async ({ page }) => {
+    // Would catch: the palette fallback regressing — typing a free
+    // expression must offer a query-cell entry, and Enter must create the
+    // cell carrying that expression.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+
+    const input = page.locator('.nb-cmd-input')
+    await input.click()
+    await input.fill('pl.col("nope").abs()')
+    // No catalog entry matches → the query fallback is the top entry.
+    await expect(page.getByText('Run as a free Polars expression')).toBeVisible()
+    await input.press('Enter')
+
+    // The query cell exists, carries the typed expression, and honestly
+    // surfaces the backend's unknown-column error from its auto-run.
+    await expect(page.locator('.nb-query-editor')).toHaveValue('pl.col("nope").abs()')
+    await expect(page.locator('.nb-query-error')).toBeVisible({ timeout: 15_000 })
   })
 
   test('adding a cell scrolls it into view (no invisible appends)', async ({ page }) => {

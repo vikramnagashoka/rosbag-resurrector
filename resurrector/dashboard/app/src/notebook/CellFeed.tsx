@@ -11,6 +11,7 @@ import SceneCell from './cells/SceneCell'
 import SearchCell from './cells/SearchCell'
 import TransformCell from './cells/TransformCell'
 import CompareCell from './cells/CompareCell'
+import QueryCell from './cells/QueryCell'
 
 // Renders the active notebook's cell list. Maps each cell to the shared
 // NotebookCell shell wrapping its type-specific body + optional header
@@ -163,6 +164,16 @@ export default function CellFeed(props: Props) {
                 onPatch={patch => onPatchCell(cell.id, patch)}
               />
             )
+            break
+          case 'query':
+            body = (
+              <QueryCell
+                bagId={bagId} topic={cell.topic} expression={cell.expression}
+                onRuntime={rt}
+                onPatch={patch => onPatchCell(cell.id, patch)}
+              />
+            )
+            headerExtras = topicSelect(cell.topic, plottableTopics, t => onSetTopic(cell.id, t))
             break
           default:
             body = <div className="nb-cell-loading">{cell.type} cell — coming in a later slice.</div>
