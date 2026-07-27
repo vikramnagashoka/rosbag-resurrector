@@ -541,18 +541,37 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.getByText('Select at least two bags to overlay.')).toBeVisible()
   })
 
-  test('search cell renders + degrades gracefully to an honest state', async ({ page }) => {
-    // Would catch: search cell not rendering, or a hard crash when vision
-    // isn't installed / no frames are indexed (should be a friendly message).
+  test('search cell pre-checks its prerequisites and shows the install banner on add', async ({ page, request }) => {
+    // Would catch: the proactive banner regressing to the old behavior where
+    // a missing [vision] extra (or an unindexed bag) only surfaced AFTER the
+    // user typed a query and searched. The banner must appear the moment the
+    // cell is added, with a copyable command, and the input must be disabled.
+    //
+    // Which banner depends on the backend: CI has no vision extras → the
+    // pip-install banner; a dev box with vision → this env's bags are never
+    // frame-indexed → the index-frames banner. Both are pre-check states.
+    const caps = await request.get('/api/system/capabilities').then(r => r.ok() ? r.json() : null)
+    const visionInstalled = caps?.vision?.available === true
+
     await page.goto('/n')
     await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
     await page.getByRole('button', { name: /Semantic search/ }).click()
-    const input = page.locator('.nb-search-input')
-    await expect(input).toBeVisible({ timeout: 10_000 })
-    await input.fill('gripper near the table')
-    await page.getByRole('button', { name: /^Search$/ }).click()
-    // Either results grid or an honest message (no vision / no frames / none).
-    await expect(page.locator('.nb-search-msg, .nb-search-grid').first()).toBeVisible({ timeout: 10_000 })
+
+    // Banner appears with NO typing, carrying the right command + copy button.
+    const banner = page.locator('.nb-cell-banner')
+    await expect(banner).toBeVisible({ timeout: 10_000 })
+    if (visionInstalled) {
+      await expect(banner).toContainText('aren’t indexed yet')
+      await expect(banner.locator('code')).toContainText('resurrector index-frames')
+    } else {
+      await expect(banner).toContainText('needs the vision extras')
+      await expect(banner.locator('code')).toContainText('pip install')
+    }
+    await expect(banner.locator('.nb-cell-banner-copy')).toBeVisible()
+    // Searching is blocked while prerequisites are missing.
+    await expect(page.locator('.nb-search-input')).toBeDisabled()
+    await expect(page.locator('.nb-search-go')).toBeDisabled()
   })
 
   test('new-notebook button adds + activates a blank investigation', async ({ page }) => {
