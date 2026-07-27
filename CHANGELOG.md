@@ -8,6 +8,30 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-07-26
+
+### What's new
+
+The search cell now warns about missing prerequisites **before** you try to
+search, not after.
+
+### Added
+
+- **Search-cell pre-checks.** Adding a semantic-search cell immediately
+  checks two prerequisites and shows an in-cell banner with the exact fix:
+  the `[vision]` extra missing → the pip install command (with a copy
+  button); vision installed but the bag's frames not yet indexed → the
+  `resurrector index-frames <your-bag>` command with the bag's actual
+  filename. Both states disable the input until resolved — no more typing a
+  query just to learn the extra isn't installed.
+
+### Test counts
+
+- Backend: **822 passed** (unchanged)
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **38 behavioural** (env-aware: CI exercises the no-vision banner,
+  dev boxes the index-frames banner) plus 5 visual
+
 ## [0.8.2] — 2026-07-26
 
 ### What's new
