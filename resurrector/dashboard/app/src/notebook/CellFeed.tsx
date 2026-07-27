@@ -2,6 +2,7 @@ import React from 'react'
 import { Bag } from '../api'
 import { Cell, cellCommand } from './types'
 import NotebookCell from './NotebookCell'
+import { CELL_GUIDES } from './guides'
 import HealthCell from './cells/HealthCell'
 import PlotCell from './cells/PlotCell'
 import StatsCell from './cells/StatsCell'
@@ -198,6 +199,7 @@ export default function CellFeed(props: Props) {
             onToggleCollapse={() => onToggleCollapse(cell.id)}
             onDelete={() => onDelete(cell.id)}
             headerExtras={headerExtras}
+            guide={CELL_GUIDES[cell.type]}
           >
             {body}
           </NotebookCell>
