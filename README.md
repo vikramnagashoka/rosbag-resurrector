@@ -3,7 +3,8 @@
 **Stop letting your rosbag data rot. Analyze it.**
 
 <p align="center">
-  <img src="assets/demo.gif" alt="RosBag Resurrector Demo" width="800">
+  <img src="assets/search.gif" alt="Semantic Search on RosBag Resurrector Demo" width="800">
+  <img src="assets/explain.gif" alt="Explain the unusual observations on RosBag Resurrector Demo" width="800">
 </p>
 
 A pandas-like data analysis tool for **ROS 2 (MCAP)** bag files — with automatic quality validation, multi-stream synchronization, ML-ready export, CLIP-powered semantic search, and a PlotJuggler-compatible WebSocket bridge.
