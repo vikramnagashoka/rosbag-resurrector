@@ -416,6 +416,31 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(page.locator('.nb-tf-expr-input')).toBeVisible()
   })
 
+  test('cell ? toggle opens an accurate inline guide', async ({ page }) => {
+    // Would catch: the per-cell guide regressing — the ? button missing,
+    // the panel not opening/closing, or a cell type shipping without its
+    // guide content.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+
+    await page.getByRole('button', { name: /Plot signal/ }).click()
+    const help = page.locator('.nb-cell-help').first()
+    await expect(help).toBeVisible()
+    await help.click()
+    // The guide documents the brush → Explain interaction (plot's key affordance).
+    await expect(page.locator('.nb-guide')).toBeVisible()
+    await expect(page.locator('.nb-guide')).toContainText('Brushes a time window')
+    // Toggle closes it.
+    await help.click()
+    await expect(page.locator('.nb-guide')).toHaveCount(0)
+
+    // A second cell type gets its own content (query documents the sandbox).
+    await page.getByRole('button', { name: /^\+ Query$/ }).click()
+    await page.locator('.nb-cell-help').last().click()
+    await expect(page.locator('.nb-guide')).toContainText('rejected server-side')
+  })
+
   test('query cell: write a free Polars expression, run it, see chart + table', async ({ page }) => {
     // Would catch: the free-form exploration path breaking — the Query chip
     // not adding a cell, column chips not inserting, the sandboxed

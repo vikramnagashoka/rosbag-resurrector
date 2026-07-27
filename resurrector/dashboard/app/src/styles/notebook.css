@@ -581,6 +581,34 @@
   margin-bottom: 8px;
 }
 
+/* Cell guide — the ? toggle + inline help panel */
+.nb-cell-help {
+  width: 20px; height: 20px; flex: 0 0 20px;
+  border: 1px solid var(--nb-border-control); border-radius: 50%;
+  background: transparent; color: var(--nb-text-faint);
+  font-size: 11px; font-weight: 700; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.nb-cell-help:hover { background: var(--nb-field-bg); color: var(--nb-text); }
+.nb-cell-help.on {
+  background: var(--nb-accent-chip); color: var(--nb-accent);
+  border-color: var(--nb-accent-band-border);
+}
+.nb-guide {
+  border-bottom: 1px solid var(--nb-border);
+  background: var(--nb-field-bg);
+  padding: 12px 18px 13px;
+  font-size: 12.5px;
+}
+.nb-guide-what { color: var(--nb-text); font-weight: 550; margin-bottom: 8px; max-width: 70ch; }
+.nb-guide-rows { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; }
+.nb-guide-rows dt {
+  font-family: var(--nb-font-mono); font-size: 10.5px; letter-spacing: 0.05em;
+  color: var(--nb-accent); font-weight: 700; text-transform: uppercase;
+  padding-top: 1px; white-space: nowrap;
+}
+.nb-guide-rows dd { margin: 0; color: var(--nb-text-2); max-width: 74ch; }
+
 /* Query cell — free-form Polars expression editor */
 .nb-query-cols { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 9px; }
 .nb-query-colhint { font-size: 11px; color: var(--nb-text-faintest3); font-style: italic; }
