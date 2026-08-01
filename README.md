@@ -671,6 +671,10 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 
 ## Architecture
 
+**Deep-dive: [ARCHITECTURE.md](ARCHITECTURE.md)** — the system shape, the
+load-bearing design decisions and their tradeoffs, and what I'd do differently.
+The short version:
+
 ```
 resurrector/
   ingest/          # Scanner, parser, indexer, health checks
