@@ -1,7 +1,7 @@
 # Architecture
 
-*How RosBag Resurrector is built, and why it's built that way. A 10-minute read
-covering the system shape, the decisions that carry load, and what I'd do
+*How RosBag Resurrector is built, and why it's built that way. A five-minute
+read covering the system shape, the decisions that carry load, and what I'd do
 differently. Last updated for v0.8.3 (August 2026).*
 
 ## The problem and its constraints
