@@ -65,6 +65,9 @@ vision-openai = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0", "openai>=1.0
 bridge-live = ["rclpy"]
 publish = ["huggingface_hub>=0.20.0"]
 copilot = ["anthropic>=0.40.0"]
+# LeRobot itself requires Python 3.12+; on older interpreters the extra
+# installs nothing and the exporter raises an ImportError with this hint.
+lerobot = ["lerobot[dataset]>=0.6; python_version >= '3.12'", "Pillow>=10.0.0"]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0", "httpx>=0.27.0", "Pillow>=10.0.0", "websockets>=12.0", "psutil>=5.9.0"]
 packaging = ["pyinstaller>=6.0.0", "pyarmor>=8.0.0"]
 watch = ["watchdog>=4.0.0"]

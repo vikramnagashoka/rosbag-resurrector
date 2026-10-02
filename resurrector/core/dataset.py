@@ -363,7 +363,28 @@ class DatasetManager:
         exporter = Exporter()
         manifest: dict[str, str] = {}
 
-        for ref_dict in config["bag_refs"]:
+        if config.get("export_format") == "lerobot":
+            # One LeRobot dataset, one episode per bag ref. The per-bag
+            # loop below would write N separate datasets on top of each
+            # other into the same directory.
+            from resurrector.core.lerobot_export import DEFAULT_FPS, export_lerobot
+
+            bags = []
+            for ref_dict in config["bag_refs"]:
+                bf = BagFrame(ref_dict["path"])
+                if ref_dict.get("start_time") and ref_dict.get("end_time"):
+                    bf = bf.time_slice(ref_dict["start_time"], ref_dict["end_time"])
+                bags.append(bf)
+            export_lerobot(
+                bags,
+                config.get("topics"),
+                output_path,
+                fps=int(round(config.get("downsample_hz") or DEFAULT_FPS)),
+                task=metadata.get("description") or dataset_name,
+            )
+            output_path.mkdir(parents=True, exist_ok=True)
+
+        for ref_dict in ([] if config.get("export_format") == "lerobot" else config["bag_refs"]):
             bf = BagFrame(ref_dict["path"])
             if ref_dict.get("start_time") and ref_dict.get("end_time"):
                 bf = bf.time_slice(ref_dict["start_time"], ref_dict["end_time"])

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
 import numpy as np
 
@@ -86,9 +86,9 @@ PRESETS: dict[str, ExportPreset] = {
         topic_filter=None,  # LeRobot wants images + state, all selected topics
         description=(
             "LeRobot-format dataset for robot-learning training. "
-            "Time-synced, 30 Hz, all topics."
+            "Resampled onto a uniform 30 fps grid, camera topics as video."
         ),
-        extras_required=("all-exports",),
+        extras_required=("lerobot",),
     ),
     "rlds": ExportPreset(
         name="rlds",
@@ -302,6 +302,8 @@ class Exporter:
         sync: bool = False,
         sync_method: str = "nearest",
         downsample_hz: float | None = None,
+        task: str | None = None,
+        action_topics: Sequence[str] = (),
     ) -> Path:
         """Stream-export selected topics to the given format.
 
@@ -320,7 +322,11 @@ class Exporter:
             sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
                 Only used when ``sync`` is True.
             downsample_hz: Per-chunk resampling rate before writing. ``None``
-                preserves the native rate.
+                preserves the native rate. For ``lerobot`` this is the
+                integer fps of the uniform frame grid (default 30).
+            task: ``lerobot`` only: task label attached to every frame.
+            action_topics: ``lerobot`` only: topics whose numeric fields
+                form the ``action`` vector instead of ``observation.state``.
 
         Returns:
             ``Path`` to ``output_dir``.
@@ -331,6 +337,20 @@ class Exporter:
             ValueError: For unknown format strings.
         """
         output_path = Path(output_dir)
+
+        if format == "lerobot":
+            # LeRobot needs every topic in one uniform-grid episode and
+            # writes through its own API, so it can't use the per-topic
+            # chunk dispatch below. ``sync`` is implied by the grid.
+            from resurrector.core.lerobot_export import DEFAULT_FPS, export_lerobot
+            export_lerobot(
+                [bag_frame], topics, output_path,
+                fps=int(round(downsample_hz or DEFAULT_FPS)),
+                task=task or bag_frame.path.stem,
+                action_topics=action_topics,
+            )
+            return output_path
+
         output_path.mkdir(parents=True, exist_ok=True)
 
         if sync and len(topics) > 1:
@@ -397,7 +417,10 @@ class Exporter:
         elif format == "zarr":
             return _stream_zarr(chunks, output_path, name)
         elif format == "lerobot":
-            return _stream_lerobot(chunks, output_path, name)
+            raise ValueError(
+                "LeRobot export needs the whole bag, not a chunk stream; "
+                "use Exporter.export(format='lerobot') or export_lerobot()"
+            )
         elif format == "rlds":
             return _stream_rlds(
                 chunks, output_path, name,
@@ -707,103 +730,6 @@ def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResul
         raise ExportError(failures, filepath)
     return ExportResult(path=filepath, rows_written=rows_written, failures=failures)
 
-
-def _stream_lerobot(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
-    """Export to LeRobot dataset format.
-
-    Layout (per LeRobot dataset spec):
-        <output_path>/
-            data/chunk-000/episode_000000.parquet
-            meta/info.json
-            meta/episodes.jsonl
-            meta/tasks.jsonl
-
-    Each export call produces one episode (episode_000000). For multi-bag
-    datasets, use the DatasetManager which composes multiple bags into a
-    consistent dataset structure.
-    """
-    import json
-
-    data_dir = output_path / "data" / "chunk-000"
-    meta_dir = output_path / "meta"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    meta_dir.mkdir(parents=True, exist_ok=True)
-
-    # Stream the parquet file for this episode
-    episode_parquet = data_dir / "episode_000000.parquet"
-    rows_written = 0
-    columns: list[str] = []
-    fps_estimate = 0.0
-    first_ts: int | None = None
-    last_ts: int | None = None
-
-    import pyarrow.parquet as pq
-
-    writer = None
-    try:
-        for chunk in chunks:
-            if not columns:
-                columns = list(chunk.columns)
-            # Add LeRobot's required step indices
-            chunk = chunk.with_row_index(
-                name="frame_index", offset=rows_written,
-            )
-            # Track timestamps for fps estimation
-            if "timestamp_ns" in chunk.columns and chunk.height > 0:
-                ts_min = chunk["timestamp_ns"].min()
-                ts_max = chunk["timestamp_ns"].max()
-                if first_ts is None:
-                    first_ts = ts_min
-                last_ts = ts_max if last_ts is None else max(last_ts, ts_max)
-
-            table = chunk.to_arrow()
-            if writer is None:
-                writer = pq.ParquetWriter(str(episode_parquet), table.schema)
-            writer.write_table(table)
-            rows_written += chunk.height
-    finally:
-        if writer is not None:
-            writer.close()
-
-    if first_ts is not None and last_ts is not None and last_ts > first_ts:
-        duration_sec = (last_ts - first_ts) / 1e9
-        fps_estimate = round(rows_written / duration_sec, 2) if duration_sec > 0 else 0.0
-
-    # Write meta/info.json
-    info = {
-        "codebase_version": "v2.0",
-        "robot_type": "unknown",
-        "total_episodes": 1,
-        "total_frames": rows_written,
-        "total_tasks": 1,
-        "total_videos": 0,
-        "total_chunks": 1,
-        "chunks_size": 1000,
-        "fps": fps_estimate,
-        "splits": {"train": "0:1"},
-        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-        "features": {
-            col: {"dtype": "float32", "shape": [1], "names": None}
-            for col in columns
-            if col not in ("frame_index", "timestamp_ns")
-        },
-    }
-    (meta_dir / "info.json").write_text(json.dumps(info, indent=2))
-
-    # episodes.jsonl — one line per episode
-    episodes_line = {
-        "episode_index": 0,
-        "tasks": [name],
-        "length": rows_written,
-    }
-    (meta_dir / "episodes.jsonl").write_text(json.dumps(episodes_line) + "\n")
-
-    # tasks.jsonl — one line per distinct task
-    tasks_line = {"task_index": 0, "task": name}
-    (meta_dir / "tasks.jsonl").write_text(json.dumps(tasks_line) + "\n")
-
-    logger.info("Wrote LeRobot dataset (%d frames) to %s", rows_written, output_path)
-    return ExportResult(path=output_path, rows_written=rows_written)
 
 
 def _stream_rlds(

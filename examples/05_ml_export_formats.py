@@ -48,17 +48,19 @@ def main() -> None:
 
     section("LeRobot — Hugging Face training format")
     try:
+        import shutil
         lerobot_dir = out / "ml_lerobot"
+        shutil.rmtree(lerobot_dir, ignore_errors=True)  # LeRobot won't overwrite
         bf.export(topics=topics, format="lerobot", output=str(lerobot_dir),
-                  sync=True, sync_method="nearest")
+                  task="explore sample bag")
         files = sorted(lerobot_dir.rglob("*"))
         print(f"  Wrote {len(files)} files; structure:")
         for p in files[:8]:
             print(f"    {p.relative_to(lerobot_dir)}")
         if len(files) > 8:
             print(f"    ... and {len(files) - 8} more")
-    except (ImportError, Exception) as e:
-        print(f"  [INFO] LeRobot export needs the optional [lerobot] extra: {e}")
+    except ImportError as e:
+        print(f"  [INFO] {e}")
 
     section("RLDS — Reinforcement Learning Dataset Standard (RT-2, OpenX)")
     try:
