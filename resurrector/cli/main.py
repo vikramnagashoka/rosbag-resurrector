@@ -470,7 +470,7 @@ def export(
     format: Annotated[Optional[str], typer.Option("--format", "-f",
         help="Output format. parquet (default), hdf5, csv, numpy "
              "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
-             "lerobot / rlds (training-ready, needs [all-exports]). "
+             "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports]). "
              "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
     )] = None,
@@ -512,6 +512,16 @@ def export(
              "v0.6+ candidate (raises NotImplementedError). "
              "e.g. --split-strategy random",
     )] = "time",
+    task: Annotated[Optional[str], typer.Option("--task",
+        help="LeRobot only: natural-language task label stored on every "
+             "frame (defaults to the bag file name). "
+             "e.g. --task 'pick up the red cube'",
+    )] = None,
+    action_topic: Annotated[Optional[list[str]], typer.Option("--action-topic",
+        help="LeRobot only: topic whose numeric fields form the `action` "
+             "vector instead of `observation.state`. Repeatable. "
+             "e.g. --action-topic /cmd_vel",
+    )] = None,
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
@@ -535,7 +545,7 @@ def export(
           resurrector export bag.mcap --preset lerobot --downsample 60 \\
               -o ./lerobot_60hz
 
-    Format support note: zarr/rlds (and the lerobot/rlds presets) need
+    Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds need
     `pip install 'rosbag-resurrector[all-exports]'`.
     """
     from resurrector.core.export import PRESETS
@@ -562,8 +572,9 @@ def export(
         console.print(t)
         if any(p.extras_required for p in PRESETS.values()):
             console.print(
-                "\n[dim]Extras required for some presets — install via "
-                "`pip install 'rosbag-resurrector[all-exports]'`.[/dim]"
+                "\n[dim]Extras required for some presets — "
+                "`pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+) "
+                "for lerobot, `[all-exports]` for rlds.[/dim]"
             )
         raise typer.Exit()
 
@@ -604,9 +615,14 @@ def export(
             preset=preset,
             split=split_dict,
             split_strategy=split_strategy,
+            task=task,
+            action_topics=action_topic,
         )
-    except ValueError as e:
+    except (ValueError, FileExistsError) as e:
         console.print(f"[red]Export failed: {e}[/red]")
+        raise typer.Exit(1)
+    except ImportError as e:
+        console.print(f"[yellow]{e}[/yellow]")
         raise typer.Exit(1)
     except NotImplementedError as e:
         console.print(f"[red]{e}[/red]")

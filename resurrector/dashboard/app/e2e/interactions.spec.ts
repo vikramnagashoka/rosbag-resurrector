@@ -152,6 +152,34 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(modal.locator('.nb-export-topic').first()).toBeVisible()
   })
 
+  test('Export dialog names the right extra for an unavailable LeRobot preset', async ({ page, request }) => {
+    // Would catch: the LeRobot preset gated behind the Zarr/RLDS banner and
+    // its [all-exports] command (the pre-v0.8.4 wiring, which installs the
+    // wrong package), or the preset staying selectable without LeRobot.
+    const caps = await request.get('/api/system/capabilities').then(r => r.json())
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const modal = page.locator('.nb-export')
+    // Scope to the preset select (the format select also has a lerobot option).
+    const lerobotOption = modal.locator('select:has(option[value="training-tabular"]) option[value="lerobot"]')
+    await expect(lerobotOption).toBeAttached()
+
+    if (!caps.lerobot.available) {
+      const banner = modal.locator('.nb-bridge-banner', { hasText: 'LeRobot extra' })
+      await expect(banner).toBeVisible()
+      await expect(banner.locator('code')).toContainText("rosbag-resurrector[lerobot]")
+      // toBeDisabled() doesn't honor `disabled` on <option>; assert the attribute.
+      await expect(lerobotOption).toHaveAttribute('disabled', '')
+    } else {
+      await expect(modal.getByText('LeRobot extra')).toHaveCount(0)
+      await expect(lerobotOption).not.toHaveAttribute('disabled')
+    }
+    // The Zarr/RLDS banner must no longer advertise LeRobot output.
+    await expect(modal.getByText('Install for Zarr or LeRobot/RLDS output.')).toHaveCount(0)
+  })
+
   test('Datasets warm page creates a dataset (native, not the dark UI)', async ({ page }) => {
     // Would catch: the Datasets port not rendering in the warm theme, or the
     // create flow (modal → /api/datasets) breaking.

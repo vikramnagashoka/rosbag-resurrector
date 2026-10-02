@@ -492,7 +492,7 @@ bf.export(topics=["/imu/data", "/joint_states"],
           downsample_hz=10)
 ```
 
-Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Parquet, HDF5, CSV, Zarr, and LeRobot are chunk-streamed (memory bounded by `chunk_size`, independent of topic size). NumPy `.npz` and RLDS accumulate per-topic and are bounded by total converted-array size; for very large topics, prefer Parquet.
+Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Parquet, HDF5, CSV, Zarr, and LeRobot are streamed (memory bounded by `chunk_size`, independent of topic size). NumPy `.npz` and RLDS accumulate per-topic and are bounded by total converted-array size; for very large topics, prefer Parquet.
 
 | Format | Best For | Streaming |
 |--------|----------|-----------|
@@ -500,11 +500,18 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | HDF5 | Mixed numeric/image data, MATLAB compatibility | Chunk-streamed |
 | CSV | Quick inspection, sharing with non-technical team members | Chunk-streamed |
 | Zarr | Cloud-native, chunked, very large datasets | Chunk-streamed |
-| **LeRobot** | Hugging Face LeRobot training (parquet + meta JSON) | Chunk-streamed |
+| **LeRobot** | Hugging Face LeRobot training: v3 dataset written by LeRobot's own writer, cameras as video | Streamed (one chunk + one frame) |
 | NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
-LeRobot needs no extra deps. RLDS needs `tensorflow`: `pip install 'rosbag-resurrector[all-exports]'`.
+LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). RLDS needs `tensorflow`: `pip install 'rosbag-resurrector[all-exports]'`.
+
+**How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips every export through `LeRobotDataset` and checks frame values.
+
+```bash
+resurrector export run.mcap --preset lerobot -o ./pick_cube \
+    --task "pick up the red cube" --action-topic /arm/command
+```
 
 ### Robotics Transforms
 

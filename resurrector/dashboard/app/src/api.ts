@@ -286,7 +286,7 @@ export interface Capability {
   description: string
 }
 
-export type CapabilityName = 'vision' | 'bridge_live' | 'ros1_convert' | 'all_exports'
+export type CapabilityName = 'vision' | 'bridge_live' | 'ros1_convert' | 'all_exports' | 'lerobot'
 export type CapabilityMap = Record<CapabilityName, Capability>
 
 // ---------- Endpoints ----------
