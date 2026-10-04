@@ -18,6 +18,10 @@ from resurrector.ingest.parser import MCAPParser, Message, BagMetadata
 
 logger = logging.getLogger("resurrector.bridge.playback")
 
+# Longest the playback loop may run without yielding to the event loop when
+# it's behind schedule. Bounds pause/HTTP/WebSocket latency during catch-up.
+_MAX_HOLD_SEC = 0.005
+
 
 class PlaybackState(enum.Enum):
     STOPPED = "stopped"
@@ -119,6 +123,10 @@ class PlaybackEngine:
             return
 
         self._stop_requested = False
+        # A pause that landed on the previous run's final message leaves the
+        # event cleared after the run ends STOPPED; re-arm it or the new
+        # task waits forever while state reports PLAYING.
+        self._pause_event.set()
         self._state = PlaybackState.PLAYING
         self._task = asyncio.create_task(self._playback_loop())
         logger.info("Started playback at %.1fx", self._speed)
@@ -148,6 +156,13 @@ class PlaybackEngine:
     async def set_speed(self, speed: float) -> None:
         """Change playback speed."""
         self._speed = max(0.1, min(speed, 20.0))
+        if self._state == PlaybackState.PLAYING:
+            # Re-anchor pacing at the current position, as resume does.
+            # Otherwise the loop measures the whole elapsed bag span against
+            # the new speed: a speed-up replays it as one burst, a slow-down
+            # sleeps for seconds before the next message.
+            self._wall_start = time.monotonic()
+            self._bag_start_ns = self._current_timestamp_ns
         logger.info("Speed set to %.1fx", self._speed)
 
     async def stop(self) -> None:
@@ -164,10 +179,21 @@ class PlaybackEngine:
         self._state = PlaybackState.STOPPED
 
     async def _playback_loop(self) -> None:
-        """Core playback loop: iterate messages with timing control."""
+        """Core playback loop: iterate messages with timing control.
+
+        Parsing is synchronous and an already-set ``_pause_event.wait()``
+        returns without suspending, so when decode can't keep up with
+        ``speed`` nothing in the loop yields on its own. It must yield at
+        least every ``_MAX_HOLD_SEC`` or it holds the event loop until the
+        bag ends: HTTP pause/stop are ignored, WebSocket sends stall, and
+        other engines in a MultiBagPlayback can't start.
+        """
+        last_yield = time.monotonic()
         while not self._stop_requested:
             self._wall_start = time.monotonic()
             self._bag_start_ns = self._current_timestamp_ns
+            pass_start_ns = self._current_timestamp_ns
+            emitted = 0
 
             # Create a fresh parser for each loop iteration (to support seek)
             parser = MCAPParser(self._bag_path)
@@ -194,16 +220,37 @@ class PlaybackEngine:
 
                 if sleep_time > 0.001:  # Only sleep if > 1ms
                     await asyncio.sleep(sleep_time)
+                    last_yield = time.monotonic()
+                elif time.monotonic() - last_yield >= _MAX_HOLD_SEC:
+                    # Behind schedule: yield periodically (not per message,
+                    # which measurably slows a playback that is already
+                    # behind) so the rest of the event loop stays live.
+                    await asyncio.sleep(0)
+                    last_yield = time.monotonic()
 
                 self._current_timestamp_ns = msg.timestamp_ns
+                emitted += 1
 
                 if self._callback:
                     self._callback(msg)
+
+            if emitted == 0 and pass_start_ns <= self._metadata.start_time_ns:
+                # A full pass from the start produced nothing (the topic
+                # filter matches no messages). Looping would re-open the bag
+                # forever without awaiting: a permanent event-loop freeze.
+                logger.warning(
+                    "No messages for topics %s in %s; stopping playback",
+                    self._topics, self._bag_path.name,
+                )
+                self._state = PlaybackState.STOPPED
+                return
 
             # Bag finished
             if self._loop and not self._stop_requested:
                 self._current_timestamp_ns = self._metadata.start_time_ns
                 logger.info("Looping playback")
+                await asyncio.sleep(0)
+                last_yield = time.monotonic()
                 continue
             else:
                 self._state = PlaybackState.STOPPED

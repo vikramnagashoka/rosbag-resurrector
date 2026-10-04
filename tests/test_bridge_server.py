@@ -66,19 +66,27 @@ class TestBridgeREST:
 
     async def test_playback_play_pause(self, client):
         async with client as c:
-            # Play
+            # This test checks the play/pause state machine over HTTP, not
+            # timing. At the fixture's 10x the 2 s bag ends ~0.2 s after
+            # play, leaving ~0.1 s of slack; 1x gives ~1.9 s. The CI flake
+            # ('stopped' on 3.13) was really event-loop starvation in
+            # PlaybackEngine, fixed there and pinned by
+            # test_behind_schedule_playback_does_not_starve_event_loop.
+            resp = await c.post("/api/playback/speed", params={"v": 1.0})
+            assert resp.status_code == 200
+
             resp = await c.post("/api/playback/play")
             assert resp.status_code == 200
             assert resp.json()["status"] == "playing"
 
-            # Check status
             await asyncio.sleep(0.1)
             resp = await c.get("/api/status")
             assert resp.json()["state"] == "playing"
 
-            # Pause
             resp = await c.post("/api/playback/pause")
             assert resp.status_code == 200
+            resp = await c.get("/api/status")
+            assert resp.json()["state"] == "paused"
 
     async def test_playback_speed(self, client):
         async with client as c:

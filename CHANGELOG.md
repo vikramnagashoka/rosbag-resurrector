@@ -19,6 +19,28 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
   `LeRobotDataset.create() -> add_frame() -> save_episode()` writer, so the
   on-disk format is whatever the installed LeRobot considers valid. New
   module [resurrector/core/lerobot_export.py](resurrector/core/lerobot_export.py).
+- **Bridge playback no longer freezes the server when it falls behind.**
+  When decode couldn't keep up with the playback speed (e.g. a dense bag at
+  20x), the playback loop never yielded to the event loop: parsing is
+  synchronous and an already-set pause event doesn't suspend. The whole
+  bridge froze until end-of-bag — Pause clicks were silently ignored,
+  WebSocket sends stalled, and other bags in a multi-bag playback couldn't
+  start on time. It now yields at least every 5 ms when behind (measured
+  +0.5% throughput cost vs. +9.6% for yielding on every message).
+- **`--loop` with a topic filter that matches nothing** (a typo'd
+  `--topic`, a declared-but-empty topic like the demo bag's `/tf`, or a
+  multi-bag topic missing from one bag) spun forever re-opening the bag
+  without yielding — server unresponsive, Ctrl+C ignored, only `kill -9`
+  worked. It now stops with a warning.
+- **Play after a pause that landed on the final message** reported
+  "playing" but never emitted anything (the pause event stayed cleared).
+  A fresh `play()` now re-arms it.
+- **Changing speed mid-play** no longer bursts (speed-up replayed the whole
+  elapsed span at once) or stalls (slow-down slept for seconds before the
+  next message): `set_speed()` re-anchors pacing at the current position,
+  as resume already did.
+- De-flaked `test_playback_play_pause` (failed on a loaded CI runner with
+  `'stopped' == 'playing'`); the root cause was the starvation above.
 
 ### Changed
 
