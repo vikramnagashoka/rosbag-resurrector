@@ -237,6 +237,11 @@ class DatasetManager:
             metadata: Optional :class:`DatasetMetadata` published with
                 the dataset (auto-README, citation, license, etc.).
 
+        For ``export_format="lerobot"`` the version exports as ONE LeRobot
+        dataset with one episode per bag: ``topics`` applies to every
+        episode (per-bag topic filters and ``sync_config`` are ignored), and
+        ``downsample_hz`` is the integer fps (default 30).
+
         Returns:
             The new version's integer id.
 

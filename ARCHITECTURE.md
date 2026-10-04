@@ -2,7 +2,7 @@
 
 *How RosBag Resurrector is built, and why it's built that way. A five-minute
 read covering the system shape, the decisions that carry load, and what I'd do
-differently. Last updated for v0.8.3 (August 2026).*
+differently. Last updated for v0.8.4 (October 2026).*
 
 ## The problem and its constraints
 
@@ -77,7 +77,9 @@ CI job) measures peak RSS on synthetic bags and fails on regressions. Every
 new hot path is required to add a case. Two escape hatches exist and are
 documented as exceptions: eager `to_polars()`-style calls refuse topics over
 `LARGE_TOPIC_THRESHOLD` (1M messages) unless forced, and the NumPy exporter
-hard-caps at 1M rows with a typed error naming the alternative.
+hard-caps at 1M rows with a typed error naming the alternative. LeRobot
+export is a softer third: it streams its input but holds one episode's frame
+grid, because LeRobot's own writer buffers an episode before saving it.
 
 *Tradeoff:* streaming implementations of everything cost real complexity —
 the streaming health checker and sync engine are the hardest code in the repo.
@@ -121,7 +123,8 @@ existing indexes upgraded transparently.
 ### 4. Optional heaviness behind capability gates
 
 The heavy dependencies — CLIP/torch for semantic search, TensorFlow for RLDS,
-`rclpy` for live bridging — live behind pip extras. The architecture-level
+LeRobot (torch, Python 3.12+) for LeRobot export, `rclpy` for live bridging —
+live behind pip extras. The architecture-level
 piece is a **runtime capability registry**: one module probes what's importable
 and every surface (CLI `doctor`, dashboard cells, export dialog) renders the
 same honest state — available, or a copy-pasteable install command. The search
@@ -145,11 +148,12 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
 
 ## Numbers that keep it honest
 
-- 822 backend tests · 48 frontend unit tests · 43 Playwright e2e (including
+- 841 backend tests · 48 frontend unit tests · 46 Playwright e2e (including
   visual baselines), plus the dedicated memory-regression CI job
-- CI matrix: Python 3.10–3.13 · 7 optional-extra installs · wheel-install
+- CI matrix: Python 3.10–3.13 · 8 optional-extra installs (LeRobot
+  exports round-tripped through the real library) · wheel-install
   smoke test · frontend build · e2e
-- 15 releases on PyPI; streaming exporters to 7 formats
+- 16 releases on PyPI; exporters to 7 formats (5 chunk-streamed when unsynced)
 - 5 streaming health dimensions: rate stability, size anomalies, time gaps,
   timestamp ordering, topic completeness
 

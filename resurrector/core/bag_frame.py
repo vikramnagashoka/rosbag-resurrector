@@ -759,11 +759,14 @@ class BagFrame:
     ) -> Path:
         """Export bag data to ML-friendly formats — the main bulk-export entry point.
 
-        Streams topic data through the chosen format writer; chunk-streaming
-        formats (Parquet, HDF5, CSV, Zarr, LeRobot, RLDS) are bounded
-        by chunk size, not topic size. NumPy ``.npz`` materializes
-        per-topic and refuses topics over 1 M messages with a clear
-        :class:`LargeTopicError`.
+        Streams topic data through the chosen format writer; unsynced
+        exports to Parquet, HDF5, CSV, Zarr, and RLDS are bounded by chunk
+        size, not topic size (``sync=True`` builds the synced table in
+        memory first). NumPy ``.npz`` materializes per-topic and refuses
+        topics over 1 M messages with a clear :class:`LargeTopicError`.
+        ``lerobot`` streams its input but holds one episode's frame grid
+        (duration x fps x numeric fields) in memory, because LeRobot's own
+        writer buffers an episode before saving; camera frames go to disk.
 
         Args:
             topics: Topics to export. ``None`` means every topic (or, with a
@@ -772,11 +775,15 @@ class BagFrame:
                 ``numpy``, ``zarr`` / ``rlds`` (need ``[all-exports]``), or
                 ``lerobot`` (needs ``[lerobot]``, Python 3.12+). Defaults to
                 ``parquet`` when no preset is given.
-            output: Output directory. Created if missing.
+            output: Output directory. Created if missing. For ``lerobot``
+                it must not exist or be empty.
             sync: When True, time-align all topics before writing using
-                ``sync_method``.
+                ``sync_method``. Ignored for ``lerobot``, which always
+                resamples causally onto its fps grid.
             sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
-            downsample_hz: Resample to this rate before writing.
+            downsample_hz: Resample to this rate before writing. For
+                ``lerobot``, the dataset fps, rounded to an integer
+                (default 30).
             preset: Optional named preset (``lerobot``, ``rlds``,
                 ``training-tabular``, ``camera-only``, ``multimodal``).
                 Fills in unset args with the preset's values; user-supplied
@@ -803,6 +810,9 @@ class BagFrame:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
             ValueError: If ``preset`` is not known, or ``split`` ratios don't
                 sum to ~1.0, or ``split_strategy`` is unknown.
+            ImportError: ``lerobot`` without the ``[lerobot]`` extra
+                (Python 3.12+).
+            FileExistsError: ``lerobot`` into a non-empty directory.
 
         Example::
 
@@ -810,7 +820,8 @@ class BagFrame:
             bf.export(topics=["/imu/data", "/joint_states"], format="parquet",
                       output="./parquet_out")
 
-            # Use a preset (one line; LeRobot-format, time-synced 30 Hz)
+            # Use a preset (one line; LeRobot v3 dataset, 30 fps causal grid,
+            # cameras as video; needs the [lerobot] extra)
             bf.export(preset="lerobot", output="./lerobot_data")
 
             # Time-strategy split for ML training

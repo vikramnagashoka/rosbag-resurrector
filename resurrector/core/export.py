@@ -2,9 +2,12 @@
 
 Supports: Parquet, HDF5, CSV, NumPy, Zarr, LeRobot, RLDS.
 
-Per the v0.4.0 performance contract, the streaming-friendly formats
-(Parquet, HDF5, CSV, Zarr, LeRobot, RLDS) write chunk-by-chunk so
-peak memory is bounded by ``CHUNK_SIZE``. NumPy ``.npz`` is the
+Per the v0.4.0 performance contract, unsynced exports to the
+streaming-friendly formats (Parquet, HDF5, CSV, Zarr, RLDS) write
+chunk-by-chunk so peak memory is bounded by ``CHUNK_SIZE``. With
+``sync=True`` the synced table is built in memory first. LeRobot goes through LeRobot's own writer
+(:mod:`resurrector.core.lerobot_export`): input is streamed, but one
+episode's frame grid is held in memory until LeRobot saves the episode. NumPy ``.npz`` is the
 exception: the format can't be incrementally appended, so writing
 requires materializing every column. We hard-cap NumPy export at
 ``NUMPY_HARD_CAP`` rows and raise :class:`LargeTopicError` past that
@@ -274,10 +277,12 @@ class Exporter:
     streaming via :meth:`export_frames` / :meth:`export_video`, or
     custom orchestration where ``BagFrame.export`` doesn't quite fit.
 
-    All export paths stream chunk-by-chunk. Peak memory is roughly the
-    size of one chunk (``CHUNK_SIZE`` rows), regardless of total topic
-    size. ``numpy`` is the documented exception — it materializes
-    per-topic and refuses topics over ``NUMPY_HARD_CAP`` (1 M rows).
+    Unsynced chunk-streaming export paths keep peak memory near one chunk
+    (``CHUNK_SIZE`` rows), regardless of total topic size; ``sync=True``
+    builds the synced table in memory first. Exceptions:
+    ``numpy`` materializes per-topic and refuses topics over
+    ``NUMPY_HARD_CAP`` (1 M rows); ``lerobot`` streams its input but holds
+    one episode's frame grid in memory (LeRobot's writer buffers episodes).
 
     Example::
 
@@ -313,8 +318,9 @@ class Exporter:
                 skipped — the export does NOT fail on a single missing
                 topic.
             format: ``parquet`` (default), ``hdf5``, ``csv``, ``numpy``,
-                ``zarr`` (needs ``[all-exports]``), ``lerobot``, or
-                ``rlds`` (needs ``[all-exports]``).
+                ``zarr`` (needs ``[all-exports]``), ``lerobot`` (needs
+                ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
+                ``[all-exports]``).
             output_dir: Directory to write into. Created if missing.
             sync: When True (and 2+ topics), time-align via
                 :meth:`BagFrame.sync` before exporting; the result is
@@ -767,8 +773,8 @@ def _stream_rlds(
         import tensorflow as tf
     except ImportError:
         raise ImportError(
-            "RLDS export requires tensorflow. "
-            "Install with: pip install 'rosbag-resurrector[all-exports]'"
+            "RLDS export requires tensorflow, which the [all-exports] extra "
+            "does not install. Install with: pip install tensorflow"
         )
 
     output_path.mkdir(parents=True, exist_ok=True)

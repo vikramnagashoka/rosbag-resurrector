@@ -693,9 +693,12 @@ async def export_bag(
 ) -> dict[str, str]:
     """Run a synchronous bag export. Returns the output path on completion.
 
-    The dashboard's ExportDialog hits this. Streams chunks through the
-    chosen format (parquet / hdf5 / csv / numpy / zarr / lerobot / rlds)
-    so memory stays bounded. ``output_dir`` is validated against
+    The dashboard's ExportDialog hits this. Writes the chosen format
+    (parquet / hdf5 / csv / numpy / zarr / lerobot / rlds); chunk-streaming
+    formats stay bounded by chunk size, while lerobot holds one episode's
+    frame grid and ignores ``sync``. Returns 503 (``capability_unavailable``)
+    when an export's extra is missing and 409 when a lerobot target
+    directory isn't empty. ``output_dir`` is validated against
     ``RESURRECTOR_ALLOWED_ROOTS`` to prevent writing outside trusted
     locations.
 

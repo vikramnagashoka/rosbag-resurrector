@@ -114,6 +114,62 @@ class TestToRgb:
         assert to_rgb(px, "rgba8").shape == (1, 1, 3)
 
 
+class TestStartMethodProbe:
+    def test_probe_does_not_fix_start_method(self, tmp_dir):
+        """Deciding whether to encode cameras in parallel must not fix the start method.
+
+        Would catch: multiprocessing.get_start_method() (allow_none=False),
+        which sets the default context as a side effect, so a caller's later
+        set_start_method() raised "context has already been set". Fresh
+        interpreter so nothing else has set it. (LeRobot's save_episode()
+        currently fixes it on its own; this pins our code's behavior.)
+        """
+        import subprocess
+
+        script = tmp_dir / "probe.py"
+        script.write_text(
+            "import multiprocessing\n"
+            "from resurrector.core.lerobot_export import _start_method_is_fork\n"
+            "_start_method_is_fork()\n"
+            "multiprocessing.set_start_method('spawn')\n"
+            "print('still settable')\n"
+        )
+        proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr[-1500:]
+        assert "still settable" in proc.stdout
+
+
+class TestCliOutput:
+    """What the user actually sees in the terminal, not just exception text.
+
+    Would catch: Rich treating "[lerobot]" as a markup tag and swallowing
+    it, so the CLI told users to `pip install 'rosbag-resurrector'` (the
+    package they already had). The exception-level test above passed the
+    whole time; only the rendered output was wrong.
+    """
+
+    def test_missing_lerobot_hint_keeps_extra_name(self, tmp_dir, sample_bag, monkeypatch):
+        from typer.testing import CliRunner
+        from resurrector.cli.main import app
+
+        monkeypatch.setitem(sys.modules, "lerobot.datasets.lerobot_dataset", None)
+        result = CliRunner().invoke(
+            app, ["export", str(sample_bag), "--preset", "lerobot", "-o", str(tmp_dir / "out")],
+            env={"COLUMNS": "200"},
+        )
+        assert result.exit_code == 1
+        assert "rosbag-resurrector[lerobot]" in result.output, result.output
+
+    def test_list_presets_needs_no_path_and_shows_extras(self):
+        from typer.testing import CliRunner
+        from resurrector.cli.main import app
+
+        result = CliRunner().invoke(app, ["export", "--list-presets"], env={"COLUMNS": "200"})
+        assert result.exit_code == 0, result.output
+        assert "rosbag-resurrector[lerobot]" in result.output
+        assert "rosbag-resurrector[all-exports]" in result.output
+
+
 class TestGuards:
     def test_nonempty_target_refused(self, tmp_dir):
         (tmp_dir / "x.txt").write_text("keep me")
@@ -239,6 +295,34 @@ class TestLeRobotRoundTrip:
         ds = _load(Path(root))
         assert ds.num_episodes == 2
         assert (Path(root) / "manifest.json").exists()
+
+    def test_unguarded_script_under_spawn_with_two_cameras(self, tmp_dir, sample_bag):
+        """The documented one-liner must work from a plain script on macOS.
+
+        Would catch: LeRobot's parallel video encoding (a process pool when a
+        bag has 2+ cameras) under the spawn start method — macOS/Windows
+        default, Linux forkserver on 3.14+ — re-importing the user's
+        unguarded __main__, which re-ran the export and died with
+        BrokenProcessPool. Forced to spawn here so the Linux CI job covers it.
+        """
+        import subprocess
+        import textwrap
+
+        _lerobot()
+        out = tmp_dir / "lr_spawn"
+        script = tmp_dir / "user_script.py"
+        script.write_text(textwrap.dedent(f"""
+            import multiprocessing
+            multiprocessing.set_start_method("spawn", force=True)
+            from resurrector.core.bag_frame import BagFrame
+            BagFrame({str(sample_bag)!r}).export(preset="lerobot", output={str(out)!r})
+        """))
+        proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=600)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        ds = _load(out)
+        cams = [k for k in ds.meta.features if k.startswith("observation.images.")]
+        assert len(cams) >= 2, f"test needs a multi-camera bag to exercise the pool, got {cams}"
+        assert ds.num_frames > 0
 
     def test_existing_output_dir_is_refused(self, tmp_dir, sample_bag):
         _lerobot()

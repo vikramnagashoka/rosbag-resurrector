@@ -97,9 +97,28 @@ class TestRender:
         for r in results:
             if r.tier != "optional":
                 continue
-            if "pip install" not in r.fix_hint:
+            # Only hints carrying an extras spec ("[...]") need quoting; a
+            # plain `pip install tensorflow` is safe on zsh as-is.
+            if "pip install" not in r.fix_hint or "[" not in r.fix_hint:
                 continue
             assert "'rosbag-resurrector[" in r.fix_hint, (
                 f"optional check {r.name!r} prints unquoted pip extras: "
                 f"{r.fix_hint!r} — will fail on zsh"
             )
+
+
+class TestOptionalExportChecks:
+    def test_lerobot_and_rlds_rows_present(self):
+        from resurrector.cli.doctor import run_all_checks
+        rows = {r.name: r for r in run_all_checks()}
+        assert "LeRobot export" in rows and rows["LeRobot export"].tier == "optional"
+        assert "RLDS export (tensorflow)" in rows
+
+    def test_lerobot_row_explains_python_floor(self, monkeypatch):
+        """Would catch: a Python 3.11 user who installed [lerobot] (which
+        installs nothing there) being told only 'not installed'."""
+        from resurrector.cli import doctor
+        monkeypatch.setattr(doctor.sys, "version_info", (3, 11, 15))
+        r = doctor._check_lerobot()
+        assert r.status == "warn"
+        assert "3.12" in r.detail and "3.11" in r.detail

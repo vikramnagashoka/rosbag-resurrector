@@ -29,6 +29,7 @@ to disk before encoding). The output itself is grid-sized by definition.
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -208,6 +209,20 @@ def _image_time_bounds(view: "TopicView") -> tuple[int, int] | None:
     return None if first is None else (first, last)
 
 
+def _start_method_is_fork() -> bool:
+    """Whether new processes would be forked, without fixing the start method.
+
+    ``multiprocessing.get_start_method()`` (allow_none=False) permanently
+    sets the default context as a side effect, so a caller's later
+    ``set_start_method()`` would raise "context has already been set".
+    The first entry of ``get_all_start_methods()`` is the documented
+    platform default. (LeRobot's own ``save_episode()`` currently fixes the
+    start method anyway; this avoids adding a side effect of our own.)
+    """
+    method = multiprocessing.get_start_method(allow_none=True)
+    return (method or multiprocessing.get_all_start_methods()[0]) == "fork"
+
+
 def _camera_key(topic: str) -> str:
     return "observation.images." + re.sub(r"[^A-Za-z0-9_]+", "_", topic.strip("/"))
 
@@ -383,7 +398,9 @@ def export_lerobot(
     dataset = None
     expected_features: dict | None = None
     total_frames = 0
-    first_ep: _Episode | None = None
+    # Keep only the first episode's names: holding the _Episode itself would
+    # keep its whole frame grid alive through every later bag.
+    first_names: tuple[list[str], list[str]] | None = None
     cam_keys: list[str] = []
     try:
         for bf in bags:
@@ -396,7 +413,7 @@ def export_lerobot(
 
             if dataset is None:
                 expected_features = feats
-                first_ep = ep
+                first_names = (ep.state_names, ep.action_names)
                 cam_keys = list(cam_shapes)
                 dataset = LeRobotDataset.create(
                     repo_id=repo_id, fps=fps, features=feats, root=root,
@@ -417,7 +434,12 @@ def export_lerobot(
                 for key, it in streams.items():
                     frame[key] = firsts.pop(key) if key in firsts else next(it)
                 dataset.add_frame(frame)
-            dataset.save_episode()
+            # LeRobot encodes multiple cameras in a process pool. Under the
+            # spawn/forkserver start methods (macOS, Windows, Linux on 3.14+)
+            # each worker re-imports the caller's __main__, so a plain script
+            # without an `if __name__ == "__main__":` guard re-runs its own
+            # export and dies with BrokenProcessPool. Only fork is safe.
+            dataset.save_episode(parallel_encoding=_start_method_is_fork())
             total_frames += len(ep.grid)
     except BaseException:
         if dataset is not None:
@@ -436,7 +458,7 @@ def export_lerobot(
         episodes=len(bags),
         frames=total_frames,
         fps=fps,
-        state_names=first_ep.state_names if first_ep else [],
-        action_names=first_ep.action_names if first_ep else [],
+        state_names=first_names[0] if first_names else [],
+        action_names=first_names[1] if first_names else [],
         camera_keys=cam_keys,
     )
