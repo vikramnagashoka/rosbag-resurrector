@@ -754,6 +754,8 @@ class BagFrame:
         preset: str | None = None,
         split: dict[str, float] | None = None,
         split_strategy: str = "time",
+        task: str | None = None,
+        action_topics: list[str] | None = None,
     ) -> Path:
         """Export bag data to ML-friendly formats — the main bulk-export entry point.
 
@@ -767,9 +769,9 @@ class BagFrame:
             topics: Topics to export. ``None`` means every topic (or, with a
                 preset, the preset's ``topic_filter`` decides).
             format: One of ``parquet`` (default), ``hdf5``, ``csv``,
-                ``numpy``, ``zarr`` (needs ``[all-exports]``), ``lerobot`` /
-                ``rlds`` (needs ``[all-exports]``). Defaults to ``parquet``
-                when no preset is given.
+                ``numpy``, ``zarr`` / ``rlds`` (need ``[all-exports]``), or
+                ``lerobot`` (needs ``[lerobot]``, Python 3.12+). Defaults to
+                ``parquet`` when no preset is given.
             output: Output directory. Created if missing.
             sync: When True, time-align all topics before writing using
                 ``sync_method``.
@@ -789,6 +791,10 @@ class BagFrame:
                 ``"random"`` — uniform random per row. Disregards temporal
                 locality; only use when row-level independence is OK.
                 ``"stratified"`` — not yet implemented (v0.6 candidate).
+            task: ``lerobot`` only — task label stored on every frame
+                (defaults to the bag's file stem).
+            action_topics: ``lerobot`` only — topics whose numeric fields
+                become the ``action`` vector instead of ``observation.state``.
 
         Returns:
             ``Path`` to the output directory.
@@ -857,6 +863,8 @@ class BagFrame:
             sync=resolved["sync"],
             sync_method=resolved["sync_method"],
             downsample_hz=resolved["downsample_hz"],
+            task=task,
+            action_topics=action_topics or (),
         )
 
     def __repr__(self) -> str:

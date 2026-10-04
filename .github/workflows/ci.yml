@@ -72,6 +72,7 @@ jobs:
           - ros1            # rosbags (for legacy .bag reading)
           - publish         # huggingface_hub (v0.7 dataset publishing)
           - copilot         # anthropic SDK (v0.7 "Ask your bag"; no API key needed for tests)
+          - lerobot         # real LeRobot: export is round-tripped through LeRobotDataset (needs py>=3.12)
     steps:
       - uses: actions/checkout@v4
 
@@ -91,10 +92,29 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-clip-vit-b32-v1
 
+      - name: Install FFmpeg (LeRobot video decode)
+        # LeRobot's default video backend (torchcodec) links against the
+        # system FFmpeg libraries; the runner image doesn't ship them.
+        if: matrix.extra == 'lerobot'
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
       - name: Install package + dev + extra
         run: |
           python -m pip install --upgrade pip
+          if [ "${{ matrix.extra }}" = "lerobot" ]; then
+            # LeRobot pulls torch; default PyPI wheels on Linux are the
+            # ~2.5 GB CUDA build. The CPU index keeps the job small.
+            export PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+          fi
           pip install -e ".[dev,${{ matrix.extra }}]"
+
+      - name: Assert LeRobot round-trip tests actually ran
+        # Guard against the v0.4.1 failure mode: a gated test that silently
+        # skips forever reads as coverage. In this job they must execute.
+        if: matrix.extra == 'lerobot'
+        run: |
+          pytest tests/test_lerobot_export.py -q -rs | tee lerobot.log
+          ! grep -q "SKIPPED" lerobot.log
 
       - name: Run pytest
         run: pytest tests/ -q

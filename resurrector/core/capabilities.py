@@ -91,6 +91,12 @@ def _copilot_available() -> bool:
         return False
 
 
+def _lerobot_available() -> bool:
+    """LeRobot export drives LeRobot's own dataset writer (Python 3.12+)."""
+    from resurrector.core.lerobot_export import lerobot_available
+    return lerobot_available()
+
+
 def get_capabilities() -> dict[str, Capability]:
     """Return the runtime-detected capability map keyed by name."""
     caps = [
@@ -124,6 +130,12 @@ def get_capabilities() -> dict[str, Capability]:
             available=_all_exports_available(),
             install_command="pip install 'rosbag-resurrector[all-exports]'",
             description="Zarr and TensorFlow Datasets (RLDS) export formats",
+        ),
+        Capability(
+            name="lerobot",
+            available=_lerobot_available(),
+            install_command="pip install 'rosbag-resurrector[lerobot]'   # Python 3.12+",
+            description="LeRobot v3 dataset export (state, actions, camera video)",
         ),
         Capability(
             name="publish",

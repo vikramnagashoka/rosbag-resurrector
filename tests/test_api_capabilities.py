@@ -23,7 +23,7 @@ class TestCapabilitiesEndpoint:
         d = r.json()
         assert set(d.keys()) == {
             "vision", "bridge_live", "ros1_convert", "all_exports",
-            "publish", "copilot",
+            "lerobot", "publish", "copilot",
         }
 
     def test_each_capability_has_required_fields(self):

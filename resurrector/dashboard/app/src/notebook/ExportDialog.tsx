@@ -27,6 +27,7 @@ export default function ExportDialog({
 }) {
   const [presets, setPresets] = useState<ExportPreset[]>([])
   const allExportsCap = useCapability('all_exports')
+  const lerobotCap = useCapability('lerobot')
   const [selectedPreset, setSelectedPreset] = useState('')
   const [selectedTopics, setSelectedTopics] = useState<string[]>(availableTopics)
   const [format, setFormat] = useState('parquet')
@@ -75,18 +76,32 @@ export default function ExportDialog({
   }
 
   const presetMeta = selectedPreset ? presets.find(p => p.name === selectedPreset) : null
-  const unavailable = presets.filter(p => !p.available).length
+  // Count unavailable presets per missing extra so each banner names the
+  // install command that actually unlocks them.
+  const blockedBy = (extra: string) =>
+    presets.filter(p => !p.available && p.extras_required.includes(extra)).length
+  const needAllExports = blockedBy('all-exports')
+  const needLerobot = blockedBy('lerobot')
 
   return (
     <div className="nb-modal-backdrop" onClick={onClose}>
       <div className="nb-modal nb-export" onClick={e => e.stopPropagation()}>
         <h2 className="nb-panel-title">Export data</h2>
 
-        {allExportsCap && !allExportsCap.available && unavailable > 0 && (
+        {lerobotCap && !lerobotCap.available && needLerobot > 0 && (
           <div className="nb-bridge-banner">
-            <div className="nb-bridge-banner-title">{unavailable} preset(s) need the Zarr / RLDS extras.</div>
+            <div className="nb-bridge-banner-title">The LeRobot preset needs the LeRobot extra.</div>
             <div className="nb-bridge-banner-body">
-              Parquet, HDF5, and CSV work without them. Install for Zarr or LeRobot/RLDS output.
+              Writes a LeRobot v3 dataset (state, camera video) that loads directly in LeRobot. Needs Python 3.12+.
+            </div>
+            <code>{lerobotCap.install_command}</code>
+          </div>
+        )}
+        {allExportsCap && !allExportsCap.available && needAllExports > 0 && (
+          <div className="nb-bridge-banner">
+            <div className="nb-bridge-banner-title">{needAllExports} preset(s) need the Zarr / RLDS extras.</div>
+            <div className="nb-bridge-banner-body">
+              Parquet, HDF5, and CSV work without them. Install for Zarr or RLDS output.
             </div>
             <code>{allExportsCap.install_command}</code>
           </div>

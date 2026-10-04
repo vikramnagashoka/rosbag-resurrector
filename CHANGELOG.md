@@ -8,6 +8,47 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+### Fixed
+
+- **LeRobot export now produces datasets LeRobot can actually load.** The
+  previous writer hand-rolled a LeRobot v2.0 layout that current LeRobot
+  (codebase v3.0) refuses with `BackwardCompatibilityError`. It also omitted
+  the required `episode_index` / `index` / `task_index` / `timestamp`
+  columns, declared string fields as `float32`, wrote a fractional `fps`,
+  and dropped camera pixels entirely. Export now goes through LeRobot's own
+  `LeRobotDataset.create() -> add_frame() -> save_episode()` writer, so the
+  on-disk format is whatever the installed LeRobot considers valid. New
+  module [resurrector/core/lerobot_export.py](resurrector/core/lerobot_export.py).
+
+### Changed
+
+- **LeRobot export semantics.** Topics are resampled onto an exact `1/fps`
+  grid (integer fps, default 30) with a causal as-of join: each frame holds
+  the latest sample at or before its time. The grid spans only the window
+  where every selected topic has data, so nothing is extrapolated. Numeric
+  fields become `observation.state`, image topics become
+  `observation.images.<topic>` (MP4), and the new `--action-topic` routes a
+  topic into `action`. New `--task` flag labels the episode. A multi-bag
+  `dataset export` now writes one dataset with one episode per bag (it used
+  to write each bag on top of the previous one).
+- **New `[lerobot]` extra** (`pip install 'rosbag-resurrector[lerobot]'`,
+  Python 3.12+ because LeRobot requires it). The `lerobot` preset now gates
+  on it instead of `[all-exports]`, and the export dialogs show the right
+  install command per missing extra. The capability is reported by
+  `GET /api/system/capabilities`; the export endpoint returns a structured
+  503 when it's missing and 409 when the target directory isn't empty.
+
+### Test infrastructure
+
+- **`extras-test (lerobot)` CI job** installs real LeRobot (CPU torch) and
+  round-trips exports through `LeRobotDataset`: loads, integer fps, uniform
+  timestamps, frame values match the source bag, camera pixels survive,
+  action split, multi-bag episodes. A guard step fails the job if those
+  tests skip, so they can't silently stop running. The value test was
+  verified to fail against a non-causal (forward) resampler.
+- New e2e spec: the export dialog names `[lerobot]` (not `[all-exports]`)
+  for an unavailable LeRobot preset and disables it.
+
 ## [0.8.3] — 2026-07-26
 
 ### What's new

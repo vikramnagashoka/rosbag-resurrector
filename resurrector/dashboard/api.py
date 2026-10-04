@@ -654,8 +654,9 @@ async def list_export_presets() -> list[dict[str, Any]]:
     from resurrector.core.export import list_presets
 
     def _extra_available(extra: str) -> bool:
-        # Only one extra currently ships in this codebase: all-exports
-        # (zarr, tensorflow-datasets). Detect via package import.
+        if extra == "lerobot":
+            from resurrector.core.lerobot_export import lerobot_available
+            return lerobot_available()
         if extra == "all-exports":
             try:
                 import zarr  # noqa: F401
@@ -727,6 +728,25 @@ async def export_bag(
         except ValueError as e:
             # Unknown preset, etc. — surface as 400 not 500.
             raise HTTPException(400, str(e))
+        except FileExistsError as e:
+            # LeRobot refuses to write into a non-empty directory.
+            raise HTTPException(409, str(e))
+        except ImportError as e:
+            # Missing optional extra: structured 503 so the UI can render
+            # the install banner instead of a generic error toast.
+            from resurrector.core.capabilities import get_capabilities
+            cap_name = "lerobot" if "lerobot" in str(e) else "all_exports"
+            cap = get_capabilities()[cap_name]
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "kind": "capability_unavailable",
+                    "capability": cap_name,
+                    "install_command": cap.install_command,
+                    "description": cap.description,
+                    "message": str(e),
+                },
+            )
         return {"status": "completed", "output_path": str(output_path)}
     finally:
         index.close()
