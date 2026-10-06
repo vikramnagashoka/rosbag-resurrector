@@ -210,7 +210,7 @@ Run `resurrector doctor` any time to see which extras are active.
 
 ## Try every feature in 30 seconds
 
-The repo ships with **17 standalone exploration scripts** under [examples/](https://github.com/vikramnagashoka/rosbag-resurrector/tree/main/examples) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
+The repo ships with **25 standalone exploration scripts** under [examples/](https://github.com/vikramnagashoka/rosbag-resurrector/tree/main/examples) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
 
 ```bash
 python examples/01_bag_frame_basics.py        # the pandas-like API
@@ -224,7 +224,7 @@ python examples/08_datasets_versioning.py     # versioned dataset collections
 python examples/09_plotjuggler_bridge.py      # WebSocket bridge for live viz
 ```
 
-Plus the v0.3.1 power features (`11_density_ribbon.py` through `18_polars_lazy_filter.py`) — bookmarks, math/transform editor, brush-to-trim export, cross-bag overlay, "Open in Jupyter", lazy Polars filter pushdown.
+Plus the v0.3.1 power features (`11_density_ribbon.py` through `18_polars_lazy_filter.py`) — bookmarks, math/transform editor, brush-to-trim export, cross-bag overlay, "Open in Jupyter", lazy Polars filter pushdown. Then `19_export_presets_and_splits.py` through `26_bag_qc_fleet.py` cover export presets and splits, multi-bag playback, recording while streaming, bridge events and filters, TF + point clouds, custom message decoders, bag concatenation, and fleet QC.
 
 Each script:
 - Runs in **under 10 seconds** end-to-end
@@ -232,7 +232,7 @@ Each script:
 - Auto-skips with install instructions when an optional extra (CLIP, OpenCV, etc.) isn't installed
 - Has a one-line "what this is and why" header so you can decide whether to keep reading
 
-Full index in [examples/README.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 17 pass on a fresh install, the toolkit is healthy.
+Full index in [examples/README.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 25 pass on a fresh install, the toolkit is healthy.
 
 ## Features
 

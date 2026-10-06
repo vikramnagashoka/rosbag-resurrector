@@ -40,9 +40,9 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.24.0",
     "duckdb>=0.10.0",
-    # No [all] extra: typer has shipped rich + shellingham as plain
-    # dependencies since 0.12.1 and later dropped the extra. 0.16.0 is the
-    # first release whose --help works with click 8.2+.
+    # No [all] extra: typer removed it in 0.12.0, when rich + shellingham
+    # became default dependencies (0.11.1 is the last release that has it).
+    # 0.16.0 is the first release whose --help works with click 8.2+.
     "typer>=0.16.0",
     "rich>=13.0.0",
     "fastapi>=0.110.0",

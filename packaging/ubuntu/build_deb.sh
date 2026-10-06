@@ -6,13 +6,17 @@
 #   sudo gem install fpm
 #
 # Usage:
-#   bash packaging/ubuntu/build_deb.sh [version]
+#   bash packaging/ubuntu/build_deb.sh [version]   # default: pyproject.toml's
 
 set -euo pipefail
 
-VERSION="${1:-0.2.0}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+VERSION="${1:-$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT_DIR/pyproject.toml" | head -n 1)}"
+if [ -z "$VERSION" ]; then
+    echo "Error: no version in $ROOT_DIR/pyproject.toml; pass one as the first argument."
+    exit 1
+fi
 DIST_DIR="$ROOT_DIR/dist/ubuntu"
 
 echo "=== Building Ubuntu DEB: rosbag-resurrector_${VERSION} ==="
@@ -42,7 +46,7 @@ fpm \
     --description "RosBag Resurrector — pandas-like analysis for robotics bag files. Includes health checks, multi-stream sync, ML export, semantic search, and WebSocket bridge." \
     --url "https://github.com/vikramnagashoka/rosbag-resurrector" \
     --maintainer "RosBag Resurrector Contributors" \
-    --license "Proprietary" \
+    --license "MIT" \
     --architecture amd64 \
     --depends "libc6 >= 2.17" \
     --after-install "$SCRIPT_DIR/postinst.sh" \
