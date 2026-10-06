@@ -68,22 +68,22 @@ def _all_exports_available() -> bool:
     return all(export_dependency_problem(f) is None for f in ("zarr", "rlds"))
 
 
-def _all_exports_install_command() -> str:
-    """The extra's pip command, unless pip can't deliver tensorflow here.
+def _all_exports_description() -> str:
+    """What the extra unlocks, plus why RLDS stays off where pip can't
+    deliver tensorflow (Python 3.14, Intel macOS on 3.13, ...).
 
-    Where tensorflow ships no wheel (Python 3.14, Intel macOS, ...) the
-    extra installs zarr but never tensorflow, so the banner states the
-    reason instead of a command that wouldn't make RLDS work.
+    The explanation lives here because the dashboard pastes
+    ``install_command`` into a copy block: it must stay a runnable command,
+    and the extra's pip command still installs Zarr on these platforms.
     """
     from resurrector.core import export
-    rlds_problem = export.export_dependency_problem("rlds")
-    if not rlds_problem or export.tensorflow_wheels_available():
-        return export.ALL_EXPORTS_INSTALL
-    if export.export_dependency_problem("zarr") is None:
-        return rlds_problem
-    # Lead with the part pip can still deliver here, so a Zarr-only user
-    # isn't told to switch Python.
-    return f"{export.ALL_EXPORTS_INSTALL} (Zarr only on this platform). {rlds_problem}"
+    base = "Zarr and RLDS (TFRecord) export formats"
+    if export.tensorflow_wheels_available() or export.export_dependency_problem("rlds") is None:
+        return base
+    return (
+        f"{base}. On this interpreter the extra installs Zarr only: "
+        f"{export.tensorflow_missing_detail()}. For RLDS, use {export.TENSORFLOW_WHERE}."
+    )
 
 
 def _ros1_convert_available() -> bool:
@@ -117,6 +117,7 @@ def _lerobot_available() -> bool:
 
 def get_capabilities() -> dict[str, Capability]:
     """Return the runtime-detected capability map keyed by name."""
+    from resurrector.core.export import ALL_EXPORTS_INSTALL
     caps = [
         Capability(
             name="vision",
@@ -146,8 +147,8 @@ def get_capabilities() -> dict[str, Capability]:
         Capability(
             name="all_exports",
             available=_all_exports_available(),
-            install_command=_all_exports_install_command(),
-            description="Zarr and RLDS (TFRecord) export formats",
+            install_command=ALL_EXPORTS_INSTALL,
+            description=_all_exports_description(),
         ),
         Capability(
             name="lerobot",

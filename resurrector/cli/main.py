@@ -472,7 +472,7 @@ def export(
         help="Output format. parquet (default), hdf5, csv, numpy "
              "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
              "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports], "
-             "Python 3.10-3.13). "
+             "Python 3.10-3.13, or 3.10-3.12 on Intel macOS). "
              "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
     )] = None,
@@ -556,8 +556,9 @@ def export(
               -o ./lerobot_60hz
 
     Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds need
-    `pip install 'rosbag-resurrector[all-exports]'` (rlds also needs Python
-    3.10-3.13, where the extra can install tensorflow).
+    `pip install 'rosbag-resurrector[all-exports]'` (rlds also needs a Python
+    the extra can install tensorflow for: 3.10-3.13, or 3.10-3.12 on Intel
+    macOS).
     """
     from resurrector.core.export import PRESETS
 
@@ -587,8 +588,8 @@ def export(
                 "`pip install 'rosbag-resurrector\\[lerobot]'` (Python 3.12+) "
                 "for lerobot; `pip install 'rosbag-resurrector\\[all-exports]'` "
                 "for multimodal and rlds (rlds needs tensorflow, which the extra "
-                "installs on Python 3.10-3.13; `resurrector doctor` checks this "
-                "machine).[/dim]"
+                "installs on Python 3.10-3.13, or 3.10-3.12 on Intel macOS; "
+                "`resurrector doctor` checks this machine).[/dim]"
             )
         raise typer.Exit()
 

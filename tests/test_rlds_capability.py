@@ -7,8 +7,10 @@ but not tensorflow, so the capability and the dashboard's RLDS preset read
 "available" and the export then failed, leaving an empty output directory.
 
 Every test fakes the import state through ``sys.modules`` / a meta-path
-finder, so the suite gives the same answers whether or not tensorflow is
-really installed (CI's all-exports job has it; the default job doesn't).
+finder, and pins the interpreter the tensorflow platform table sees
+(``export._running_platform``) wherever wording depends on it, so the suite
+gives the same answers whether or not tensorflow is really installed (CI's
+all-exports job has it; the default job doesn't) and on any host.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import importlib.abc
 import importlib.machinery
 import itertools
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +30,12 @@ from tests.fixtures.generate_test_bags import BagConfig, generate_bag
 
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 EXTRA_CMD = "pip install 'rosbag-resurrector[all-exports]'"
+TF_WHERE = (
+    "Python 3.10-3.13 on x86_64/aarch64 Linux, Apple-silicon macOS or x64 "
+    "Windows, or Python 3.10-3.12 on Intel macOS"
+)
+CAP_BASE = "Zarr and RLDS (TFRecord) export formats"
+BROKEN_TF = "libtensorflow_framework.2.dylib: cannot open shared object file"
 
 
 @pytest.fixture
@@ -41,18 +50,20 @@ def sample_bag(tmp_dir):
 
 
 class _FakeLoader(importlib.abc.Loader):
-    def __init__(self, explode: bool):
-        self.explode = explode
+    def __init__(self, mode: str):
+        self.mode = mode
 
     def create_module(self, spec):
         return None
 
     def exec_module(self, module):
-        if self.explode:
+        if self.mode == "explode":
             raise AssertionError(
                 f"{module.__name__} was imported; availability checks must "
                 "use importlib.util.find_spec instead"
             )
+        if self.mode == "broken":
+            raise ImportError(BROKEN_TF)
 
 
 class _FakeFinder(importlib.abc.MetaPathFinder):
@@ -60,12 +71,15 @@ class _FakeFinder(importlib.abc.MetaPathFinder):
 
     ``importable`` modules import as empty stubs. ``exploding`` modules are
     findable but raise if anything actually imports them, which is how a
-    test proves a check never paid for ``import tensorflow``.
+    test proves a check never paid for ``import tensorflow``. ``broken``
+    modules are findable but raise ImportError on import, like a
+    tensorflow whose native library is missing.
     """
 
-    def __init__(self, importable=(), exploding=()):
-        self.loaders = {n: _FakeLoader(False) for n in importable}
-        self.loaders.update({n: _FakeLoader(True) for n in exploding})
+    def __init__(self, importable=(), exploding=(), broken=()):
+        self.loaders = {n: _FakeLoader("ok") for n in importable}
+        self.loaders.update({n: _FakeLoader("explode") for n in exploding})
+        self.loaders.update({n: _FakeLoader("broken") for n in broken})
 
     def find_spec(self, fullname, path=None, target=None):
         loader = self.loaders.get(fullname)
@@ -76,10 +90,10 @@ class _FakeFinder(importlib.abc.MetaPathFinder):
 
 @pytest.fixture
 def deps(monkeypatch):
-    """``deps(installed=..., missing=..., no_import=...)`` fakes module state."""
+    """``deps(installed=..., missing=..., no_import=..., broken=...)`` fakes module state."""
 
-    def _set(installed=(), missing=(), no_import=()):
-        for name in (*installed, *no_import):
+    def _set(installed=(), missing=(), no_import=(), broken=()):
+        for name in (*installed, *no_import, *broken):
             # setitem records the original entry (or its absence) so a stub
             # imported during the test never leaks into later tests.
             monkeypatch.setitem(sys.modules, name, None)
@@ -87,19 +101,35 @@ def deps(monkeypatch):
         for name in missing:
             # A None entry makes find_spec return None and import raise.
             monkeypatch.setitem(sys.modules, name, None)
-        finder = _FakeFinder(importable=installed, exploding=no_import)
+        finder = _FakeFinder(importable=installed, exploding=no_import, broken=broken)
         monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
 
     return _set
 
 
 @pytest.fixture
-def tf_platform(monkeypatch):
-    """``tf_platform(True/False)`` pins whether tensorflow ships wheels here."""
+def platform_as(monkeypatch):
+    """``platform_as((3, 12), "Darwin", "x86_64")`` pins the interpreter the
+    tensorflow platform table (and every message built from it) sees."""
     from resurrector.core import export
 
+    def _set(python, system, machine):
+        monkeypatch.setattr(export, "_running_platform", lambda: (python, system, machine))
+
+    return _set
+
+
+SUPPORTED = ((3, 12), "Linux", "x86_64")
+UNSUPPORTED = ((3, 14), "Linux", "x86_64")  # no stable cp314 tensorflow wheel
+
+
+@pytest.fixture
+def tf_platform(platform_as):
+    """``tf_platform(True/False)``: a platform where [all-exports] does /
+    doesn't install tensorflow (Linux x86_64 on Python 3.12 / 3.14)."""
+
     def _set(supported: bool):
-        monkeypatch.setattr(export, "tensorflow_wheels_available", lambda *a, **k: supported)
+        platform_as(*(SUPPORTED if supported else UNSUPPORTED))
 
     return _set
 
@@ -121,15 +151,20 @@ class TestAllExportsExtra:
         assert "tensorflow" in names, names
 
     def test_tensorflow_marker_matches_runtime_platform_table(self):
-        """The pyproject marker decides where pip installs tensorflow; the
-        runtime table decides what `doctor` / the dashboard say. Would catch
-        the two drifting apart (e.g. a Python bump in one but not the other,
-        which would tell users to install an extra that can't deliver)."""
+        """The pyproject markers decide where pip installs tensorflow (and
+        tensorflow-datasets); the runtime table decides what `doctor` / the
+        dashboard say. Would catch the two drifting apart (e.g. a Python
+        bump in one but not the other, which would tell users to install an
+        extra that can't deliver)."""
         from packaging.markers import default_environment
         from resurrector.core.export import tensorflow_wheels_available
 
-        tf_req = next(r for r in _all_exports_requirements() if r.name == "tensorflow")
-        assert tf_req.marker is not None, "tensorflow must be marker-gated so installs never break"
+        reqs = _all_exports_requirements()
+        tf_reqs = [r for r in reqs if r.name == "tensorflow"]
+        tfds_req = next(r for r in reqs if r.name == "tensorflow-datasets")
+        assert all(r.marker is not None for r in [*tf_reqs, tfds_req]), (
+            "tensorflow must be marker-gated so installs don't break where it has no wheel"
+        )
 
         platforms = [
             ("Linux", "x86_64"), ("Linux", "aarch64"), ("Linux", "ppc64le"),
@@ -143,9 +178,11 @@ class TestAllExportsExtra:
                 python_version=f"3.{minor}", python_full_version=f"3.{minor}.0",
                 platform_system=system, platform_machine=machine,
             )
-            assert tf_req.marker.evaluate(env) == tensorflow_wheels_available(
-                (3, minor), system, machine,
-            ), (minor, system, machine)
+            expected = tensorflow_wheels_available((3, minor), system, machine)
+            applicable = [r for r in tf_reqs if r.marker.evaluate(env)]
+            assert bool(applicable) == expected, (minor, system, machine)
+            assert len(applicable) <= 1, (minor, system, machine)  # never two ranges at once
+            assert tfds_req.marker.evaluate(env) == expected, (minor, system, machine)
 
     def test_no_prerelease_only_python_is_admitted(self):
         """tensorflow 2.21 (latest stable) ships cp310-cp313. On 3.14 pip
@@ -154,7 +191,79 @@ class TestAllExportsExtra:
         from resurrector.core.export import tensorflow_wheels_available
         assert tensorflow_wheels_available((3, 13), "Linux", "x86_64")
         assert not tensorflow_wheels_available((3, 14), "Linux", "x86_64")
-        assert not tensorflow_wheels_available((3, 12), "Darwin", "x86_64")
+
+    def test_intel_macos_admitted_through_python_312(self):
+        """tensorflow 2.16.2, its last Intel-macOS release, ships
+        macosx_10_15_x86_64 wheels for cp310-cp312 and resolves with this
+        package's numpy>=1.24 (it pins numpy<2). Would catch: Intel macOS
+        being excluded (and told tensorflow has no release for it) when the
+        extra can install it."""
+        from resurrector.core.export import tensorflow_wheels_available
+        assert tensorflow_wheels_available((3, 10), "Darwin", "x86_64")
+        assert tensorflow_wheels_available((3, 12), "Darwin", "x86_64")
+        assert not tensorflow_wheels_available((3, 13), "Darwin", "x86_64")
+
+    def test_intel_macos_requirement_pins_the_last_intel_release(self):
+        """Wheels for Intel macOS stop at 2.16, so its line must admit 2.16
+        and nothing newer (pip would otherwise backtrack through every later
+        release looking for an Intel wheel)."""
+        from packaging.markers import default_environment
+        env = default_environment()
+        env.update(
+            python_version="3.12", python_full_version="3.12.0",
+            platform_system="Darwin", platform_machine="x86_64",
+        )
+        (req,) = [
+            r for r in _all_exports_requirements()
+            if r.name == "tensorflow" and r.marker.evaluate(env)
+        ]
+        assert req.specifier.contains("2.16.2")
+        assert not req.specifier.contains("2.17.0")
+
+
+class TestPlatformMessages:
+    """Exact wording, per platform, of what `doctor`, the export pre-flight,
+    the CLI and /api/export-presets say about a missing tensorflow."""
+
+    @pytest.mark.parametrize("python", [(3, 10), (3, 12)])
+    def test_intel_macos_is_pointed_at_the_extra(self, deps, platform_as, python):
+        """Would catch: every surface telling an Intel-macOS user on Python
+        3.10-3.12 that tensorflow 'has no stable release' there, when
+        tensorflow 2.16 ships Intel wheels and the extra installs it."""
+        from resurrector.cli import doctor
+        from resurrector.core import export
+        deps(missing=("tensorflow",))
+        platform_as(python, "Darwin", "x86_64")
+        assert export.tensorflow_missing_detail() == "tensorflow isn't installed"
+        assert export.tensorflow_install_hint() == EXTRA_CMD
+        assert export.export_dependency_problem("rlds") == (
+            f"RLDS export needs tensorflow, which isn't installed. Install with: {EXTRA_CMD}"
+        )
+        row = doctor._check_rlds()
+        assert (row.status, row.detail, row.fix_hint) == (
+            "warn", "tensorflow isn't installed", EXTRA_CMD,
+        )
+
+    @pytest.mark.parametrize("plat, label", [
+        (((3, 13), "Darwin", "x86_64"), "Python 3.13 on Intel macOS"),
+        (((3, 14), "Darwin", "arm64"), "Python 3.14 on Apple-silicon macOS"),
+        (((3, 14), "Linux", "x86_64"), "Python 3.14 on Linux x86_64"),
+        (((3, 12), "Windows", "ARM64"), "Python 3.12 on Windows ARM64"),
+    ])
+    def test_unsupported_platform_wording(self, deps, platform_as, plat, label):
+        from resurrector.cli import doctor
+        from resurrector.core import export
+        deps(missing=("tensorflow",))
+        platform_as(*plat)
+        detail = f"tensorflow publishes no stable wheel for {label}"
+        hint = f"Use {TF_WHERE}, then: {EXTRA_CMD}"
+        assert export.tensorflow_missing_detail() == detail
+        assert export.tensorflow_install_hint() == hint
+        assert export.export_dependency_problem("rlds") == (
+            f"RLDS export needs tensorflow, which publishes no stable wheel for {label}. {hint}"
+        )
+        row = doctor._check_rlds()
+        assert (row.detail, row.fix_hint) == (detail, hint)
 
 
 # ---------------------------------------------------------------- capability
@@ -178,25 +287,60 @@ class TestAllExportsCapability:
         assert get_capabilities()["all_exports"].available is True
         assert "tensorflow" not in sys.modules
 
-    def test_unsupported_platform_says_why(self, deps, tf_platform):
-        """Would catch: telling a Python 3.14 user to install an extra that
-        can't install tensorflow on their interpreter."""
-        from resurrector.core.capabilities import get_capabilities
-        deps(installed=("zarr",), missing=("tensorflow",))
-        tf_platform(False)
-        cmd = get_capabilities()["all_exports"].install_command
-        assert "tensorflow" in cmd and "3.10-3.13" in cmd
-        assert "'rosbag-resurrector[all-exports]'" in cmd
-
-    def test_unsupported_platform_still_offers_zarr(self, deps, tf_platform):
-        """Would catch: a Zarr-only user on Python 3.14 being told to switch
-        Python when the extra would install zarr fine."""
+    def test_unsupported_platform_explains_in_description(self, deps, tf_platform):
+        """Would catch: telling a Python 3.14 user only to install an extra
+        that can't install tensorflow on their interpreter. The reason goes
+        in ``description``; ``install_command`` stays the pip command, which
+        still delivers Zarr."""
         from resurrector.core.capabilities import get_capabilities
         deps(missing=("zarr", "tensorflow"))
         tf_platform(False)
-        cmd = get_capabilities()["all_exports"].install_command
-        assert cmd.startswith(EXTRA_CMD) and "Zarr only" in cmd
-        assert "3.10-3.13" in cmd
+        cap = get_capabilities()["all_exports"]
+        assert cap.install_command == EXTRA_CMD
+        assert cap.description == (
+            f"{CAP_BASE}. On this interpreter the extra installs Zarr only: "
+            "tensorflow publishes no stable wheel for Python 3.14 on Linux x86_64. "
+            f"For RLDS, use {TF_WHERE}."
+        )
+
+    @pytest.mark.parametrize("tf", ["installed", "missing"])
+    @pytest.mark.parametrize("zarr", ["installed", "missing"])
+    @pytest.mark.parametrize("plat", [
+        ((3, 12), "Linux", "x86_64"),
+        ((3, 12), "Darwin", "x86_64"),
+        ((3, 13), "Darwin", "x86_64"),
+        ((3, 13), "Darwin", "arm64"),
+        ((3, 14), "Linux", "x86_64"),
+        ((3, 12), "Windows", "ARM64"),
+    ], ids=lambda p: f"py{p[0][0]}{p[0][1]}-{p[1]}-{p[2]}")
+    def test_install_command_is_always_a_runnable_command(
+        self, deps, platform_as, plat, zarr, tf,
+    ):
+        """Would catch: prose such as "(Zarr only on this platform). RLDS
+        export needs ..." in install_command. The dashboard renders it in a
+        copy block, so pasting it into a shell was a syntax error."""
+        from resurrector.core.capabilities import get_capabilities
+        from resurrector.core.export import tensorflow_wheels_available
+        deps(
+            installed=("zarr",) if zarr == "installed" else (),
+            no_import=("tensorflow",) if tf == "installed" else (),
+            missing=tuple(
+                name for name, state in (("zarr", zarr), ("tensorflow", tf))
+                if state == "missing"
+            ),
+        )
+        platform_as(*plat)
+        cap = get_capabilities()["all_exports"]
+        assert cap.install_command == EXTRA_CMD
+        assert shlex.split(cap.install_command) == [
+            "pip", "install", "rosbag-resurrector[all-exports]",
+        ]
+        assert not any(c in cap.install_command for c in "()\n.:")
+        assert cap.available is (zarr == "installed" and tf == "installed")
+        if tf == "missing" and not tensorflow_wheels_available(*plat):
+            assert cap.description.startswith(f"{CAP_BASE}. On this interpreter")
+        else:
+            assert cap.description == CAP_BASE
 
 
 class TestExportPresetsEndpoint:
@@ -248,13 +392,12 @@ class TestExportPreflight:
     def test_rlds_reason_on_unsupported_python(self, deps, tf_platform, tmp_dir, sample_bag):
         deps(missing=("tensorflow",))
         tf_platform(False)
-        v = sys.version_info
         with pytest.raises(ImportError) as ei:
             BagFrame(sample_bag).export(
                 topics=["/imu/data"], format="rlds", output=str(tmp_dir / "o"),
             )
         msg = str(ei.value)
-        assert f"Python {v[0]}.{v[1]}" in msg and "3.10-3.13" in msg
+        assert "Python 3.14 on Linux x86_64" in msg and TF_WHERE in msg
 
     def test_zarr_without_zarr_creates_nothing(self, deps, tmp_dir, sample_bag):
         deps(missing=("zarr",))
@@ -294,6 +437,39 @@ class TestExportPreflight:
         assert not (tmp_dir / "datasets").exists()
 
 
+class TestRldsWriterImportError:
+    """``_stream_rlds`` raises its own ImportError. Exporter.export's
+    pre-flight normally fires first, so without calling the writer directly
+    a regression in its message survives every other test."""
+
+    def test_names_the_extra(self, deps, tf_platform, tmp_dir):
+        """Would catch: the writer reverting to the 0.8.4 text ("the
+        [all-exports] extra does not install [tensorflow]. Install with: pip
+        install tensorflow"), wrong now that the extra carries it."""
+        from resurrector.core.export import _stream_rlds
+        deps(missing=("tensorflow",))
+        tf_platform(True)
+        out = tmp_dir / "rlds_out"
+        with pytest.raises(ImportError) as ei:
+            _stream_rlds(iter(()), out, "episode", total_rows=0)
+        assert str(ei.value) == (
+            f"RLDS export needs tensorflow, which isn't installed. Install with: {EXTRA_CMD}"
+        )
+        assert not out.exists()
+
+    def test_broken_install_reports_the_import_failure(self, deps, tmp_dir):
+        """find_spec sees tensorflow, so there's no packaging reason to give;
+        the writer must pass the real import error through instead of None."""
+        from resurrector.core.export import _stream_rlds
+        deps(broken=("tensorflow",))
+        out = tmp_dir / "rlds_out"
+        with pytest.raises(ImportError) as ei:
+            _stream_rlds(iter(()), out, "episode", total_rows=0)
+        assert str(ei.value) == f"RLDS export needs tensorflow, which failed to import: {BROKEN_TF}"
+        assert str(ei.value.__cause__) == BROKEN_TF
+        assert not out.exists()
+
+
 # ---------------------------------------------------------------- doctor + CLI
 
 class TestDoctorRldsRow:
@@ -313,9 +489,8 @@ class TestDoctorRldsRow:
         deps(missing=("tensorflow",))
         tf_platform(False)
         row = doctor._check_rlds()
-        v = sys.version_info
-        assert f"Python {v[0]}.{v[1]}" in row.detail
-        assert "3.10-3.13" in row.fix_hint and "'rosbag-resurrector[all-exports]'" in row.fix_hint
+        assert "Python 3.14 on Linux x86_64" in row.detail
+        assert TF_WHERE in row.fix_hint and row.fix_hint.endswith(EXTRA_CMD)
 
     def test_pass_without_importing_tensorflow(self, deps):
         from resurrector.cli import doctor

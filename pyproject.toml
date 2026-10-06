@@ -58,15 +58,22 @@ Changelog = "https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/CHA
 
 [project.optional-dependencies]
 ros1 = ["rosbags>=0.9.0"]
-# RLDS writes TFRecords with tensorflow. The marker lists where tensorflow
-# publishes stable wheels (2.21: cp310-cp313) so the extra never fails to
-# resolve; elsewhere it installs zarr only and RLDS reports why it's
-# unavailable. Keep it in sync with TENSORFLOW_PLATFORMS /
-# TENSORFLOW_MAX_PYTHON in resurrector/core/export.py (a test checks).
+# RLDS writes TFRecords with tensorflow, so the extra installs it wherever
+# tensorflow publishes a stable wheel: 2.18+ (2.21 ships cp310-cp313) on
+# Linux x86_64/aarch64, Apple-silicon macOS and Windows x64, and 2.16 on
+# Intel macOS (cp310-cp312; its last Intel release, which pins numpy<2).
+# Elsewhere (Python 3.14, Linux ppc64le, Windows ARM64, ...) the markers
+# skip tensorflow, the extra installs zarr only, and RLDS reports why it's
+# unavailable. That keeps the extra resolvable on glibc Linux, macOS and
+# Windows; markers can't tell musl from glibc, so on musl Linux (Alpine)
+# pip finds no tensorflow wheel and the install fails.
+# Keep these markers in sync with TENSORFLOW_PLATFORMS in
+# resurrector/core/export.py (a test checks).
 all-exports = [
     "zarr>=2.16.0",
     "tensorflow>=2.18; python_version < '3.14' and ((platform_system == 'Linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (platform_system == 'Darwin' and platform_machine == 'arm64') or (platform_system == 'Windows' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')))",
-    "tensorflow-datasets>=4.9.0; python_version < '3.14' and ((platform_system == 'Linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (platform_system == 'Darwin' and platform_machine == 'arm64') or (platform_system == 'Windows' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')))",
+    "tensorflow>=2.16,<2.17; python_version < '3.13' and platform_system == 'Darwin' and platform_machine == 'x86_64'",
+    "tensorflow-datasets>=4.9.0; (python_version < '3.14' and ((platform_system == 'Linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (platform_system == 'Darwin' and platform_machine == 'arm64') or (platform_system == 'Windows' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')))) or (python_version < '3.13' and platform_system == 'Darwin' and platform_machine == 'x86_64')",
 ]
 vision-lite = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0"]
 vision = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0", "sentence-transformers>=2.2.0"]

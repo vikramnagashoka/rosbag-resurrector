@@ -22,7 +22,8 @@ import platform
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -43,27 +44,35 @@ NUMPY_HARD_CAP = 1_000_000
 
 ALL_EXPORTS_INSTALL = "pip install 'rosbag-resurrector[all-exports]'"
 
-# Where tensorflow (the RLDS writer's dependency) publishes stable wheels:
-# tensorflow 2.21 ships cp310-cp313 for exactly these (system, machine)
-# pairs. The tensorflow requirement in pyproject.toml's [all-exports] extra
-# carries the same table as its environment marker, so pip never tries to
-# build tensorflow where no wheel exists; tests/test_rlds_capability.py
-# fails if the two drift. Python 3.14 stays out until a stable cp314 wheel
-# ships, because pip would otherwise fall back to a release candidate.
-# Intel macOS wheels stopped at 2.16, which pins numpy<2, so it's out too.
-TENSORFLOW_MAX_PYTHON = (3, 13)
-TENSORFLOW_PLATFORMS = frozenset({
-    ("Linux", "x86_64"),
-    ("Linux", "aarch64"),
-    ("Darwin", "arm64"),
+# Where tensorflow (the RLDS writer's dependency) publishes stable wheels,
+# as (system, machine) -> newest Python with one. pyproject.toml's
+# [all-exports] extra carries the same table as environment markers on its
+# tensorflow lines, so pip never tries to build tensorflow where no wheel
+# exists; tests/test_rlds_capability.py fails if the two drift. Python 3.14
+# stays out until a stable cp314 wheel ships, because pip would otherwise
+# fall back to a release candidate.
+TENSORFLOW_PLATFORMS: Mapping[tuple[str, str], tuple[int, int]] = MappingProxyType({
+    # tensorflow 2.21 ships cp310-cp313 here.
+    ("Linux", "x86_64"): (3, 13),
+    ("Linux", "aarch64"): (3, 13),
+    ("Darwin", "arm64"): (3, 13),
     # CPython on Windows reports AMD64; uv's cross-platform resolver uses x86_64.
-    ("Windows", "AMD64"),
-    ("Windows", "x86_64"),
+    ("Windows", "AMD64"): (3, 13),
+    ("Windows", "x86_64"): (3, 13),
+    # Intel macOS stopped at 2.16 (cp310-cp312), which pins numpy<2; the
+    # extra caps tensorflow at <2.17 there.
+    ("Darwin", "x86_64"): (3, 12),
 })
-_TENSORFLOW_WHERE = (
-    "Python 3.10-3.13 on Linux (x86_64, aarch64), macOS (Apple silicon), "
-    "or Windows (x64)"
+TENSORFLOW_WHERE = (
+    "Python 3.10-3.13 on x86_64/aarch64 Linux, Apple-silicon macOS or x64 "
+    "Windows, or Python 3.10-3.12 on Intel macOS"
 )
+
+
+def _running_platform() -> tuple[tuple[int, int], str, str]:
+    """``(python, system, machine)`` for this interpreter, as pip's
+    environment markers see it. Tests pin it to check other platforms."""
+    return (sys.version_info[0], sys.version_info[1]), platform.system(), platform.machine()
 
 
 def tensorflow_wheels_available(
@@ -76,30 +85,33 @@ def tensorflow_wheels_available(
     Each argument defaults to the running interpreter (``platform.system()``
     / ``platform.machine()``, the same values pip's markers read).
     """
-    python = tuple(python or sys.version_info[:2])
-    system = system or platform.system()
-    machine = machine or platform.machine()
-    return python[:2] <= TENSORFLOW_MAX_PYTHON and (system, machine) in TENSORFLOW_PLATFORMS
+    here_python, here_system, here_machine = _running_platform()
+    python = tuple(python or here_python)
+    max_python = TENSORFLOW_PLATFORMS.get((system or here_system, machine or here_machine))
+    return max_python is not None and python[:2] <= max_python
 
 
 def tensorflow_install_hint() -> str:
-    """Copy-pasteable fix for a missing tensorflow, honest about platforms
-    where the extra can't install it."""
+    """How to get tensorflow: the extra's pip command, or, where the extra
+    can't install it, which interpreter to switch to first. That second
+    form is prose, so it belongs in messages and `doctor`'s fix column,
+    never in a capability's ``install_command``."""
     if tensorflow_wheels_available():
         return ALL_EXPORTS_INSTALL
-    return f"Use {_TENSORFLOW_WHERE}, then: {ALL_EXPORTS_INSTALL}"
+    return f"Use {TENSORFLOW_WHERE}, then: {ALL_EXPORTS_INSTALL}"
 
 
 def _tensorflow_gap() -> str:
     # Phrased to follow "tensorflow, which ..." / "tensorflow ...".
     if tensorflow_wheels_available():
         return "isn't installed"
-    v = sys.version_info
-    system = {"Darwin": "macOS"}.get(platform.system(), platform.system())
-    return (
-        f"has no stable release for Python {v[0]}.{v[1]} "
-        f"on {system} {platform.machine()}"
-    )
+    (major, minor), system, machine = _running_platform()
+    if system == "Darwin":
+        where = {"x86_64": "Intel macOS", "arm64": "Apple-silicon macOS"}.get(
+            machine, f"macOS {machine}")
+    else:
+        where = f"{system} {machine}"
+    return f"publishes no stable wheel for Python {major}.{minor} on {where}"
 
 
 def tensorflow_missing_detail() -> str:
@@ -424,8 +436,8 @@ class Exporter:
             format: ``parquet`` (default), ``hdf5``, ``csv``, ``numpy``,
                 ``zarr`` (needs ``[all-exports]``), ``lerobot`` (needs
                 ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
-                ``[all-exports]``, which installs tensorflow on Python
-                3.10-3.13; see :func:`tensorflow_wheels_available`).
+                ``[all-exports]``, which installs tensorflow where it
+                ships wheels; see :data:`TENSORFLOW_PLATFORMS`).
             output_dir: Directory to write into. Created if missing.
             sync: When True (and 2+ topics), time-align via
                 :meth:`BagFrame.sync` before exporting; the result is

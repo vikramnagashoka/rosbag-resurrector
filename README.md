@@ -201,7 +201,7 @@ pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search 
 pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
 pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
 pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
-pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13)
+pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13, 3.10-3.12 on Intel macOS)
 pip install 'rosbag-resurrector[lerobot]'       # LeRobot v3 export (Python 3.12+, pulls torch)
 pip install 'rosbag-resurrector[ros1]'          # ROS 1 .bag support via rosbags
 ```
@@ -505,7 +505,7 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
-LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). Zarr and RLDS need `pip install 'rosbag-resurrector[all-exports]'`. RLDS writes TFRecords with tensorflow, which the extra installs only where tensorflow publishes stable wheels: Python 3.10-3.13 on Linux (x86_64, aarch64), Apple-silicon macOS, and Windows x64. Elsewhere (Python 3.14, Intel macOS) the extra installs Zarr only, and `resurrector doctor` and the dashboard say why RLDS is unavailable.
+LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). Zarr and RLDS need `pip install 'rosbag-resurrector[all-exports]'`. RLDS writes TFRecords with tensorflow, which the extra installs only where tensorflow publishes stable wheels: Python 3.10-3.13 on Linux (x86_64, aarch64), Apple-silicon macOS, and Windows x64, and Python 3.10-3.12 on Intel macOS, where it installs tensorflow 2.16 (the last Intel-macOS release, which needs numpy below 2). Elsewhere (Python 3.14, for one) the extra installs Zarr only, and `resurrector doctor` says why RLDS is unavailable.
 
 **How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips test exports through `LeRobotDataset` and checks frame values against the source bag.
 
