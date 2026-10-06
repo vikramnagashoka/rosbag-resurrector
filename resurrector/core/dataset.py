@@ -342,6 +342,8 @@ class DatasetManager:
 
         Raises:
             KeyError: If the dataset or version doesn't exist.
+            ImportError: The export format's optional dependency is
+                missing (raised before anything is written).
 
         Example::
 
@@ -349,7 +351,7 @@ class DatasetManager:
             print(out)            # ./datasets/pick-place/1.0
         """
         from resurrector.core.bag_frame import BagFrame
-        from resurrector.core.export import Exporter
+        from resurrector.core.export import Exporter, require_export_dependencies
 
         ds = self._get_dataset_by_name(dataset_name)
         if ds is None:
@@ -362,6 +364,7 @@ class DatasetManager:
         config = json.loads(ver["config_json"])
         metadata = json.loads(ver["metadata_json"]) if ver["metadata_json"] else {}
 
+        require_export_dependencies(config.get("export_format", "parquet"))
         output_path = Path(output_dir) / dataset_name / version
         output_path.mkdir(parents=True, exist_ok=True)
 

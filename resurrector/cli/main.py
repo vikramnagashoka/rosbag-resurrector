@@ -471,7 +471,8 @@ def export(
     format: Annotated[Optional[str], typer.Option("--format", "-f",
         help="Output format. parquet (default), hdf5, csv, numpy "
              "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
-             "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports]). "
+             "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports], "
+             "Python 3.10-3.13). "
              "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
     )] = None,
@@ -555,7 +556,8 @@ def export(
               -o ./lerobot_60hz
 
     Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds need
-    `pip install 'rosbag-resurrector[all-exports]'`.
+    `pip install 'rosbag-resurrector[all-exports]'` (rlds also needs Python
+    3.10-3.13, where the extra can install tensorflow).
     """
     from resurrector.core.export import PRESETS
 
@@ -584,7 +586,9 @@ def export(
                 "\n[dim]Extras required for some presets: "
                 "`pip install 'rosbag-resurrector\\[lerobot]'` (Python 3.12+) "
                 "for lerobot; `pip install 'rosbag-resurrector\\[all-exports]'` "
-                "for multimodal and rlds (rlds also needs `pip install tensorflow`).[/dim]"
+                "for multimodal and rlds (rlds needs tensorflow, which the extra "
+                "installs on Python 3.10-3.13; `resurrector doctor` checks this "
+                "machine).[/dim]"
             )
         raise typer.Exit()
 
@@ -2061,7 +2065,8 @@ def doctor():
     Two tables: "Core install" (Python version, MCAP parser, DuckDB
     index, Polars, FastAPI — all required and bundled) and "Optional
     extras" (image parsing, video export, CLIP local + OpenAI search,
-    live ROS 2 bridge, watch mode, Zarr export, mcap CLI, ros2 CLI).
+    live ROS 2 bridge, watch mode, Zarr / LeRobot / RLDS export, mcap CLI,
+    ros2 CLI).
     Each row tells you exactly what to install if missing — for example:
 
       pip install 'rosbag-resurrector[vision]'

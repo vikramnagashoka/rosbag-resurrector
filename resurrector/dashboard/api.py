@@ -644,29 +644,27 @@ async def get_synced_data(
 async def list_export_presets() -> list[dict[str, Any]]:
     """Return the registered export presets for the dashboard's preset picker.
 
-    Each entry has the same shape as ``ExportPreset`` plus a flag
-    ``available`` indicating whether the required pip extras are installed
-    (e.g. ``zarr`` / ``rlds`` need ``[all-exports]``).
+    Each entry has the same shape as ``ExportPreset`` plus ``available``
+    (the preset's format can run on this install) and
+    ``unavailable_reason`` (``None``, or why not). Availability is per
+    format, not per extra: ``[all-exports]`` installs zarr everywhere but
+    tensorflow only where it ships wheels, so ``multimodal`` (Zarr) can be
+    available while ``rlds`` is not.
 
     Used by ExportDialog to populate the preset dropdown and disable
-    presets whose required extras are missing on this install.
+    presets whose dependencies are missing on this install.
     """
-    from resurrector.core.export import list_presets
+    from resurrector.core.export import export_dependency_problem, list_presets
 
-    def _extra_available(extra: str) -> bool:
-        if extra == "lerobot":
-            from resurrector.core.lerobot_export import lerobot_available
-            return lerobot_available()
-        if extra == "all-exports":
-            try:
-                import zarr  # noqa: F401
-                return True
-            except ImportError:
-                return False
-        return True  # Unknown extras default to available
+    def _unavailable_reason(fmt: str) -> str | None:
+        if fmt == "lerobot":
+            from resurrector.core.lerobot_export import INSTALL_HINT, lerobot_available
+            return None if lerobot_available() else INSTALL_HINT
+        return export_dependency_problem(fmt)
 
     out: list[dict[str, Any]] = []
     for p in list_presets():
+        reason = _unavailable_reason(p.format)
         out.append({
             "name": p.name,
             "format": p.format,
@@ -676,7 +674,8 @@ async def list_export_presets() -> list[dict[str, Any]]:
             "topic_filter": p.topic_filter,
             "description": p.description,
             "extras_required": list(p.extras_required),
-            "available": all(_extra_available(e) for e in p.extras_required),
+            "available": reason is None,
+            "unavailable_reason": reason,
         })
     return out
 

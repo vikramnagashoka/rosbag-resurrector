@@ -16,7 +16,10 @@ requires materializing every column. We hard-cap NumPy export at
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import platform
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
@@ -37,6 +40,107 @@ CHUNK_SIZE = 50_000
 # compression buffers easily exceed 1 GB. Refuse early with a clear
 # error pointing to Parquet, which streams.
 NUMPY_HARD_CAP = 1_000_000
+
+ALL_EXPORTS_INSTALL = "pip install 'rosbag-resurrector[all-exports]'"
+
+# Where tensorflow (the RLDS writer's dependency) publishes stable wheels:
+# tensorflow 2.21 ships cp310-cp313 for exactly these (system, machine)
+# pairs. The tensorflow requirement in pyproject.toml's [all-exports] extra
+# carries the same table as its environment marker, so pip never tries to
+# build tensorflow where no wheel exists; tests/test_rlds_capability.py
+# fails if the two drift. Python 3.14 stays out until a stable cp314 wheel
+# ships, because pip would otherwise fall back to a release candidate.
+# Intel macOS wheels stopped at 2.16, which pins numpy<2, so it's out too.
+TENSORFLOW_MAX_PYTHON = (3, 13)
+TENSORFLOW_PLATFORMS = frozenset({
+    ("Linux", "x86_64"),
+    ("Linux", "aarch64"),
+    ("Darwin", "arm64"),
+    # CPython on Windows reports AMD64; uv's cross-platform resolver uses x86_64.
+    ("Windows", "AMD64"),
+    ("Windows", "x86_64"),
+})
+_TENSORFLOW_WHERE = (
+    "Python 3.10-3.13 on Linux (x86_64, aarch64), macOS (Apple silicon), "
+    "or Windows (x64)"
+)
+
+
+def tensorflow_wheels_available(
+    python: tuple[int, int] | None = None,
+    system: str | None = None,
+    machine: str | None = None,
+) -> bool:
+    """True when ``[all-exports]`` installs tensorflow on this interpreter.
+
+    Each argument defaults to the running interpreter (``platform.system()``
+    / ``platform.machine()``, the same values pip's markers read).
+    """
+    python = tuple(python or sys.version_info[:2])
+    system = system or platform.system()
+    machine = machine or platform.machine()
+    return python[:2] <= TENSORFLOW_MAX_PYTHON and (system, machine) in TENSORFLOW_PLATFORMS
+
+
+def tensorflow_install_hint() -> str:
+    """Copy-pasteable fix for a missing tensorflow, honest about platforms
+    where the extra can't install it."""
+    if tensorflow_wheels_available():
+        return ALL_EXPORTS_INSTALL
+    return f"Use {_TENSORFLOW_WHERE}, then: {ALL_EXPORTS_INSTALL}"
+
+
+def _tensorflow_gap() -> str:
+    # Phrased to follow "tensorflow, which ..." / "tensorflow ...".
+    if tensorflow_wheels_available():
+        return "isn't installed"
+    v = sys.version_info
+    system = {"Darwin": "macOS"}.get(platform.system(), platform.system())
+    return (
+        f"has no stable release for Python {v[0]}.{v[1]} "
+        f"on {system} {platform.machine()}"
+    )
+
+
+def tensorflow_missing_detail() -> str:
+    """Why tensorflow is absent: not installed, or no wheel for this platform."""
+    return f"tensorflow {_tensorflow_gap()}"
+
+
+def _module_installed(name: str) -> bool:
+    # find_spec locates the package without executing it; importing
+    # tensorflow just to answer "is it there?" costs seconds.
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def export_dependency_problem(format: str) -> str | None:
+    """Why ``format`` can't be exported with this install, or ``None``.
+
+    Covers the ``[all-exports]`` formats (``zarr``, ``rlds``). Uses
+    ``find_spec`` only, so it is cheap enough for every dashboard request
+    and never imports tensorflow. LeRobot is checked by
+    :func:`resurrector.core.lerobot_export.export_lerobot` itself.
+    """
+    if format == "zarr" and not _module_installed("zarr"):
+        return f"Zarr export requires the zarr package. Install with: {ALL_EXPORTS_INSTALL}"
+    if format == "rlds" and not _module_installed("tensorflow"):
+        hint = tensorflow_install_hint()
+        if hint == ALL_EXPORTS_INSTALL:
+            hint = f"Install with: {hint}"
+        return f"RLDS export needs tensorflow, which {_tensorflow_gap()}. {hint}"
+    return None
+
+
+def require_export_dependencies(format: str) -> None:
+    """Raise ``ImportError`` before any output is written if ``format``'s
+    optional dependency is missing, so a failed export leaves no empty
+    directory behind."""
+    problem = export_dependency_problem(format)
+    if problem:
+        raise ImportError(problem)
 
 
 @dataclass(frozen=True)
@@ -320,7 +424,8 @@ class Exporter:
             format: ``parquet`` (default), ``hdf5``, ``csv``, ``numpy``,
                 ``zarr`` (needs ``[all-exports]``), ``lerobot`` (needs
                 ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
-                ``[all-exports]``).
+                ``[all-exports]``, which installs tensorflow on Python
+                3.10-3.13; see :func:`tensorflow_wheels_available`).
             output_dir: Directory to write into. Created if missing.
             sync: When True (and 2+ topics), time-align via
                 :meth:`BagFrame.sync` before exporting; the result is
@@ -340,8 +445,11 @@ class Exporter:
         Raises:
             LargeTopicError: If ``format == "numpy"`` and a topic has
                 more than ``NUMPY_HARD_CAP`` rows.
+            ImportError: The format's optional dependency is missing.
+                Raised before ``output_dir`` is created.
             ValueError: For unknown format strings.
         """
+        require_export_dependencies(format)
         output_path = Path(output_dir)
 
         if format == "lerobot":
@@ -771,11 +879,13 @@ def _stream_rlds(
     """
     try:
         import tensorflow as tf
-    except ImportError:
+    except ImportError as e:
+        # find_spec can see a tensorflow that still fails to import (a
+        # broken install), in which case there's no packaging reason to give.
         raise ImportError(
-            "RLDS export requires tensorflow, which the [all-exports] extra "
-            "does not install. Install with: pip install tensorflow"
-        )
+            export_dependency_problem("rlds")
+            or f"RLDS export needs tensorflow, which failed to import: {e}"
+        ) from e
 
     output_path.mkdir(parents=True, exist_ok=True)
     filepath = output_path / f"{name}.tfrecord"
@@ -844,8 +954,7 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         import zarr
     except ImportError:
         raise ImportError(
-            "Zarr export requires the zarr package. "
-            "Install with: pip install 'rosbag-resurrector[all-exports]'"
+            f"Zarr export requires the zarr package. Install with: {ALL_EXPORTS_INSTALL}"
         )
 
     filepath = output_path / f"{name}.zarr"

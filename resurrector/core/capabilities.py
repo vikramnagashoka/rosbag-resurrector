@@ -59,13 +59,31 @@ def _bridge_live_available() -> bool:
 
 
 def _all_exports_available() -> bool:
-    """Available means both zarr AND tensorflow-datasets are importable."""
-    try:
-        import zarr  # noqa: F401
-        import tensorflow_datasets  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Both formats the extra unlocks can run: zarr, and tensorflow for RLDS.
+
+    Presence-only (``find_spec``): importing tensorflow costs seconds and
+    this runs on every capabilities request.
+    """
+    from resurrector.core.export import export_dependency_problem
+    return all(export_dependency_problem(f) is None for f in ("zarr", "rlds"))
+
+
+def _all_exports_install_command() -> str:
+    """The extra's pip command, unless pip can't deliver tensorflow here.
+
+    Where tensorflow ships no wheel (Python 3.14, Intel macOS, ...) the
+    extra installs zarr but never tensorflow, so the banner states the
+    reason instead of a command that wouldn't make RLDS work.
+    """
+    from resurrector.core import export
+    rlds_problem = export.export_dependency_problem("rlds")
+    if not rlds_problem or export.tensorflow_wheels_available():
+        return export.ALL_EXPORTS_INSTALL
+    if export.export_dependency_problem("zarr") is None:
+        return rlds_problem
+    # Lead with the part pip can still deliver here, so a Zarr-only user
+    # isn't told to switch Python.
+    return f"{export.ALL_EXPORTS_INSTALL} (Zarr only on this platform). {rlds_problem}"
 
 
 def _ros1_convert_available() -> bool:
@@ -128,8 +146,8 @@ def get_capabilities() -> dict[str, Capability]:
         Capability(
             name="all_exports",
             available=_all_exports_available(),
-            install_command="pip install 'rosbag-resurrector[all-exports]'",
-            description="Zarr and TensorFlow Datasets (RLDS) export formats",
+            install_command=_all_exports_install_command(),
+            description="Zarr and RLDS (TFRecord) export formats",
         ),
         Capability(
             name="lerobot",
