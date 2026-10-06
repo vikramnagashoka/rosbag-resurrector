@@ -443,11 +443,31 @@ class BridgeServer:
                         elif action == "speed":
                             await bridge._playback.set_speed(cmd.get("value", 1.0))
 
+            # The connection is over as soon as any loop returns. Usually that
+            # is receive_loop seeing the disconnect; send_loop and event_loop
+            # only notice on a failed send, which never comes while playback
+            # is paused or no events arrive. Waiting for all three (gather)
+            # left the handler running forever, so uvicorn's graceful
+            # shutdown never finished and SIGTERM couldn't stop the bridge.
+            tasks = [
+                asyncio.create_task(send_loop()),
+                asyncio.create_task(receive_loop()),
+                asyncio.create_task(event_loop()),
+            ]
             try:
-                await asyncio.gather(send_loop(), receive_loop(), event_loop())
-            except (WebSocketDisconnect, Exception):
-                pass
+                done, _ = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in done:
+                    if not t.cancelled() and t.exception() is not None:
+                        logger.debug(
+                            "ws loop for client %s ended with %r",
+                            client_id[:8], t.exception(),
+                        )
             finally:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
                 bridge._buffer.unregister_consumer(client_id)
                 if event_queue in bridge._event_subscribers:
                     bridge._event_subscribers.remove(event_queue)
