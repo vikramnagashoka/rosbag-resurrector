@@ -7,6 +7,7 @@ import {
   LEROBOT_SYNC_NOTE,
   fpsRoundingHint,
   isLerobot,
+  rateError,
   syncAndRateParams,
 } from '../exportOptions'
 
@@ -56,10 +57,14 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
+  const outputDirId = useId()
   const rateId = useId()
+  const rateNoteId = useId()
   const syncNoteId = useId()
   const lerobot = isLerobot(format)
-  const roundingHint = fpsRoundingHint(format, downsampleHz)
+  const rateErr = rateError(format, downsampleHz)
+  const rateNote = rateErr ?? fpsRoundingHint(format, downsampleHz)
+  const canExport = !exporting && selectedTopics.length > 0 && rateErr === null
 
   // Fetch available presets once on mount
   useEffect(() => {
@@ -106,8 +111,8 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
       { errorPrefix: 'Export failed' },
     )
     if (r) {
-      setResult(r.output)
-      toast.push('info', `Exported to ${r.output}`)
+      setResult(r.output_path)
+      toast.push('info', `Exported to ${r.output_path}`)
     }
     setExporting(false)
   }
@@ -214,8 +219,9 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
         </div>
 
         <div style={{ marginBottom: 16 }}>
-          <label style={labelStyle}>Output directory</label>
+          <label htmlFor={outputDirId} style={labelStyle}>Output directory</label>
           <input
+            id={outputDirId}
             type="text"
             value={outputDir}
             onChange={e => setOutputDir(e.target.value)}
@@ -236,10 +242,17 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
               value={downsampleHz}
               placeholder={lerobot ? String(LEROBOT_DEFAULT_FPS) : 'e.g. 50'}
               onChange={e => setDownsampleHz(e.target.value)}
-              style={fieldStyle}
+              aria-invalid={rateErr ? true : undefined}
+              aria-describedby={rateNote ? rateNoteId : undefined}
+              style={rateErr ? { ...fieldStyle, borderColor: '#f85149' } : fieldStyle}
             />
-            {roundingHint && (
-              <div style={{ fontSize: 12, color: '#8b949e', marginTop: 6 }}>{roundingHint}</div>
+            {rateNote && (
+              <div
+                id={rateNoteId}
+                style={{ fontSize: 12, color: rateErr ? '#f85149' : '#8b949e', marginTop: 6 }}
+              >
+                {rateNote}
+              </div>
             )}
           </div>
         </div>
@@ -298,6 +311,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
 
         {result && (
           <div
+            role="status"
             style={{
               background: '#0d2818',
               border: '1px solid #238636',
@@ -308,7 +322,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
               marginBottom: 16,
             }}
           >
-            {result}
+            Exported to {result}
           </div>
         )}
 
@@ -328,14 +342,14 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           </button>
           <button
             onClick={handleExport}
-            disabled={exporting || selectedTopics.length === 0}
+            disabled={!canExport}
             style={{
-              background: exporting || selectedTopics.length === 0 ? '#21262d' : '#238636',
+              background: canExport ? '#238636' : '#21262d',
               border: 'none',
               borderRadius: 6,
               padding: '8px 16px',
               color: '#fff',
-              cursor: exporting || selectedTopics.length === 0 ? 'not-allowed' : 'pointer',
+              cursor: canExport ? 'pointer' : 'not-allowed',
               fontWeight: 600,
             }}
           >

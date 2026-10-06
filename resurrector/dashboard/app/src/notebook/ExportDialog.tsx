@@ -7,6 +7,7 @@ import {
   LEROBOT_SYNC_NOTE,
   fpsRoundingHint,
   isLerobot,
+  rateError,
   syncAndRateParams,
 } from '../exportOptions'
 
@@ -44,9 +45,12 @@ export default function ExportDialog({
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
+  const rateId = useId()
+  const rateNoteId = useId()
   const syncNoteId = useId()
   const lerobot = isLerobot(format)
-  const roundingHint = fpsRoundingHint(format, downsampleHz)
+  const rateErr = rateError(format, downsampleHz)
+  const rateNote = rateErr ?? fpsRoundingHint(format, downsampleHz)
 
   useEffect(() => {
     let cancelled = false
@@ -80,7 +84,7 @@ export default function ExportDialog({
       }),
       { errorPrefix: 'Export failed' },
     )
-    if (r) { setResult(r.output); toast.push('info', `Exported to ${r.output}`) }
+    if (r) { setResult(r.output_path); toast.push('info', `Exported to ${r.output_path}`) }
     setExporting(false)
   }
 
@@ -144,15 +148,24 @@ export default function ExportDialog({
               <option value="rlds">RLDS</option>
             </select>
           </label>
-          <label className="nb-modal-field" style={{ width: 140 }}>
-            <span>{lerobot ? 'Frame rate (fps)' : 'Downsample (Hz)'}</span>
+          {/* A div, not a wrapping <label>: the note below must describe the
+              input (aria-describedby), not become part of its name. */}
+          <div className="nb-modal-field" style={{ width: 140 }}>
+            <label htmlFor={rateId}>{lerobot ? 'Frame rate (fps)' : 'Downsample (Hz)'}</label>
             <input
+              id={rateId}
               value={downsampleHz}
               placeholder={lerobot ? `default ${LEROBOT_DEFAULT_FPS}` : 'e.g. 50'}
               onChange={e => setDownsampleHz(e.target.value)}
+              aria-invalid={rateErr ? true : undefined}
+              aria-describedby={rateNote ? rateNoteId : undefined}
             />
-            {roundingHint && <div className="nb-export-hint">{roundingHint}</div>}
-          </label>
+            {rateNote && (
+              <div id={rateNoteId} className={rateErr ? 'nb-export-hint is-error' : 'nb-export-hint'}>
+                {rateNote}
+              </div>
+            )}
+          </div>
         </div>
 
         <label className="nb-modal-field">
@@ -184,14 +197,14 @@ export default function ExportDialog({
         </label>
         {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
-        {result && <div className="nb-export-result">Exported to {result}</div>}
+        {result && <div className="nb-export-result" role="status">Exported to {result}</div>}
 
         <div className="nb-modal-actions">
           <button className="nb-btn" onClick={onClose}>Close</button>
           <button
             className="nb-btn nb-btn-accent"
             onClick={handleExport}
-            disabled={exporting || selectedTopics.length === 0}
+            disabled={exporting || selectedTopics.length === 0 || rateErr !== null}
           >{exporting ? 'Exporting…' : 'Export'}</button>
         </div>
       </div>
