@@ -23,6 +23,11 @@ app = typer.Typer(
     rich_markup_mode="markdown",
 )
 console = Console()
+# Fatal errors go to stderr. A bridge launched from the dashboard has its
+# stdout discarded and its stderr written to a log, and the dashboard
+# quotes that log when the bridge dies during startup. soft_wrap keeps a
+# long message on one line, since only the last line gets quoted.
+err_console = Console(stderr=True, soft_wrap=True)
 
 
 def _print_version_and_exit(value: bool) -> None:
@@ -1991,7 +1996,7 @@ def bridge_live(
     from resurrector.bridge.live import is_rclpy_available
 
     if not is_rclpy_available():
-        console.print("[red]Live mode requires rclpy (ROS2). Use 'bridge playback' instead.[/red]")
+        err_console.print("[red]Live mode requires rclpy (ROS2). Use 'bridge playback' instead.[/red]")
         raise typer.Exit(1)
 
     import uvicorn

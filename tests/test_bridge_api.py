@@ -13,6 +13,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -131,7 +132,146 @@ class TestBridgeOutputCannotBlockBridge:
         assert dash_api._last_error_line(tmp_path / "missing.log") == ""
 
 
+def _block_log_dir(bridge_env: Path, monkeypatch) -> Path:
+    """Point the bridge log dir somewhere mkdir can't create; return the
+    temp dir the fallback log should land in.
+
+    The log dir's parent is a regular file, so mkdir raises
+    NotADirectoryError even for root (a chmod-based block wouldn't).
+    """
+    blocker = bridge_env / "not_a_dir"
+    blocker.write_text("")
+    monkeypatch.setenv("RESURRECTOR_BRIDGE_LOG_DIR", str(blocker / "logs"))
+    temp_dir = bridge_env / "tmp"
+    temp_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_dir))
+    return temp_dir
+
+
+class TestBridgeLogFallback:
+    def test_start_works_when_log_dir_cannot_be_created(self, bridge_env, monkeypatch):
+        # Regression: sending stderr to ~/.resurrector/logs made Start
+        # depend on that directory. A read-only home or a bad
+        # RESURRECTOR_BRIDGE_LOG_DIR turned Start into a 500, where the
+        # old PIPE-based Start worked. The log must fall back to a file
+        # in the temp dir (still a file, never a pipe).
+        temp_dir = _block_log_dir(bridge_env, monkeypatch)
+        bag = generate_bag(bridge_env / "b.mcap", BagConfig(duration_sec=1.0))
+        port = _free_port()
+        client = TestClient(dash_api.app)
+
+        _start_playback_bridge(client, bag, port)
+
+        logs = list(temp_dir.glob(f"resurrector-bridge-{port}-*.log"))
+        assert len(logs) == 1, logs
+        # uvicorn logs this to stderr before it binds, and the dashboard
+        # only reports ready once the port accepts connections.
+        assert "Started server process" in logs[0].read_text()
+        assert client.post("/api/bridge/stop").json() == {"stopped": True}
+
+    def test_startup_crash_names_the_fallback_log(self, bridge_env, monkeypatch):
+        temp_dir = _block_log_dir(bridge_env, monkeypatch)
+        bad = bridge_env / "not_a_bag.mcap"
+        bad.write_bytes(b"this is not an mcap file")
+        port = _free_port()
+
+        r = TestClient(dash_api.app).post(
+            "/api/bridge/start",
+            json={"mode": "playback", "bag_path": str(bad), "port": port},
+        )
+
+        assert r.status_code == 500, r.text
+        detail = r.json()["detail"]
+        assert "exited during startup" in detail
+        assert "InvalidMagic" in detail
+        [log] = temp_dir.glob(f"resurrector-bridge-{port}-*.log")
+        assert str(log) in detail
+
+
+class TestBridgeCliFatalErrors:
+    def test_live_mode_without_rclpy_reports_the_cli_message(self, bridge_env, monkeypatch):
+        # Regression: the bridge CLI printed fatal errors through the
+        # shared stdout console. The dashboard discards the bridge's
+        # stdout, so the early-exit detail said "no error output". The
+        # dashboard's own rclpy check is forced to pass here, as when the
+        # dashboard and the bridge interpreter disagree; the child still
+        # has no rclpy and exits through the CLI's error print.
+        from resurrector.bridge.live import is_rclpy_available
+        from resurrector.core import capabilities
+
+        if is_rclpy_available():
+            pytest.skip("rclpy is installed, so the live bridge would start")
+        monkeypatch.setattr(capabilities, "_bridge_live_available", lambda: True)
+        port = _free_port()
+
+        r = TestClient(dash_api.app).post(
+            "/api/bridge/start",
+            json={"mode": "live", "topics": ["/imu/data"], "port": port},
+        )
+
+        assert r.status_code == 500, r.text
+        detail = r.json()["detail"]
+        assert "exit code 1" in detail
+        assert "Live mode requires rclpy" in detail
+        assert "no error output" not in detail
+
+
+class _StoppableProc:
+    """A bridge process whose SIGTERM exit the test releases by hand."""
+
+    pid = 0
+
+    def __init__(self) -> None:
+        self.terminate_sent = threading.Event()
+        self.exit_now = threading.Event()
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_sent.set()
+
+    def kill(self) -> None:
+        self.exit_now.set()
+
+    def wait(self, timeout=None):
+        if not self.exit_now.wait(timeout):
+            raise subprocess.TimeoutExpired("fake-bridge", timeout)
+        self.returncode = -signal.SIGTERM
+        return self.returncode
+
+
 class TestBridgeStop:
+    async def test_stop_leaves_a_bridge_started_during_the_wait_alone(self, monkeypatch):
+        # Stop awaits the old bridge's exit off the event loop, so a Start
+        # can register a new bridge before Stop resumes. Stop must then
+        # clear the state only if it still points at the process it
+        # stopped; clearing it unconditionally orphans the new bridge
+        # (still running, but the dashboard reports "not running" and
+        # can't stop it).
+        monkeypatch.setattr(dash_api, "_BRIDGE_STOP_GRACE_S", 120.0, raising=False)
+        state = dash_api._get_bridge_state()
+        old, new = _StoppableProc(), _AliveProc()
+        state.update(process=old, port=1, mode="playback")
+        try:
+            transport = httpx.ASGITransport(app=dash_api.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://dashboard",
+            ) as c:
+                stop = asyncio.create_task(c.post("/api/bridge/stop"))
+                assert await asyncio.to_thread(old.terminate_sent.wait, 30)
+                state.update(process=new, port=2, mode="live")
+                old.exit_now.set()
+                resp = await asyncio.wait_for(stop, timeout=30)
+
+            assert resp.json() == {"stopped": True}
+            assert state["process"] is new
+            assert (state["port"], state["mode"]) == (2, "live")
+        finally:
+            old.exit_now.set()
+            _reset_bridge_state()
+
     async def test_stop_does_not_block_the_dashboard_event_loop(self, monkeypatch):
         # Regression: stop called proc.wait(timeout=5) inside an async def,
         # so every other dashboard request stalled while the bridge shut

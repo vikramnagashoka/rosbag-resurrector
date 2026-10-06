@@ -1717,6 +1717,31 @@ def _bridge_log_path(port: int) -> Path:
     return Path(log_dir) / f"bridge-{port}.log"
 
 
+def _open_bridge_log(port: int) -> tuple[Path, Any]:
+    """Open the bridge stderr log for writing; return ``(path, file)``.
+
+    Falls back to a fresh file in the system temp dir when the configured
+    log dir can't be created or written (read-only home, bad
+    ``RESURRECTOR_BRIDGE_LOG_DIR``), so a log location problem never
+    stops the bridge from starting. ``mkstemp`` gives a unique name
+    created with O_EXCL, which is safe in a shared /tmp.
+    """
+    import tempfile
+    path = _bridge_log_path(port)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path, open(path, "wb")
+    except OSError as e:
+        fd, fallback = tempfile.mkstemp(
+            prefix=f"resurrector-bridge-{port}-", suffix=".log",
+        )
+        logger.warning(
+            "Cannot write bridge log %s (%s); logging to %s instead",
+            path, e, fallback,
+        )
+        return Path(fallback), os.fdopen(fd, "wb")
+
+
 def _last_error_line(path: Path, max_bytes: int = 8192) -> str:
     """Last line of ``path`` that isn't uvicorn INFO/DEBUG chatter.
 
@@ -1836,19 +1861,18 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
     cmd.extend(["--port", str(port)])
     cmd.append("--no-browser")  # don't open a viewer; the dashboard IS the viewer
 
+    # Plain traceback instead of typer's Rich box, so the log's last line
+    # is the exception itself.
+    env = {**os.environ, "_TYPER_STANDARD_TRACEBACK": "1"}
     # Nothing in the dashboard reads the bridge's output, so it must never
     # go to a PIPE: uvicorn writes an access-log line per request to
     # stdout, and once ~64 KB sat undrained the bridge's next write()
     # blocked its event loop for good. stdout (access log + banner) is
     # discarded; stderr (startup errors, tracebacks, warnings) goes to a
     # file, which can't back up.
-    log_path = _bridge_log_path(port)
-    # Plain traceback instead of typer's Rich box, so the log's last line
-    # is the exception itself.
-    env = {**os.environ, "_TYPER_STANDARD_TRACEBACK": "1"}
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "wb") as log_file:
+        log_path, log_file = _open_bridge_log(port)
+        with log_file:
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
