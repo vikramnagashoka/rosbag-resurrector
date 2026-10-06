@@ -151,12 +151,22 @@ def generate_dataset_readme(
         "```python",
     ])
 
+    # Absolute paths: export_version's default output dir is relative
+    # ("./datasets"), and a relative path in the snippet only resolves from
+    # the directory the export ran in. repr() keeps quotes and Windows
+    # backslashes in the path from breaking the string literal.
+    root = output_path.resolve()
+    first_file = data_files[0] if data_files else None
+
+    def _path_literal(*parts: str) -> str:
+        return repr(str(root.joinpath(*parts)))
+
     if is_lerobot:
         repo_id = "local/" + (re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset_name) or "dataset")
         lines.extend([
             "from lerobot.datasets.lerobot_dataset import LeRobotDataset",
             "",
-            f"ds = LeRobotDataset({repo_id!r}, root={str(output_path)!r})",
+            f"ds = LeRobotDataset({repo_id!r}, root={_path_literal()})",
             'print(f"episodes: {ds.num_episodes}, frames: {ds.num_frames}, fps: {ds.fps}")',
             "print(ds[0].keys())",
         ])
@@ -165,14 +175,14 @@ def generate_dataset_readme(
             "import polars as pl",
             "",
             "# Load all parquet files",
-            f'df = pl.read_parquet("{output_path}/*.parquet")',
+            f"df = pl.read_parquet({_path_literal('*.parquet')})",
             "print(df.head())",
         ])
     elif export_format == "hdf5":
         lines.extend([
             "import h5py",
             "",
-            f'with h5py.File("{output_path}/{data_files[0] if data_files else "data.h5"}", "r") as f:',
+            f'with h5py.File({_path_literal(first_file or "data.h5")}, "r") as f:',
             '    for key in f.keys():',
             '        print(key, f[key].shape)',
         ])
@@ -180,14 +190,14 @@ def generate_dataset_readme(
         lines.extend([
             "import polars as pl",
             "",
-            f'df = pl.read_csv("{output_path}/{data_files[0] if data_files else "data.csv"}")',
+            f'df = pl.read_csv({_path_literal(first_file or "data.csv")})',
             "print(df.head())",
         ])
     elif export_format == "numpy":
         lines.extend([
             "import numpy as np",
             "",
-            f'data = np.load("{output_path}/{data_files[0] if data_files else "data.npz"}")',
+            f'data = np.load({_path_literal(first_file or "data.npz")})',
             "print(list(data.keys()))",
         ])
     else:

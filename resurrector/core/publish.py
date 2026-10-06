@@ -12,11 +12,15 @@ The card is the point. Every published dataset becomes a public HF page that:
 
 Design split:
 - ``build_dataset_card(...)`` is a **pure function** — no network, fully
-  testable. It reads whatever the dataset dir contains (manifest, config)
-  and an optional QC summary, and returns the card markdown string.
+  testable. It reads whatever the dataset dir contains (manifest, config,
+  LeRobot's ``meta/info.json``) and an optional QC summary, and returns the
+  card markdown string.
 - ``publish_dataset(...)`` is the thin push: build the card, write it into
-  the dir as README.md, upload via ``huggingface_hub``. ``dry_run=True``
-  does everything except the upload, so the path is testable offline.
+  the dir as README.md, upload via ``huggingface_hub``. For a LeRobot
+  dataset it then tags the Hub repo with the dataset's codebase version
+  (``v3.0``), moving the tag on re-publish, because ``LeRobotDataset``
+  refuses an untagged repo. ``dry_run=True`` does everything except the
+  network calls (upload and tag), so the path is testable offline.
 
 ``huggingface_hub`` is an optional dependency (the ``[publish]`` extra). It's
 imported lazily inside ``publish_dataset`` so the card builder — and the rest
@@ -96,6 +100,37 @@ def _tag_codebase_version(api: Any, repo_id: str, tag: str) -> None:
     api.create_tag(repo_id, tag=tag, repo_type="dataset")
 
 
+# Per-frame index columns LeRobot adds to every dataset; the card lists the
+# features the export actually chose (state, action, cameras).
+_LEROBOT_INDEX_FEATURES = frozenset(
+    {"timestamp", "frame_index", "episode_index", "index", "task_index"}
+)
+
+
+def _shape_str(shape: Any) -> str:
+    if isinstance(shape, (list, tuple)):
+        return "x".join(str(d) for d in shape)
+    return str(shape)
+
+
+def _data_files(dataset_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    """Data files from ``manifest.json``, else from a walk of the directory.
+
+    ``resurrector export`` writes no manifest; only ``DatasetManager`` does.
+    JSON metadata and markdown aren't counted either way.
+    """
+    if manifest:
+        names = list(manifest)
+    else:
+        names = [
+            f.relative_to(dataset_dir).as_posix()
+            for f in dataset_dir.rglob("*")
+            if f.is_file()
+            and not any(part.startswith(".") for part in f.relative_to(dataset_dir).parts)
+        ]
+    return [f for f in names if not f.endswith(".json") and not f.endswith(".md")]
+
+
 def _grade_from_score(score: int) -> str:
     if score >= 90:
         return "A (excellent)"
@@ -118,9 +153,13 @@ def build_dataset_card(
 
     Pure function — no network, no filesystem writes. Reads ``manifest.json``,
     ``dataset_config.json`` and (for LeRobot datasets) ``meta/info.json``
-    from the directory if present; tolerates their absence. A LeRobot
-    dataset gets a ``LeRobotDataset`` loading snippet, everything else
-    ``datasets.load_dataset``.
+    from the directory if present; tolerates their absence. Without a
+    manifest, data files are counted from the directory itself. A LeRobot
+    dataset gets episode/frame/fps rows and a feature table from
+    ``meta/info.json`` (a bare ``resurrector export --preset lerobot`` dir
+    has nothing else to go on) and a ``LeRobotDataset`` loading snippet;
+    everything else gets ``datasets.load_dataset``. A version whose
+    ``topics`` is None is shown as "all topics".
 
     Args:
         dataset_dir: Path to the materialized dataset.
@@ -143,13 +182,15 @@ def build_dataset_card(
     if extra_description is None:
         extra_description = metadata.get("description") or config.get("description")
 
-    data_files = [f for f in manifest if not f.endswith(".json") and not f.endswith(".md")]
+    data_files = _data_files(dataset_dir, manifest)
     topics = config.get("topics") or []
     # `resurrector export --preset lerobot` writes no dataset_config.json;
     # the LeRobot layout identifies itself.
     export_format = config.get("export_format") or (
         "lerobot" if _lerobot_codebase_version(dataset_dir) else "unknown"
     )
+    # meta/info.json is what LeRobot wrote: episode/frame totals and features.
+    info = _load_json(dataset_dir / "meta" / "info.json") if export_format == "lerobot" else {}
     bag_refs = config.get("bag_refs") or []
     name = repo_id.split("/")[-1]
 
@@ -180,15 +221,27 @@ def build_dataset_card(
         body += [extra_description, ""]
 
     # Overview table
+    overview = [("Format", f"`{export_format}`")]
+    # A bare LeRobot export has no config, so its bags and topics are
+    # unknown; info.json's totals below say what's in it instead of "0".
+    if config or not info:
+        overview.append(("Source bags", str(len(bag_refs))))
+        # DatasetManager stores topics=None for "every topic in each bag".
+        all_topics = bool(config) and config.get("topics") is None
+        overview.append(("Topics", "all topics" if all_topics else str(len(topics))))
+    if info.get("total_episodes") is not None:
+        overview.append(("Episodes", str(info["total_episodes"])))
+    if info.get("total_frames") is not None:
+        overview.append(("Frames", str(info["total_frames"])))
+    if info.get("fps"):
+        overview.append(("Frame rate", f"{info['fps']} fps"))
+    overview.append(("Data files", str(len(data_files))))
     body += [
         "## Overview",
         "",
         "| | |",
         "|---|---|",
-        f"| Format | `{export_format}` |",
-        f"| Source bags | {len(bag_refs)} |",
-        f"| Topics | {len(topics)} |",
-        f"| Data files | {len(data_files)} |",
+        *[f"| {k} | {v} |" for k, v in overview],
         "",
     ]
 
@@ -230,6 +283,23 @@ def build_dataset_card(
         if len(topics) > 50:
             body.append(f"- … and {len(topics) - 50} more")
         body.append("")
+
+    features = info.get("features")
+    if isinstance(features, dict):
+        rows = [
+            f"| `{key}` | {ft.get('dtype', '?')} | {_shape_str(ft.get('shape', '?'))} |"
+            for key, ft in features.items()
+            if key not in _LEROBOT_INDEX_FEATURES and isinstance(ft, dict)
+        ]
+        if rows:
+            body += [
+                "## Features",
+                "",
+                "| Feature | Type | Shape |",
+                "|---|---|---|",
+                *rows,
+                "",
+            ]
 
     # Load snippet. A LeRobot v3 dataset (episode metadata, MP4 cameras)
     # isn't a plain HF table; LeRobot's own loader is the way in.

@@ -219,6 +219,116 @@ class TestPublishDataset:
             publish_dataset(dataset_dir, "me/x", dry_run=False)
 
 
+_LEROBOT_INFO = {
+    "codebase_version": "v3.0",
+    "fps": 30,
+    "total_episodes": 2,
+    "total_frames": 118,
+    "features": {
+        "observation.state": {"dtype": "float32", "shape": [10],
+                              "names": [f"imu/data/f{i}" for i in range(10)]},
+        "action": {"dtype": "float32", "shape": [7],
+                   "names": [f"joint_states/position.{i}" for i in range(7)]},
+        "observation.images.camera_rgb": {"dtype": "video", "shape": [48, 64, 3],
+                                          "names": ["height", "width", "channels"]},
+        # LeRobot's own per-frame index columns, present in every dataset.
+        "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+        "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+        "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+        "index": {"dtype": "int64", "shape": [1], "names": None},
+        "task_index": {"dtype": "int64", "shape": [1], "names": None},
+    },
+}
+
+
+@pytest.fixture
+def bare_lerobot_dir():
+    """What `resurrector export --preset lerobot` leaves: LeRobot's own v3
+    layout and nothing else (no dataset_config.json, no manifest.json)."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d)
+        for rel in ("data/chunk-000/file-000.parquet",
+                    "meta/episodes/chunk-000/file-000.parquet",
+                    "meta/tasks.parquet",
+                    "videos/observation.images.camera_rgb/chunk-000/file-000.mp4"):
+            (p / rel).parent.mkdir(parents=True, exist_ok=True)
+            (p / rel).write_bytes(b"x")
+        (p / "meta" / "info.json").write_text(json.dumps(_LEROBOT_INFO))
+        (p / "meta" / "stats.json").write_text("{}")
+        yield p
+
+
+class TestLeRobotCardFromInfoJson:
+    """Would catch: the card for a bare `resurrector export --preset lerobot`
+    dir reading only dataset_config.json / manifest.json, which that export
+    doesn't write, so its Overview said 'Source bags 0 | Topics 0 | Data
+    files 0' for a dataset with episodes, frames and cameras in it."""
+
+    def test_bare_dir_overview_from_info_json(self, bare_lerobot_dir):
+        card = build_dataset_card(bare_lerobot_dir, "me/raw")
+        assert "| Format | `lerobot` |" in card
+        assert "| Episodes | 2 |" in card
+        assert "| Frames | 118 |" in card
+        assert "| Frame rate | 30 fps |" in card
+        # data parquet, 2 meta parquets, 1 mp4 (json metadata isn't data)
+        assert "| Data files | 4 |" in card
+        assert "| Source bags | 0 |" not in card
+        assert "| Topics | 0 |" not in card
+
+    def test_bare_dir_lists_features(self, bare_lerobot_dir):
+        card = build_dataset_card(bare_lerobot_dir, "me/raw")
+        assert "## Features" in card
+        assert "| `observation.state` | float32 | 10 |" in card
+        assert "| `action` | float32 | 7 |" in card
+        assert "| `observation.images.camera_rgb` | video | 48x64x3 |" in card
+        for default in ("timestamp", "frame_index", "episode_index", "index", "task_index"):
+            assert f"`{default}`" not in card
+
+    def test_dataset_manager_lerobot_card_adds_info_totals(self, dataset_dir):
+        (dataset_dir / "meta" / "info.json").write_text(json.dumps(_LEROBOT_INFO))
+        card = build_dataset_card(dataset_dir, "me/pick-place")
+        assert "| Source bags | 2 |" in card
+        assert "| Topics | 2 |" in card
+        assert "| Episodes | 2 |" in card
+        assert "| Frames | 118 |" in card
+        assert "| `observation.state` | float32 | 10 |" in card
+
+    def test_non_lerobot_card_has_no_lerobot_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "dataset_config.json").write_text(json.dumps({
+                "config": {"export_format": "parquet", "topics": ["/imu/data"],
+                           "bag_refs": [{"path": "/data/a.mcap"}]},
+                "metadata": {},
+            }))
+            card = build_dataset_card(p, "me/tabular")
+        assert "| Episodes |" not in card
+        assert "## Features" not in card
+
+
+class TestTopicsNone:
+    """Would catch: a DatasetManager version created with ``topics=None``
+    ("every topic in each bag") showing 'Topics 0' on its card."""
+
+    def test_topics_none_is_all_topics(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "dataset_config.json").write_text(json.dumps({
+                "config": {"export_format": "parquet", "topics": None,
+                           "bag_refs": [{"path": "/data/a.mcap"}]},
+                "metadata": {},
+            }))
+            card = build_dataset_card(p, "me/all")
+        assert "| Topics | all topics |" in card
+        assert "| Topics | 0 |" not in card
+
+    def test_empty_dir_still_reports_zero(self):
+        """No config at all is 'unknown', not 'all topics'."""
+        with tempfile.TemporaryDirectory() as d:
+            card = build_dataset_card(d, "me/empty")
+        assert "| Topics | 0 |" in card
+
+
 class _FakeHub:
     """Stand-in ``huggingface_hub`` module that records HfApi calls."""
 
@@ -350,3 +460,21 @@ class TestRealDatasetExport:
         card = (real_dataset_export / "README.md").read_text()
         assert "## Data quality" in card
         assert "Bags checked: 1" in card
+
+    def test_card_for_all_topics_version(self, tmp_path):
+        """DatasetManager stores topics=None for a version without a topic
+        filter; the exported card says so instead of 'Topics 0'."""
+        from resurrector.core.dataset import BagRef, DatasetManager
+
+        bag = generate_bag(tmp_path / "run1.mcap", BagConfig(duration_sec=1.0))
+        mgr = DatasetManager(tmp_path / "idx.db")
+        try:
+            mgr.create("everything")
+            mgr.create_version("everything", "1.0", [BagRef(path=str(bag))],
+                               export_format="parquet")
+            out = mgr.export_version("everything", "1.0", str(tmp_path / "datasets"))
+        finally:
+            mgr.close()
+        card = build_dataset_card(out, "me/everything")
+        assert "| Topics | all topics |" in card
+        assert "| Source bags | 1 |" in card

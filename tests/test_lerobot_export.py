@@ -185,8 +185,10 @@ class TestGuards:
 
 
 class TestImageSpillCleanup:
-    """LeRobot spills camera frames to ``images/<camera>/...`` and deletes
-    the PNGs once the video is encoded, but leaves the directories."""
+    """LeRobot spills camera frames to ``images/<camera>/episode-N/`` and
+    deletes each episode directory once its PNGs are encoded to video (or,
+    in image mode, embedded in the data parquet), but leaves the per-camera
+    directories."""
 
     def test_removes_only_empty_image_dirs(self, tmp_dir):
         from resurrector.core.lerobot_export import _remove_empty_image_dirs
@@ -385,24 +387,37 @@ class TestLeRobotRoundTrip:
         assert ds[0]["observation.images.camera_rgb"].shape[0] == 3
 
     def test_image_mode_dataset_still_loads(self, tmp_dir, sample_bag):
-        """``use_videos=False`` stores frames as images; the cleanup must not
-        break that layout (it only ever removes empty directories)."""
+        """``use_videos=False``: LeRobot embeds each frame's PNG bytes in
+        ``data/*.parquet`` and deletes the spilled PNGs, so ``images/`` is
+        left empty in image mode too. The frames load from the parquet."""
         _lerobot()
+        import pyarrow.parquet as pq
+
         from resurrector.core.lerobot_export import export_lerobot
 
         out = tmp_dir / "lr_img"
         export_lerobot([BagFrame(sample_bag)], ["/imu/data", "/camera/rgb"], out,
                        use_videos=False)
+        empty = [str(p.relative_to(out)) for p in out.rglob("*")
+                 if p.is_dir() and not any(p.iterdir())]
+        assert empty == []
+        cell = pq.read_table(next((out / "data").rglob("*.parquet")),
+                             columns=["observation.images.camera_rgb"]).column(0)[0].as_py()
+        assert cell["bytes"][:8] == b"\x89PNG\r\n\x1a\n"
         ds = _load(out)
         assert ds.meta.features["observation.images.camera_rgb"]["dtype"] == "image"
         assert ds[0]["observation.images.camera_rgb"].shape[0] == 3
 
-    def test_dataset_readme_quick_start_runs(self, tmp_dir):
-        """The README's quick start must actually load the dataset.
+    def test_dataset_readme_quick_start_runs(self, tmp_dir, monkeypatch):
+        """The README's quick start must actually load the dataset, from any
+        working directory.
 
         Would catch: a LeRobot dataset README whose quick start was a
         "load your lerobot files" comment (and whose config section listed
-        a sync method the export never applied)."""
+        a sync method the export never applied); and one whose ``root=`` was
+        the relative ``datasets/...`` path export_version was given, so run
+        from anywhere else LeRobot fell through to a Hub lookup."""
+        import os
         import re
         import subprocess
 
@@ -411,6 +426,7 @@ class TestLeRobotRoundTrip:
 
         a = generate_bag(tmp_dir / "a.mcap", BagConfig(duration_sec=2.0))
         b = generate_bag(tmp_dir / "b.mcap", BagConfig(duration_sec=2.0))
+        monkeypatch.chdir(tmp_dir)
         mgr = DatasetManager(tmp_dir / "idx.db")
         mgr.create("pick")
         mgr.create_version(
@@ -418,15 +434,42 @@ class TestLeRobotRoundTrip:
             topics=["/imu/data", "/joint_states"], export_format="lerobot",
             sync_config=SyncConfig(method="nearest", tolerance_ms=50),
         )
-        root = Path(mgr.export_version("pick", "1.0", str(tmp_dir / "datasets")))
+        root = mgr.export_version("pick", "1.0", "datasets")  # relative, like the default
         mgr.close()
+        assert not root.is_absolute()
 
         readme = (root / "README.md").read_text(encoding="utf-8")
         assert "Sync method" not in readme
         assert "**Frame rate**: `30 fps`" in readme
         code = re.search(r"## Quick Start\n\n```python\n(.*?)```", readme, re.S).group(1)
         assert "LeRobotDataset" in code
+        elsewhere = tmp_dir / "elsewhere"
+        elsewhere.mkdir()
+        # Offline: a root LeRobot can't find must fail here, not hit the Hub.
         proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                              text=True, timeout=600, cwd=str(tmp_dir))
+                              text=True, timeout=600, cwd=str(elsewhere),
+                              env={**os.environ, "HF_HUB_OFFLINE": "1"})
         assert proc.returncode == 0, proc.stderr[-2000:]
         assert "episodes: 2" in proc.stdout, proc.stdout
+
+    def test_publish_card_for_bare_export(self, tmp_dir, sample_bag):
+        """Would catch: the HF card for a bare `export --preset lerobot` dir
+        (no dataset_config.json, no manifest.json) saying 'Source bags 0 |
+        Topics 0 | Data files 0'. Checked against the meta/info.json the
+        installed LeRobot actually writes."""
+        _lerobot()
+        from resurrector.core.publish import build_dataset_card
+
+        out = tmp_dir / "lr"
+        BagFrame(sample_bag).export(preset="lerobot", output=str(out))
+        ds = _load(out)
+        card = build_dataset_card(out, "me/lr")
+        assert "| Format | `lerobot` |" in card
+        assert "| Episodes | 1 |" in card
+        assert f"| Frames | {ds.num_frames} |" in card
+        assert "| Frame rate | 30 fps |" in card
+        for zero in ("| Source bags | 0 |", "| Topics | 0 |", "| Data files | 0 |"):
+            assert zero not in card
+        n_state = len(ds.meta.features["observation.state"]["names"])
+        assert f"| `observation.state` | float32 | {n_state} |" in card
+        assert "| `observation.images.camera_rgb` | video |" in card

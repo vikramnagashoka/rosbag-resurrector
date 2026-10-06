@@ -13,6 +13,8 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -98,7 +100,7 @@ class TestLeRobotReadme:
         code = _quick_start(readme)
         ast.parse(code)
         assert "from lerobot.datasets.lerobot_dataset import LeRobotDataset" in code
-        assert f"root={str(out_dir)!r}" in code
+        assert f"root={str(out_dir.resolve())!r}" in code
         assert "load your lerobot files" not in readme.lower()
 
     def test_quick_start_is_valid_python_for_awkward_paths(self, out_dir):
@@ -119,3 +121,73 @@ class TestTabularReadmeUnchanged:
         assert "Frame rate" not in readme
         assert "pl.read_parquet" in _quick_start(readme)
         assert "topics: /imu/data" in readme
+
+
+def _string_literals(code: str) -> list[str]:
+    return [n.value for n in ast.walk(ast.parse(code))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+
+_ALL_FORMATS = ["lerobot", "parquet", "hdf5", "csv", "numpy"]
+
+
+class TestQuickStartPaths:
+    """Would catch: quick-start snippets that embed the export path as given.
+    ``DatasetManager.export_version`` defaults to ``./datasets``, so the
+    README said ``root='datasets/pick-place/1.0'``. Run from any other
+    directory that path doesn't exist; LeRobot then falls through to a Hub
+    lookup for ``local/pick-place`` and the tabular snippets raise
+    FileNotFoundError."""
+
+    @pytest.mark.parametrize("fmt", _ALL_FORMATS)
+    def test_relative_output_path_written_as_absolute(self, out_dir, monkeypatch, fmt):
+        monkeypatch.chdir(out_dir)
+        rel = Path("datasets") / "pick-place" / "1.0"
+        rel.mkdir(parents=True)
+        path = generate_dataset_readme(
+            output_path=rel, dataset_name="pick-place", version="1.0",
+            config=_config(fmt), metadata={},
+            manifest={"imu_data.bin": "abc", "manifest.json": "def"},
+        )
+        code = _quick_start(path.read_text(encoding="utf-8"))
+        root = str(rel.resolve())
+        paths = [s for s in _string_literals(code) if "pick-place" in s and s != "local/pick-place"]
+        assert paths, code
+        assert all(Path(s).is_absolute() and s.startswith(root) for s in paths), paths
+
+    @pytest.mark.parametrize("fmt", _ALL_FORMATS)
+    def test_quick_start_is_valid_python_for_quotes_in_path(self, out_dir, fmt):
+        weird = out_dir / 'it\'s "here" \\U'
+        weird.mkdir()
+        code = _quick_start(_readme(weird, _config(fmt)))
+        ast.parse(code)
+        assert any(s.startswith(str(weird.resolve())) for s in _string_literals(code)), code
+
+
+class TestQuickStartRuns:
+    def test_parquet_quick_start_runs_from_another_directory(self, out_dir, monkeypatch):
+        """Would catch: a README exported to the default relative
+        ``./datasets`` dir whose snippet only loads from the directory the
+        export ran in."""
+        from resurrector.core.dataset import BagRef, DatasetManager
+        from resurrector.demo.sample_bag import BagConfig, generate_bag
+
+        bag = generate_bag(out_dir / "a.mcap", BagConfig(duration_sec=1.0))
+        monkeypatch.chdir(out_dir)
+        mgr = DatasetManager(out_dir / "idx.db")
+        try:
+            mgr.create("pick")
+            mgr.create_version("pick", "1.0", [BagRef(path=str(bag))],
+                               topics=["/imu/data"], export_format="parquet")
+            root = mgr.export_version("pick", "1.0", "datasets")
+        finally:
+            mgr.close()
+        assert not root.is_absolute()  # the case under test
+
+        code = _quick_start((root / "README.md").read_text(encoding="utf-8"))
+        elsewhere = out_dir / "elsewhere"
+        elsewhere.mkdir()
+        proc = subprocess.run([sys.executable, "-c", code], cwd=str(elsewhere),
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        assert "shape: (5, " in proc.stdout, proc.stdout  # df.head()
