@@ -56,6 +56,25 @@ class BagPlaybackConfig:
     label: str = ""
 
 
+@dataclass
+class _PendingStart:
+    """A bag still waiting out its start offset in the current session.
+
+    Attributes:
+        remaining_sec: Offset left to wait, in bag-time seconds (divided by
+            speed to get the wall-clock sleep). Read when play() schedules
+            the delay; updated by pause().
+        task: The running delay, or None while pause() holds the bag.
+        deadline: ``loop.time()`` at which ``task`` starts the engine.
+        speed: Speed ``task`` was scheduled at, so pause() can convert the
+            unserved wall-clock wait back to bag-time.
+    """
+    remaining_sec: float
+    task: asyncio.Task | None = None
+    deadline: float = 0.0
+    speed: float = 1.0
+
+
 # Multi-bag callback gets (bag_id, message). Single-bag PlaybackEngine
 # callback was just (message,); this signature change is the visible
 # difference for downstream consumers (server, viewer, etc.).
@@ -148,7 +167,8 @@ class MultiBagPlayback:
             )
             self._engines.append(engine)
 
-        self._delay_tasks: list[asyncio.Task] = []
+        # Bags whose offset hasn't elapsed yet this session, by engine index.
+        self._pending: dict[int, _PendingStart] = {}
         self._stopped = False
 
     # ----- Public API -----
@@ -207,35 +227,68 @@ class MultiBagPlayback:
     async def play(self) -> None:
         """Start (or resume) playback of every bag, respecting per-bag offsets.
 
-        For each bag with ``offset_sec > 0``, schedules a delayed
-        engine.play() via an asyncio task. Returns immediately — playback
-        runs in the background until stop() is called or the bags finish.
+        From a stopped session, bags with ``offset_sec > 0`` start after
+        their offset (a delayed engine.play() in an asyncio task) and the
+        rest start now. After pause(), bags that had already started resume
+        at once, and bags still inside their offset wait only for the part
+        pause() interrupted. Each offset is served once per session; stop()
+        ends the session. Returns immediately: playback runs in the
+        background until stop() is called or the bags finish.
         """
         self._stopped = False
-        # Cancel any leftover delay tasks from a prior play() call
-        await self._cancel_delay_tasks()
+        fresh = not self._pending and all(
+            e.state == PlaybackState.STOPPED for e in self._engines
+        )
+        if fresh:
+            self._pending = {
+                i: _PendingStart(remaining_sec=cfg.offset_sec)
+                for i, cfg in enumerate(self._configs)
+                if cfg.offset_sec > 0
+            }
 
-        for cfg, engine in zip(self._configs, self._engines):
-            if cfg.offset_sec > 0:
-                self._delay_tasks.append(
-                    asyncio.create_task(self._delayed_play(engine, cfg.offset_sec))
-                )
-            else:
+        loop = asyncio.get_running_loop()
+        for i, engine in enumerate(self._engines):
+            pending = self._pending.get(i)
+            if pending is None:
+                # Offset already served (or zero): resumes a paused engine,
+                # starts a stopped one, leaves a playing one alone.
                 await engine.play()
+            elif pending.task is None:
+                pending.speed = max(self._speed, 0.001)
+                delay = pending.remaining_sec / pending.speed
+                pending.deadline = loop.time() + delay
+                pending.task = asyncio.create_task(
+                    self._delayed_play(i, engine, pending, delay)
+                )
         logger.info(
-            "MultiBagPlayback started: %d bags, speed=%.2fx",
-            len(self._engines), self._speed,
+            "MultiBagPlayback %s: %d bags, speed=%.2fx",
+            "started" if fresh else "resumed", len(self._engines), self._speed,
         )
 
     async def pause(self) -> None:
-        """Pause every engine in parallel."""
+        """Pause every engine, and hold any bag still waiting out its offset."""
+        # Cancel before anything below yields, so a held bag can't start
+        # mid-pause. Its unserved offset is kept for the next play().
+        loop = asyncio.get_running_loop()
+        cancelled: list[asyncio.Task] = []
+        for p in self._pending.values():
+            if p.task is not None:
+                p.task.cancel()
+                cancelled.append(p.task)
+                p.task = None
+                p.remaining_sec = max(0.0, p.deadline - loop.time()) * p.speed
         await asyncio.gather(*[e.pause() for e in self._engines])
+        await asyncio.gather(*cancelled, return_exceptions=True)
         logger.info("MultiBagPlayback paused")
 
     async def stop(self) -> None:
         """Stop every engine and cancel any pending delay tasks."""
         self._stopped = True
-        await self._cancel_delay_tasks()
+        pending, self._pending = self._pending, {}
+        tasks = [p.task for p in pending.values() if p.task is not None]
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(*[e.stop() for e in self._engines], return_exceptions=True)
         logger.info("MultiBagPlayback stopped")
 
@@ -269,19 +322,16 @@ class MultiBagPlayback:
             user_cb(bag_id, msg)
         return _wrapper
 
-    async def _delayed_play(self, engine: PlaybackEngine, delay_sec: float) -> None:
-        """Sleep for delay_sec/speed, then start the engine. Honors stop()."""
-        try:
-            await asyncio.sleep(delay_sec / max(self._speed, 0.001))
-            if not self._stopped:
-                await engine.play()
-        except asyncio.CancelledError:
-            pass
+    async def _delayed_play(
+        self, index: int, engine: PlaybackEngine, pending: _PendingStart, delay_sec: float,
+    ) -> None:
+        """Sleep out a bag's offset, then start its engine.
 
-    async def _cancel_delay_tasks(self) -> None:
-        for t in self._delay_tasks:
-            if not t.done():
-                t.cancel()
-        if self._delay_tasks:
-            await asyncio.gather(*self._delay_tasks, return_exceptions=True)
-        self._delay_tasks = []
+        pause() and stop() cancel this task; pause() keeps ``pending`` so
+        the next play() reschedules what's left of the offset.
+        """
+        await asyncio.sleep(delay_sec)
+        if self._pending.get(index) is pending:
+            del self._pending[index]
+        if not self._stopped:
+            await engine.play()
