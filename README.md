@@ -210,7 +210,7 @@ Run `resurrector doctor` any time to see which extras are active.
 
 ## Try every feature in 30 seconds
 
-The repo ships with **17 standalone exploration scripts** under [examples/](examples/) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
+The repo ships with **17 standalone exploration scripts** under [examples/](https://github.com/vikramnagashoka/rosbag-resurrector/tree/main/examples) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
 
 ```bash
 python examples/01_bag_frame_basics.py        # the pandas-like API
@@ -232,7 +232,7 @@ Each script:
 - Auto-skips with install instructions when an optional extra (CLIP, OpenCV, etc.) isn't installed
 - Has a one-line "what this is and why" header so you can decide whether to keep reading
 
-Full index in [examples/README.md](examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 17 pass on a fresh install, the toolkit is healthy.
+Full index in [examples/README.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 17 pass on a fresh install, the toolkit is healthy.
 
 ## Features
 
@@ -679,7 +679,7 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 
 ## Architecture
 
-**Deep-dive: [ARCHITECTURE.md](ARCHITECTURE.md)** — the system shape, the
+**Deep-dive: [ARCHITECTURE.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/ARCHITECTURE.md)** — the system shape, the
 load-bearing design decisions and their tradeoffs, and what I'd do differently.
 The short version:
 
@@ -707,7 +707,7 @@ That rule applies to: dashboard plotting, sync, health checks, density, cross-ba
 
 Two formats are explicit exceptions: **NumPy `.npz`** is bounded by total converted-array size and hard-capped at 1 M rows (use Parquet for larger topics — clear `LargeTopicError` is raised). The eager **`bf["/topic"].to_polars()`** path materializes the full topic and refuses topics > 1 M messages unless the user passes `force=True`.
 
-The contract is verified by [tests/test_streaming_oom.py](tests/test_streaming_oom.py), which builds a 10 M-message synthetic bag and asserts peak RSS deltas across every workflow. Run it locally with `pytest -m slow`.
+The contract is verified by [tests/test_streaming_oom.py](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/tests/test_streaming_oom.py), which builds a 10 M-message synthetic bag and asserts peak RSS deltas across every workflow. Run it locally with `pytest -m slow`.
 
 ### Tuning the bounds
 

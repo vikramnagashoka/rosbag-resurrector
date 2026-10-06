@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "rosbag-resurrector"
 version = "0.8.4"
 description = "Stop letting your rosbag data rot. A pandas-like analysis tool for robotics bag files — no ROS install required."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     {name = "RosBag Resurrector Contributors"},
@@ -20,7 +21,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -40,7 +40,10 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.24.0",
     "duckdb>=0.10.0",
-    "typer[all]>=0.9.0",
+    # No [all] extra: typer has shipped rich + shellingham as plain
+    # dependencies since 0.12.1 and later dropped the extra. 0.16.0 is the
+    # first release whose --help works with click 8.2+.
+    "typer>=0.16.0",
     "rich>=13.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.27.0",
