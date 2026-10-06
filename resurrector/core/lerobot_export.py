@@ -23,13 +23,15 @@ Our job is the mapping from a bag to LeRobot frames:
 
 Memory: the resampler streams ``iter_chunks()`` and holds one chunk plus the
 grid-shaped output; images stream one frame at a time (LeRobot spills frames
-to disk before encoding). The output itself is grid-sized by definition.
+to disk before encoding; the emptied spill directories are removed after
+``finalize()``). The output itself is grid-sized by definition.
 """
 
 from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -335,6 +337,25 @@ def _features(ep: _Episode, cam_shapes: dict[str, tuple[int, int, int]], use_vid
     return feats
 
 
+def _remove_empty_image_dirs(root: Path) -> None:
+    """Remove the empty ``images/`` spill directories LeRobot leaves behind.
+
+    In video mode LeRobot writes each camera frame as a PNG under
+    ``images/<camera>/...``, encodes the episode, then deletes the PNGs but
+    not the per-camera directories. Only empty directories are removed
+    (``os.rmdir`` refuses anything else), so image-mode datasets
+    (``use_videos=False``) keep their frames.
+    """
+    images = root / "images"
+    if not images.is_dir():
+        return
+    for dirpath, _dirs, _files in os.walk(images, topdown=False):
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass  # not empty
+
+
 def _prepare_root(root: Path) -> None:
     """LeRobot's create() requires a non-existent root. Allow an empty dir."""
     if root.exists():
@@ -450,6 +471,7 @@ def export_lerobot(
         shutil.rmtree(root, ignore_errors=True)
         raise
     dataset.finalize()
+    _remove_empty_image_dirs(root)
 
     logger.info("Wrote LeRobot dataset: %d episode(s), %d frames @ %d fps -> %s",
                 len(bags), total_frames, fps, root)

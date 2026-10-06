@@ -11,32 +11,59 @@ Covers:
 - dry_run writes README.md, counts files, skips upload
 - Missing-directory error
 - ImportError surfaced when huggingface_hub absent + not dry_run
+- The nested dataset_config.json shape DatasetManager actually writes
+  (card + CLI QC both read it), checked against a real export
+- Format-aware Loading snippet (LeRobot datasets load via LeRobotDataset)
+- LeRobot datasets get the codebase-version tag LeRobotDataset needs
 """
 
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from resurrector.core.publish import (
     PublishResult,
     build_dataset_card,
     publish_dataset,
 )
+from resurrector.demo.sample_bag import BagConfig, generate_bag
 
 
 @pytest.fixture
 def dataset_dir():
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
-        # A minimal materialized dataset: config + manifest + a data file.
+        # A minimal materialized LeRobot dataset. dataset_config.json has the
+        # nested shape DatasetManager.export_version writes: the version
+        # config under "config", the card fields under "metadata".
         (p / "dataset_config.json").write_text(json.dumps({
-            "export_format": "lerobot",
-            "topics": ["/imu/data", "/camera/rgb"],
-            "bag_refs": ["/data/run1.mcap", "/data/run2.mcap"],
+            "name": "pick-place",
+            "version": "1.0",
+            "config": {
+                "export_format": "lerobot",
+                "topics": ["/imu/data", "/camera/rgb"],
+                "bag_refs": [
+                    {"path": "/data/run1.mcap", "topics": None,
+                     "start_time": None, "end_time": None},
+                    {"path": "/data/run2.mcap", "topics": None,
+                     "start_time": None, "end_time": None},
+                ],
+                "sync_config": None,
+                "downsample_hz": None,
+            },
+            "metadata": {"description": "Pick the red cube."},
+            "created_at": "2026-10-01 12:00:00",
+        }))
+        (p / "meta").mkdir()
+        (p / "meta" / "info.json").write_text(json.dumps({
+            "codebase_version": "v3.0", "fps": 30,
         }))
         (p / "manifest.json").write_text(json.dumps({
             "data/episode_0.parquet": "abc",
@@ -72,9 +99,61 @@ class TestBuildDatasetCard:
         assert "`/imu/data`" in card
         assert "`/camera/rgb`" in card
 
-    def test_load_snippet_uses_repo_id(self, dataset_dir):
+    def test_lerobot_load_snippet_uses_lerobot_dataset(self, dataset_dir):
+        """Would catch: the card telling LeRobot users to call
+        ``datasets.load_dataset``, which doesn't understand a LeRobot v3
+        layout (videos, episode metadata) and isn't how LeRobot loads it."""
         card = build_dataset_card(dataset_dir, "me/pick-place")
-        assert 'load_dataset("me/pick-place")' in card
+        assert "from lerobot.datasets.lerobot_dataset import LeRobotDataset" in card
+        assert 'ds = LeRobotDataset("me/pick-place")' in card
+        assert "load_dataset" not in card
+
+    def test_bare_lerobot_export_dir_gets_lerobot_snippet(self):
+        """`resurrector export --preset lerobot` writes no dataset_config.json;
+        the LeRobot layout itself (meta/info.json) identifies the format."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "meta").mkdir()
+            (p / "meta" / "info.json").write_text(json.dumps({
+                "codebase_version": "v3.0", "fps": 30,
+            }))
+            card = build_dataset_card(p, "me/raw")
+        assert "| Format | `lerobot` |" in card
+        assert 'ds = LeRobotDataset("me/raw")' in card
+        assert "load_dataset" not in card
+
+    def test_parquet_load_snippet_still_uses_datasets(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "dataset_config.json").write_text(json.dumps({
+                "config": {"export_format": "parquet", "topics": ["/imu/data"],
+                           "bag_refs": [{"path": "/data/a.mcap"}]},
+                "metadata": {},
+            }))
+            card = build_dataset_card(p, "me/tabular")
+        assert "from datasets import load_dataset" in card
+        assert 'load_dataset("me/tabular")' in card
+        assert "LeRobotDataset" not in card
+
+    def test_description_read_from_metadata(self, dataset_dir):
+        card = build_dataset_card(dataset_dir, "me/pick-place")
+        assert "Pick the red cube." in card
+
+    def test_flat_config_still_read(self):
+        """A hand-written flat dataset_config.json keeps working."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "dataset_config.json").write_text(json.dumps({
+                "export_format": "hdf5",
+                "topics": ["/a", "/b", "/c"],
+                "bag_refs": ["/data/run1.mcap"],
+                "description": "flat shape",
+            }))
+            card = build_dataset_card(p, "me/flat")
+        assert "| Format | `hdf5` |" in card
+        assert "| Source bags | 1 |" in card
+        assert "| Topics | 3 |" in card
+        assert "flat shape" in card
 
     def test_quality_section_clean_grade(self, dataset_dir):
         qc = {"summary": {"n_bags": 2, "n_errors": 0, "n_warnings": 0}}
@@ -138,3 +217,136 @@ class TestPublishDataset:
         monkeypatch.setattr(builtins, "__import__", fake_import)
         with pytest.raises(ImportError, match="huggingface_hub"):
             publish_dataset(dataset_dir, "me/x", dry_run=False)
+
+
+class _FakeHub:
+    """Stand-in ``huggingface_hub`` module that records HfApi calls."""
+
+    def __init__(self, existing_tags=()):
+        self.calls: list[tuple[str, dict]] = []
+        self.existing_tags = list(existing_tags)
+        hub = self
+
+        class HfApi:
+            def __init__(self, token=None):
+                pass
+
+            def create_repo(self, **kw):
+                hub.calls.append(("create_repo", kw))
+
+            def upload_folder(self, **kw):
+                hub.calls.append(("upload_folder", kw))
+
+            def list_repo_refs(self, repo_id, **kw):
+                hub.calls.append(("list_repo_refs", {"repo_id": repo_id, **kw}))
+                return types.SimpleNamespace(
+                    tags=[types.SimpleNamespace(name=t) for t in hub.existing_tags],
+                )
+
+            def delete_tag(self, repo_id, **kw):
+                hub.calls.append(("delete_tag", {"repo_id": repo_id, **kw}))
+
+            def create_tag(self, repo_id, **kw):
+                hub.calls.append(("create_tag", {"repo_id": repo_id, **kw}))
+
+        self.module = types.ModuleType("huggingface_hub")
+        self.module.HfApi = HfApi
+
+    def names(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+
+class TestLeRobotVersionTag:
+    """``LeRobotDataset(repo_id)`` refuses a Hub repo that has no
+    codebase-version tag ("Your dataset must be tagged with a codebase
+    version"), so the card's snippet only works if publish tags the repo
+    the way LeRobot's own push_to_hub does."""
+
+    def test_lerobot_publish_tags_codebase_version(self, dataset_dir, monkeypatch):
+        hub = _FakeHub()
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub.module)
+        publish_dataset(dataset_dir, "me/pick-place", dry_run=False)
+        tags = [kw for name, kw in hub.calls if name == "create_tag"]
+        assert tags == [{"repo_id": "me/pick-place", "tag": "v3.0", "repo_type": "dataset"}]
+        assert hub.names().index("create_tag") > hub.names().index("upload_folder")
+
+    def test_republish_moves_existing_tag(self, dataset_dir, monkeypatch):
+        """A stale tag would pin LeRobot to the previous upload's commit."""
+        hub = _FakeHub(existing_tags=["v3.0"])
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub.module)
+        publish_dataset(dataset_dir, "me/pick-place", dry_run=False)
+        names = hub.names()
+        assert "delete_tag" in names
+        assert names.index("upload_folder") < names.index("delete_tag") < names.index("create_tag")
+
+    def test_non_lerobot_publish_does_not_tag(self, monkeypatch):
+        hub = _FakeHub()
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub.module)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "dataset_config.json").write_text(json.dumps({
+                "config": {"export_format": "parquet"}, "metadata": {},
+            }))
+            publish_dataset(p, "me/tabular", dry_run=False)
+        assert "upload_folder" in hub.names()
+        assert "create_tag" not in hub.names()
+
+    def test_dry_run_never_touches_the_hub(self, dataset_dir, monkeypatch):
+        hub = _FakeHub()
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hub.module)
+        publish_dataset(dataset_dir, "me/pick-place", dry_run=True)
+        assert hub.calls == []
+
+
+@pytest.fixture
+def real_dataset_export():
+    """A dataset exported by DatasetManager — the producer whose
+    dataset_config.json the card builder and `resurrector publish` read."""
+    from resurrector.core.dataset import BagRef, DatasetManager, DatasetMetadata
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        bag = generate_bag(tmp / "run1.mcap", BagConfig(duration_sec=2.0))
+        mgr = DatasetManager(tmp / "idx.db")
+        try:
+            mgr.create("pick-place")
+            mgr.create_version(
+                "pick-place", "1.0", [BagRef(path=str(bag))],
+                topics=["/imu/data", "/joint_states"],
+                export_format="parquet",
+                metadata=DatasetMetadata(description="Pick the red cube."),
+            )
+            out = mgr.export_version("pick-place", "1.0", str(tmp / "datasets"))
+        finally:
+            mgr.close()
+        yield out
+
+
+class TestRealDatasetExport:
+    """Would catch: the card and CLI reading export_format / topics /
+    bag_refs / description from the top level of dataset_config.json, when
+    DatasetManager nests them under "config" and "metadata". Every
+    published dataset showed Format `unknown`, 0 bags, 0 topics, no
+    description, and `resurrector publish` always skipped QC."""
+
+    def test_card_reflects_dataset_config(self, real_dataset_export):
+        card = build_dataset_card(real_dataset_export, "me/pick-place")
+        assert "| Format | `parquet` |" in card
+        assert "| Source bags | 1 |" in card
+        assert "| Topics | 2 |" in card
+        assert "`/imu/data`" in card and "`/joint_states`" in card
+        assert "Pick the red cube." in card
+
+    def test_cli_publish_runs_qc_on_recorded_bags(self, real_dataset_export):
+        from resurrector.cli.main import app
+
+        result = CliRunner().invoke(app, [
+            "publish", str(real_dataset_export),
+            "--repo-id", "me/pick-place", "--dry-run",
+        ], env={"COLUMNS": "200"})
+        assert result.exit_code == 0, result.stdout
+        assert "QC skipped" not in result.stdout
+        assert "across 1 bag(s)" in result.stdout
+        card = (real_dataset_export / "README.md").read_text()
+        assert "## Data quality" in card
+        assert "Bags checked: 1" in card

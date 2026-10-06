@@ -184,6 +184,42 @@ class TestGuards:
         assert "Python 3.12" in INSTALL_HINT
 
 
+class TestImageSpillCleanup:
+    """LeRobot spills camera frames to ``images/<camera>/...`` and deletes
+    the PNGs once the video is encoded, but leaves the directories."""
+
+    def test_removes_only_empty_image_dirs(self, tmp_dir):
+        from resurrector.core.lerobot_export import _remove_empty_image_dirs
+
+        images = tmp_dir / "images"
+        (images / "observation.images.cam_a" / "episode-000000").mkdir(parents=True)
+        (images / "observation.images.cam_b").mkdir()
+        kept = images / "observation.images.cam_c" / "episode-000000"
+        kept.mkdir(parents=True)
+        (kept / "frame-000000.png").write_bytes(b"png")
+        (tmp_dir / "videos").mkdir()  # outside images/: never touched
+
+        _remove_empty_image_dirs(tmp_dir)
+
+        assert not (images / "observation.images.cam_a").exists()
+        assert not (images / "observation.images.cam_b").exists()
+        assert (kept / "frame-000000.png").read_bytes() == b"png"
+        assert (tmp_dir / "videos").is_dir()
+
+    def test_drops_images_dir_once_empty(self, tmp_dir):
+        from resurrector.core.lerobot_export import _remove_empty_image_dirs
+
+        (tmp_dir / "images" / "observation.images.cam_a").mkdir(parents=True)
+        _remove_empty_image_dirs(tmp_dir)
+        assert not (tmp_dir / "images").exists()
+
+    def test_no_images_dir_is_a_no_op(self, tmp_dir):
+        from resurrector.core.lerobot_export import _remove_empty_image_dirs
+
+        _remove_empty_image_dirs(tmp_dir)
+        assert list(tmp_dir.iterdir()) == []
+
+
 # -------------------------------------------- round-trip through real LeRobot
 
 def _lerobot():
@@ -332,3 +368,65 @@ class TestLeRobotRoundTrip:
         with pytest.raises(FileExistsError):
             BagFrame(sample_bag).export(preset="lerobot", output=str(out))
         assert (out / "old.parquet").exists()
+
+    def test_no_empty_image_dirs_left_behind(self, tmp_dir, sample_bag):
+        """Would catch: empty ``images/observation.images.*`` directories
+        left in every video export after LeRobot encoded and deleted the
+        spilled PNGs."""
+        _lerobot()
+        out = tmp_dir / "lr"
+        BagFrame(sample_bag).export(preset="lerobot", output=str(out))
+        empty = [str(p.relative_to(out)) for p in out.rglob("*")
+                 if p.is_dir() and not any(p.iterdir())]
+        assert empty == []
+        assert not (out / "images").exists()
+        ds = _load(out)
+        assert any(k.startswith("observation.images.") for k in ds.meta.features)
+        assert ds[0]["observation.images.camera_rgb"].shape[0] == 3
+
+    def test_image_mode_dataset_still_loads(self, tmp_dir, sample_bag):
+        """``use_videos=False`` stores frames as images; the cleanup must not
+        break that layout (it only ever removes empty directories)."""
+        _lerobot()
+        from resurrector.core.lerobot_export import export_lerobot
+
+        out = tmp_dir / "lr_img"
+        export_lerobot([BagFrame(sample_bag)], ["/imu/data", "/camera/rgb"], out,
+                       use_videos=False)
+        ds = _load(out)
+        assert ds.meta.features["observation.images.camera_rgb"]["dtype"] == "image"
+        assert ds[0]["observation.images.camera_rgb"].shape[0] == 3
+
+    def test_dataset_readme_quick_start_runs(self, tmp_dir):
+        """The README's quick start must actually load the dataset.
+
+        Would catch: a LeRobot dataset README whose quick start was a
+        "load your lerobot files" comment (and whose config section listed
+        a sync method the export never applied)."""
+        import re
+        import subprocess
+
+        _lerobot()
+        from resurrector.core.dataset import BagRef, DatasetManager, SyncConfig
+
+        a = generate_bag(tmp_dir / "a.mcap", BagConfig(duration_sec=2.0))
+        b = generate_bag(tmp_dir / "b.mcap", BagConfig(duration_sec=2.0))
+        mgr = DatasetManager(tmp_dir / "idx.db")
+        mgr.create("pick")
+        mgr.create_version(
+            "pick", "1.0", [BagRef(path=str(a)), BagRef(path=str(b))],
+            topics=["/imu/data", "/joint_states"], export_format="lerobot",
+            sync_config=SyncConfig(method="nearest", tolerance_ms=50),
+        )
+        root = Path(mgr.export_version("pick", "1.0", str(tmp_dir / "datasets")))
+        mgr.close()
+
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        assert "Sync method" not in readme
+        assert "**Frame rate**: `30 fps`" in readme
+        code = re.search(r"## Quick Start\n\n```python\n(.*?)```", readme, re.S).group(1)
+        assert "LeRobotDataset" in code
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                              text=True, timeout=600, cwd=str(tmp_dir))
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        assert "episodes: 2" in proc.stdout, proc.stdout

@@ -53,9 +53,47 @@ class PublishResult:
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_dataset_config(dataset_dir: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return ``(config, metadata)`` from a dataset dir's ``dataset_config.json``.
+
+    ``DatasetManager.export_version`` nests the version config (format,
+    topics, bag_refs, ...) under ``"config"`` and the card fields under
+    ``"metadata"``. A flat hand-written file is read as the config itself.
+    A missing or unreadable file gives ``({}, {})``.
+    """
+    raw = _load_json(Path(dataset_dir) / "dataset_config.json")
+    config = raw.get("config")
+    metadata = raw.get("metadata")
+    return (
+        config if isinstance(config, dict) else raw,
+        metadata if isinstance(metadata, dict) else {},
+    )
+
+
+def _lerobot_codebase_version(dataset_dir: Path) -> str | None:
+    """Codebase version of a LeRobot dataset dir (``"v3.0"``), else None."""
+    version = _load_json(dataset_dir / "meta" / "info.json").get("codebase_version")
+    return version if isinstance(version, str) and version else None
+
+
+def _tag_codebase_version(api: Any, repo_id: str, tag: str) -> None:
+    """Point ``tag`` at the commit just uploaded.
+
+    ``LeRobotDataset(repo_id)`` picks its Hub revision from the repo's
+    codebase-version tags and refuses a repo that has none. Re-publishing
+    has to move the tag, or LeRobot keeps loading the previous upload.
+    Same steps as LeRobot's own ``push_to_hub``.
+    """
+    existing = {t.name for t in api.list_repo_refs(repo_id, repo_type="dataset").tags}
+    if tag in existing:
+        api.delete_tag(repo_id, tag=tag, repo_type="dataset")
+    api.create_tag(repo_id, tag=tag, repo_type="dataset")
 
 
 def _grade_from_score(score: int) -> str:
@@ -78,9 +116,11 @@ def build_dataset_card(
 ) -> str:
     """Build the HuggingFace dataset-card markdown for a dataset directory.
 
-    Pure function — no network, no filesystem writes. Reads ``manifest.json``
-    and ``dataset_config.json`` from the directory if present; tolerates their
-    absence.
+    Pure function — no network, no filesystem writes. Reads ``manifest.json``,
+    ``dataset_config.json`` and (for LeRobot datasets) ``meta/info.json``
+    from the directory if present; tolerates their absence. A LeRobot
+    dataset gets a ``LeRobotDataset`` loading snippet, everything else
+    ``datasets.load_dataset``.
 
     Args:
         dataset_dir: Path to the materialized dataset.
@@ -96,16 +136,20 @@ def build_dataset_card(
     """
     dataset_dir = Path(dataset_dir)
     manifest = _load_json(dataset_dir / "manifest.json")
-    config = _load_json(dataset_dir / "dataset_config.json")
+    config, metadata = read_dataset_config(dataset_dir)
     task_categories = task_categories or ["robotics"]
     # Attribution / description precedence: explicit arg > config description.
     # For re-hosted CC-BY data this is where the required credit lands.
     if extra_description is None:
-        extra_description = config.get("description")
+        extra_description = metadata.get("description") or config.get("description")
 
     data_files = [f for f in manifest if not f.endswith(".json") and not f.endswith(".md")]
     topics = config.get("topics") or []
-    export_format = config.get("export_format", "unknown")
+    # `resurrector export --preset lerobot` writes no dataset_config.json;
+    # the LeRobot layout identifies itself.
+    export_format = config.get("export_format") or (
+        "lerobot" if _lerobot_codebase_version(dataset_dir) else "unknown"
+    )
     bag_refs = config.get("bag_refs") or []
     name = repo_id.split("/")[-1]
 
@@ -187,13 +231,23 @@ def build_dataset_card(
             body.append(f"- … and {len(topics) - 50} more")
         body.append("")
 
-    # Load snippet
+    # Load snippet. A LeRobot v3 dataset (episode metadata, MP4 cameras)
+    # isn't a plain HF table; LeRobot's own loader is the way in.
+    if export_format == "lerobot":
+        load = [
+            "from lerobot.datasets.lerobot_dataset import LeRobotDataset",
+            f'ds = LeRobotDataset("{repo_id}")',
+        ]
+    else:
+        load = [
+            "from datasets import load_dataset",
+            f'ds = load_dataset("{repo_id}")',
+        ]
     body += [
         "## Loading",
         "",
         "```python",
-        "from datasets import load_dataset",
-        f'ds = load_dataset("{repo_id}")',
+        *load,
         "```",
         "",
         "---",
@@ -217,9 +271,11 @@ def publish_dataset(
     """Publish a dataset directory to the HuggingFace Hub.
 
     Builds the dataset card, writes it as ``README.md`` into the directory,
-    and uploads the whole folder. With ``dry_run=True`` it does everything
-    except the network upload (writes the card, counts files) so the flow is
-    verifiable offline.
+    and uploads the whole folder. A LeRobot dataset's repo is then tagged
+    with its codebase version (e.g. ``v3.0``), which ``LeRobotDataset``
+    requires before it will load from the Hub. With ``dry_run=True`` it does
+    everything except the network calls (writes the card, counts files) so
+    the flow is verifiable offline.
 
     Args:
         dataset_dir: Materialized dataset directory.
@@ -276,6 +332,9 @@ def publish_dataset(
         repo_id=repo_id,
         repo_type="dataset",
     )
+    codebase_version = _lerobot_codebase_version(dataset_dir)
+    if codebase_version:
+        _tag_codebase_version(api, repo_id, codebase_version)
     return PublishResult(
         repo_id=repo_id, url=url, card_path=str(card_path),
         n_files=n_files, dry_run=False,
