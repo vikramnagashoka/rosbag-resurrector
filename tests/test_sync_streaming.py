@@ -310,3 +310,192 @@ def test_auto_picks_streaming_when_threshold_lowered(sync_fixtures_dir, monkeypa
         max_lateness_ms=100.0,
     )
     assert result.height == 10
+
+
+# ---------------------------------------------------------------------------
+# iter_synchronize: the chunked form behind synced exports. Concatenating
+# its chunks must reproduce synchronize() exactly (values, dtypes, column
+# order), for every fixture, both engines, and chunk sizes that put
+# boundaries everywhere.
+# ---------------------------------------------------------------------------
+
+_PERMISSIVE = {"out_of_order": "reorder", "max_lateness_ms": 100.0}
+
+_ITER_CASES = [
+    ("eager", "nearest", {}),
+    ("eager", "sample_and_hold", {}),
+    ("eager", "interpolate", {}),
+    ("streaming", "nearest", _PERMISSIVE),
+    ("streaming", "sample_and_hold", _PERMISSIVE),
+    ("streaming", "interpolate", {**_PERMISSIVE, "boundary": "null"}),
+    ("streaming", "interpolate", {**_PERMISSIVE, "boundary": "hold"}),
+    ("streaming", "interpolate", {**_PERMISSIVE, "boundary": "drop"}),
+]
+
+
+def _chunk_sizes(n_rows: int) -> tuple[int, ...]:
+    """Small enough to split every fixture, with boundaries that drift."""
+    if n_rows <= 60:
+        return (1, 3)
+    return (n_rows // 7 + 1,)
+
+
+_DECODED: dict[tuple[str, str], pl.DataFrame] = {}
+
+
+class _DecodedView:
+    """A fixture topic decoded once per session.
+
+    Stands in for TopicView (the engines only use ``message_count``,
+    ``iter_chunks`` and ``to_polars``) so the equivalence matrix below
+    doesn't re-parse the 10K-message burst fixture for every case.
+    """
+
+    def __init__(self, bag_path: Path, name: str):
+        key = (str(bag_path), name)
+        if key not in _DECODED:
+            _DECODED[key] = BagFrame(bag_path)[name].to_polars()
+        self._df = _DECODED[key]
+        self.name = name
+        self.message_count = self._df.height
+
+    def to_polars(self, force: bool = False) -> pl.DataFrame:
+        return self._df
+
+    def iter_chunks(self, chunk_size: int = 50_000):
+        for start in range(0, self._df.height, chunk_size):
+            yield self._df.slice(start, chunk_size)
+
+
+def _decoded_views(bag_path: Path):
+    return {
+        "/joint_states": _DecodedView(bag_path, "/joint_states"),
+        "/imu/data": _DecodedView(bag_path, "/imu/data"),
+    }
+
+
+@pytest.mark.parametrize("anchor", ["/joint_states", "/imu/data"])
+@pytest.mark.parametrize(
+    "engine,method,extra", _ITER_CASES,
+    ids=[f"{e}-{m}-{x.get('boundary', '')}" for e, m, x in _ITER_CASES],
+)
+@pytest.mark.parametrize("builder", ALL_FIXTURE_BUILDERS, ids=lambda b: b.__name__)
+def test_iter_synchronize_chunks_concat_to_synchronize(
+    builder, engine, method, extra, anchor, sync_fixtures_dir,
+):
+    """Would catch: a chunk boundary changing which sample is matched,
+    or chunks with drifting schemas (a streaming writer can't append
+    those)."""
+    from polars.testing import assert_frame_equal
+
+    from resurrector.core.sync import iter_synchronize
+
+    fixture = builder(sync_fixtures_dir)
+    kwargs = dict(
+        method=method, tolerance_ms=50.0, anchor=anchor, engine=engine, **extra,
+    )
+    whole = synchronize(_decoded_views(fixture.path), **kwargs)
+
+    for chunk_size in _chunk_sizes(whole.height):
+        chunks = list(iter_synchronize(
+            _decoded_views(fixture.path), chunk_size=chunk_size, **kwargs,
+        ))
+        assert all(0 < c.height <= chunk_size for c in chunks)
+        assert all(c.schema == chunks[0].schema for c in chunks)
+        joined = pl.concat(chunks) if chunks else pl.DataFrame()
+        assert_frame_equal(joined, whole)
+
+
+class _ProbeView:
+    """TopicView stand-in that counts how many input chunks were pulled."""
+
+    def __init__(self, name: str, n_chunks: int, rows: int, period_ns: int):
+        self.name = name
+        self.n_chunks = n_chunks
+        self.rows = rows
+        self.period_ns = period_ns
+        self.message_count = n_chunks * rows
+        self.pulled = 0
+
+    def iter_chunks(self, chunk_size: int = 50_000):
+        import numpy as np
+        for c in range(self.n_chunks):
+            self.pulled += 1
+            ts = (np.arange(self.rows) + c * self.rows) * self.period_ns
+            yield pl.DataFrame({"timestamp_ns": ts, "x": ts.astype(float)})
+
+
+@pytest.mark.parametrize("method", ["nearest", "sample_and_hold", "interpolate"])
+def test_streaming_iter_synchronize_yields_before_reading_everything(method):
+    """The streaming engine must hand out output as it goes, not after
+    reading the whole bag. Would catch: output rows accumulated into one
+    list and converted at the end (the behaviour through 0.8.4)."""
+    from resurrector.core.sync import iter_synchronize
+
+    anchor = _ProbeView("/anchor", n_chunks=50, rows=10, period_ns=10_000_000)
+    other = _ProbeView("/other", n_chunks=50, rows=10, period_ns=10_000_000)
+    it = iter_synchronize(
+        {"/anchor": anchor, "/other": other},
+        method=method, anchor="/anchor", engine="streaming", chunk_size=10,
+    )
+    first = next(it)
+    assert first.height == 10
+    assert anchor.pulled <= 2 and other.pulled <= 2
+
+    rest = list(it)
+    assert sum(c.height for c in rest) == 490
+    assert anchor.pulled == 50 and other.pulled == 50
+
+
+def test_streaming_warns_when_a_topic_gains_columns(caplog):
+    """The output schema comes from each topic's first chunk. A column
+    that only appears later can't be added, so say so instead of
+    dropping it silently."""
+    from resurrector.core.sync import iter_synchronize
+
+    class GrowingView:
+        name = "/grow"
+        message_count = 4
+
+        def iter_chunks(self, chunk_size=50_000):
+            yield pl.DataFrame({"timestamp_ns": [0, 10], "x": [1.0, 2.0]})
+            yield pl.DataFrame({"timestamp_ns": [20, 30], "x": [3.0, 4.0], "y": [5.0, 6.0]})
+
+    anchor = _ProbeView("/anchor", n_chunks=1, rows=4, period_ns=10)
+    with caplog.at_level("WARNING", logger="resurrector.core.sync"):
+        out = pl.concat(list(iter_synchronize(
+            {"/anchor": anchor, "/grow": GrowingView()},
+            anchor="/anchor", engine="streaming", tolerance_ms=1.0,
+        )))
+
+    assert "grow__y" not in out.columns
+    assert out["grow__x"].to_list() == [1.0, 2.0, 3.0, 4.0]
+    assert "/grow gained columns ['y']" in caplog.text
+
+
+def test_iter_synchronize_rejects_bad_chunk_size(sync_fixtures_dir):
+    from resurrector.core.sync import iter_synchronize
+
+    fixture = fast_vs_slow(sync_fixtures_dir)
+    with pytest.raises(ValueError, match="chunk_size"):
+        iter_synchronize(_topic_views(fixture.path), chunk_size=0)
+
+
+def test_streaming_schema_fixed_when_a_topic_matches_late(sync_fixtures_dir):
+    """A topic that has no match in the first chunk still gets its
+    columns (typed, null) in that chunk, so every chunk can go to the
+    same Parquet writer. Would catch: schema inferred per chunk, which
+    breaks a synced export when e.g. a camera starts recording late."""
+    from resurrector.core.sync import iter_synchronize
+
+    fixture = missing_before_first(sync_fixtures_dir)
+    chunks = list(iter_synchronize(
+        _topic_views(fixture.path),
+        method="nearest", tolerance_ms=5.0, anchor="/joint_states",
+        engine="streaming", chunk_size=1,
+    ))
+    imu_col = "imu_data__linear_acceleration.x"
+    assert chunks[0][imu_col].to_list() == [None]
+    assert chunks[0].schema[imu_col] == pl.Float64
+    assert chunks[2][imu_col].to_list() != [None]
+    assert all(c.schema == chunks[0].schema for c in chunks)

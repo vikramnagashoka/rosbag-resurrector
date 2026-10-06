@@ -12,7 +12,7 @@ Provides utilities for:
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 import polars as pl
@@ -137,6 +137,85 @@ def downsample_temporal(
     # Remove duplicates while preserving order
     unique_indices = list(dict.fromkeys(indices.tolist()))
     return df[unique_indices]
+
+
+def iter_downsample_temporal(
+    chunks: Iterable[pl.DataFrame],
+    target_hz: float,
+    timestamp_col: str = "timestamp_ns",
+) -> Iterator[pl.DataFrame]:
+    """Streaming :func:`downsample_temporal` over a sequence of chunks.
+
+    Yields exactly the rows ``downsample_temporal(pl.concat(chunks))``
+    selects, in order, without concatenating. The target grid starts at
+    the first row of the stream and carries across chunk boundaries, so
+    unlike downsampling each chunk on its own, chunking doesn't shift
+    or drop samples. Memory: one chunk plus at most two carried rows.
+
+    A target is resolved once a strictly later timestamp has arrived:
+    that proves it lies before the stream's last timestamp (the
+    ``np.arange(start, end)`` bound) and its right neighbour is known.
+    Timestamps must be non-decreasing, as for :func:`downsample_temporal`.
+
+    Empty chunks are skipped. If no row is selected, one empty frame
+    with the input schema is yielded, so a writer still creates its file.
+    """
+    interval_ns = int(1e9 / target_hz)
+    start: int | None = None
+    next_k = 0  # grid index of the first unresolved target
+    carry: pl.DataFrame | None = None
+    carry_index = np.empty(0, dtype=np.int64)
+    rows_seen = 0
+    last_emitted = -1
+    empty: pl.DataFrame | None = None
+    emitted_any = False
+
+    for chunk in chunks:
+        if chunk.height == 0:
+            continue
+        if empty is None:
+            empty = chunk.clear()
+        chunk_ts = chunk[timestamp_col].to_numpy()
+        if start is None:
+            start = int(chunk_ts[0])
+        chunk_index = np.arange(rows_seen, rows_seen + chunk.height, dtype=np.int64)
+        rows_seen += chunk.height
+
+        if carry is None:
+            work, ts, index = chunk, chunk_ts, chunk_index
+        else:
+            work = pl.concat([carry, chunk], how="vertical")
+            ts = np.concatenate([carry[timestamp_col].to_numpy(), chunk_ts])
+            index = np.concatenate([carry_index, chunk_index])
+
+        newest = int(ts[-1])
+        resolvable = -(-(newest - start) // interval_ns)  # targets < newest
+        if resolvable > next_k:
+            targets = start + np.arange(next_k, resolvable, dtype=np.int64) * interval_ns
+            idx = np.searchsorted(ts, targets)
+            d_at = np.abs(ts[idx] - targets)
+            d_before = np.abs(ts[np.maximum(idx - 1, 0)] - targets)
+            picks = np.where((idx > 0) & (d_before < d_at), idx - 1, idx)
+            # Picks never move backwards, so dedup is "newer than the last".
+            picked = index[picks]
+            fresh = picked > np.concatenate(([last_emitted], picked[:-1]))
+            last_emitted = max(last_emitted, int(picked[-1]))
+            next_k = resolvable
+            if fresh.any():
+                emitted_any = True
+                yield work[picks[fresh]]
+
+        # Keep what an unresolved target (>= newest) can still pick: the
+        # first row of the trailing run at ``newest`` (where searchsorted
+        # lands for a target equal to it) and the last row (left
+        # neighbour of the next chunk's first row).
+        run_start = int(np.searchsorted(ts, newest))
+        keep = [run_start] if run_start == len(ts) - 1 else [run_start, len(ts) - 1]
+        carry = work[keep]
+        carry_index = index[keep]
+
+    if not emitted_any and empty is not None:
+        yield empty
 
 
 def laser_scan_to_cartesian(

@@ -20,6 +20,18 @@ format:
 under ``LARGE_TOPIC_THRESHOLD`` and to streaming otherwise — small bags
 keep the v0.3.x behavior, big bags get the bounded-memory path.
 
+Both engines produce output in chunks through :func:`iter_synchronize`;
+:func:`synchronize` concatenates them. The output schema is fixed
+before the first chunk, so every chunk can go to the same streaming
+writer (this is how synced exports stay bounded):
+
+- eager: exactly the schema the one-shot v0.3.x frame had.
+- streaming: taken from each topic's first input chunk. Anchor columns
+  come first, then each other topic's columns in the order the topics
+  were passed. A topic with no match anywhere still gets its columns
+  (all null), and ``interpolate`` makes numeric and bool columns
+  Float64.
+
 Failure modes are surfaced as typed exceptions:
 
 - :class:`SyncBufferExceededError` — a non-anchor topic produced more
@@ -32,8 +44,10 @@ Failure modes are surfaced as typed exceptions:
 
 from __future__ import annotations
 
+import itertools
+import logging
 from collections import deque
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator
 
 import numpy as np
 import polars as pl
@@ -48,9 +62,22 @@ from resurrector.core.exceptions import (
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import TopicView
 
+log = logging.getLogger("resurrector.core.sync")
+
+# Rows per chunk yielded by iter_synchronize, and per input chunk the
+# streaming engine reads. Matches TopicView.iter_chunks and the export
+# CHUNK_SIZE.
+SYNC_CHUNK_SIZE = 50_000
+
+# Floor on the streaming engine's input chunk: a tiny output chunk
+# shouldn't turn every message into its own DataFrame.
+_MIN_READ_CHUNK = 1_000
+
+_METHODS = ("nearest", "interpolate", "sample_and_hold")
+
 
 # ---------------------------------------------------------------------------
-# Public entry point
+# Public entry points
 # ---------------------------------------------------------------------------
 
 
@@ -102,12 +129,80 @@ def synchronize(
     Returns:
         Unified Polars DataFrame with columns prefixed by topic name
         (except ``timestamp_ns``, which is the anchor topic's
-        timestamp).
+        timestamp). Built by concatenating :func:`iter_synchronize`;
+        use that directly to process a long sync chunk by chunk.
     """
-    if not topic_views:
+    chunks = list(iter_synchronize(
+        topic_views,
+        method=method,
+        tolerance_ms=tolerance_ms,
+        anchor=anchor,
+        engine=engine,
+        out_of_order=out_of_order,
+        boundary=boundary,
+        max_buffer_messages=max_buffer_messages,
+        max_lateness_ms=max_lateness_ms,
+    ))
+    if not chunks:
         return pl.DataFrame()
+    return pl.concat(chunks, how="vertical", rechunk=True)
 
-    # Engine selection.
+
+def iter_synchronize(
+    topic_views: dict[str, "TopicView"],
+    method: str = "nearest",
+    tolerance_ms: float = 50.0,
+    anchor: str | None = None,
+    *,
+    engine: str = "auto",
+    out_of_order: str = "error",
+    boundary: str = "null",
+    max_buffer_messages: int = 100_000,
+    max_lateness_ms: float = 0.0,
+    chunk_size: int = SYNC_CHUNK_SIZE,
+) -> Iterator[pl.DataFrame]:
+    """Synchronize topics, yielding the result in chunks of ``chunk_size`` rows.
+
+    Same arguments and semantics as :func:`synchronize`; concatenating
+    the chunks gives exactly its DataFrame. Every chunk has the same
+    schema (see the module docstring), and no chunk is empty.
+
+    Memory:
+        - streaming: one output chunk, one input chunk per topic, and
+          the per-topic lookahead buffers. Never the whole result.
+        - eager: every input topic is materialized (eager only runs when
+          they are all under ``LARGE_TOPIC_THRESHOLD``, or when asked
+          for), but output is built one chunk at a time.
+
+    Sync errors (:class:`SyncOutOfOrderError`,
+    :class:`SyncBoundaryError`, :class:`SyncBufferExceededError`) are
+    raised during iteration, possibly after earlier chunks were yielded.
+
+    Args:
+        chunk_size: Maximum rows per yielded DataFrame. The streaming
+            engine also reads its inputs in chunks of this size (at
+            least 1,000 rows).
+
+    Raises:
+        ValueError: Unknown ``engine`` or ``method``, or
+            ``chunk_size < 1``. Raised by the call itself, before
+            iteration.
+        KeyError: Unknown ``anchor``. Streaming raises it on the call;
+            eager on the first ``next()`` (it must read the topics to
+            know which are empty).
+
+    Example::
+
+        from resurrector.core.sync import iter_synchronize
+        views = {t: bf[t] for t in ["/imu/data", "/joint_states"]}
+        for chunk in iter_synchronize(views, method="nearest"):
+            writer.write_table(chunk.to_arrow())
+    """
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    if not topic_views:
+        return iter(())
+
     if engine == "auto":
         engine = (
             "streaming"
@@ -117,24 +212,34 @@ def synchronize(
             )
             else "eager"
         )
+    if engine not in ("eager", "streaming"):
+        raise ValueError(
+            f"Unknown engine: {engine!r}. Use 'eager', 'streaming', or 'auto'."
+        )
+    if method not in _METHODS:
+        raise ValueError(
+            f"Unknown sync method: {method}. "
+            f"Use 'nearest', 'interpolate', or 'sample_and_hold'."
+        )
 
     if engine == "eager":
-        return _synchronize_eager(
-            topic_views, method=method, tolerance_ms=tolerance_ms, anchor=anchor,
-        )
-    if engine == "streaming":
-        return _synchronize_streaming(
+        return _iter_eager(
             topic_views,
             method=method,
             tolerance_ms=tolerance_ms,
             anchor=anchor,
-            out_of_order=out_of_order,
-            boundary=boundary,
-            max_buffer_messages=max_buffer_messages,
-            max_lateness_ms=max_lateness_ms,
+            chunk_size=chunk_size,
         )
-    raise ValueError(
-        f"Unknown engine: {engine!r}. Use 'eager', 'streaming', or 'auto'."
+    return _iter_streaming(
+        topic_views,
+        method=method,
+        tolerance_ms=tolerance_ms,
+        anchor=anchor,
+        out_of_order=out_of_order,
+        boundary=boundary,
+        max_buffer_messages=max_buffer_messages,
+        max_lateness_ms=max_lateness_ms,
+        chunk_size=chunk_size,
     )
 
 
@@ -143,15 +248,21 @@ def synchronize(
 # ---------------------------------------------------------------------------
 
 
-def _synchronize_eager(
+def _iter_eager(
     topic_views: dict[str, "TopicView"],
-    method: str = "nearest",
-    tolerance_ms: float = 50.0,
-    anchor: str | None = None,
-) -> pl.DataFrame:
+    *,
+    method: str,
+    tolerance_ms: float,
+    anchor: str | None,
+    chunk_size: int,
+) -> Iterator[pl.DataFrame]:
     """Eager sync — materializes every topic. v0.3.x behavior.
 
-    Memory: O(N) per topic. Use ``engine="streaming"`` for large bags.
+    Memory: O(N) per input topic, plus one output chunk. Matching is
+    planned once per topic (``nearest`` / ``sample_and_hold``: a source
+    row and a match flag per anchor row; ``interpolate``: the topic's
+    sorted float columns), then each chunk is cut from the plans. Use
+    ``engine="streaming"`` for large bags.
     """
     dfs: dict[str, pl.DataFrame] = {}
     for name, view in topic_views.items():
@@ -171,7 +282,7 @@ def _synchronize_eager(
         dfs[name] = df.rename(renamed)
 
     if not dfs:
-        return pl.DataFrame()
+        return
 
     if anchor is None:
         anchor = max(dfs.keys(), key=lambda k: dfs[k].height)
@@ -180,131 +291,128 @@ def _synchronize_eager(
 
     anchor_df = dfs[anchor]
     anchor_timestamps = anchor_df["timestamp_ns"].to_numpy()
-    tolerance_ns = int(tolerance_ms * 1e6)
+    others = [df for name, df in dfs.items() if name != anchor]
 
-    if method == "nearest":
-        return _eager_nearest(anchor_df, dfs, anchor, anchor_timestamps, tolerance_ns)
+    plans: list[_GatherPlan] | list[_InterpolatePlan]
     if method == "interpolate":
-        return _eager_interpolate(anchor_df, dfs, anchor, anchor_timestamps)
-    if method == "sample_and_hold":
-        return _eager_sample_and_hold(anchor_df, dfs, anchor, anchor_timestamps)
-    raise ValueError(
-        f"Unknown sync method: {method}. "
-        f"Use 'nearest', 'interpolate', or 'sample_and_hold'."
-    )
+        anchor_float = anchor_timestamps.astype(float)
+        plans = [_InterpolatePlan(df, anchor_float) for df in others]
+    else:
+        tolerance_ns = int(tolerance_ms * 1e6)
+        plans = [
+            _GatherPlan(df, anchor_timestamps, method, tolerance_ns)
+            for df in others
+        ]
+
+    for start in range(0, anchor_df.height, chunk_size):
+        out = anchor_df.slice(start, chunk_size)
+        for plan in plans:
+            out = plan.apply(out, start)
+        yield out
 
 
-def _eager_nearest(
-    anchor_df: pl.DataFrame,
-    dfs: dict[str, pl.DataFrame],
-    anchor_name: str,
-    anchor_timestamps: np.ndarray,
-    tolerance_ns: int,
-) -> pl.DataFrame:
-    result = anchor_df.clone()
-    for name, df in dfs.items():
-        if name == anchor_name:
-            continue
+class _GatherPlan:
+    """Eager ``nearest`` / ``sample_and_hold`` for one non-anchor topic.
+
+    Precomputes, for every anchor row, which source row it takes and
+    whether that is a match; ``apply`` gathers one chunk's worth.
+    Column handling matches the v0.3.x one-shot build:
+
+    - numeric (NumPy kind ``f``/``i``): Float64, NaN where unmatched.
+    - anything else: the source dtype, null where unmatched; Null dtype
+      if no anchor row gets a non-null value (what inference gave).
+    """
+
+    def __init__(
+        self,
+        df: pl.DataFrame,
+        anchor_timestamps: np.ndarray,
+        method: str,
+        tolerance_ns: int,
+    ):
         other_timestamps = df["timestamp_ns"].to_numpy()
-        if len(other_timestamps) == 0:
-            continue
         # Sort the non-anchor topic — eager mode handles out-of-order silently.
         sort_idx = np.argsort(other_timestamps)
         other_timestamps = other_timestamps[sort_idx]
+        last = len(other_timestamps) - 1
 
-        indices = np.searchsorted(other_timestamps, anchor_timestamps)
-        indices = np.clip(indices, 0, len(other_timestamps) - 1)
+        if method == "nearest":
+            idx = np.clip(np.searchsorted(other_timestamps, anchor_timestamps), 0, last)
+            # Equal distances resolve to the later sample (idx, the
+            # searchsorted upper bound). The streaming engine mirrors this.
+            d_at = np.abs(other_timestamps[idx] - anchor_timestamps)
+            d_before = np.abs(other_timestamps[np.maximum(idx - 1, 0)] - anchor_timestamps)
+            best = np.where((idx == 0) | (d_at <= d_before), idx, idx - 1)
+            self.valid = np.abs(other_timestamps[best] - anchor_timestamps) <= tolerance_ns
+        else:  # sample_and_hold
+            held = np.searchsorted(other_timestamps, anchor_timestamps, side="right") - 1
+            self.valid = held >= 0
+            best = np.clip(held, 0, last)
+        self.rows = sort_idx[best]
 
-        best_indices = np.empty(len(anchor_timestamps), dtype=np.int64)
-        for i in range(len(anchor_timestamps)):
-            idx = indices[i]
-            if idx == 0:
-                best_indices[i] = 0
+        # (column, source series, mode): "numeric", "typed", or "null".
+        self.columns: list[tuple[str, pl.Series, str]] = []
+        for col in df.columns:
+            if col == "timestamp_ns":
+                continue
+            series = df[col]
+            # The whole column's NumPy kind decides, as it did when the
+            # column was matched in one piece (Int64 with nulls is "f").
+            if series.to_numpy().dtype.kind in ("f", "i"):
+                mode = "numeric"
+            elif (series.is_not_null().to_numpy()[self.rows] & self.valid).any():
+                mode = "typed"
             else:
-                d1 = abs(other_timestamps[idx] - anchor_timestamps[i])
-                d2 = abs(other_timestamps[idx - 1] - anchor_timestamps[i])
-                best_indices[i] = idx if d1 <= d2 else idx - 1
+                mode = "null"
+            self.columns.append((col, series, mode))
 
-        diffs = np.abs(other_timestamps[best_indices] - anchor_timestamps)
-        valid = diffs <= tolerance_ns
-
-        other_cols = [c for c in df.columns if c != "timestamp_ns"]
-        for col in other_cols:
-            values = df[col].to_numpy()[sort_idx]
-            matched = values[best_indices]
-            if matched.dtype.kind in ('f', 'i'):
-                matched = matched.astype(float)
-                matched[~valid] = float('nan')
-                result = result.with_columns(pl.Series(col, matched))
+    def apply(self, out: pl.DataFrame, start: int) -> pl.DataFrame:
+        stop = start + out.height
+        rows = self.rows[start:stop]
+        valid = self.valid[start:stop]
+        for col, series, mode in self.columns:
+            if mode == "numeric":
+                matched = series.gather(rows).to_numpy().astype(float)
+                matched[~valid] = float("nan")
+                out = out.with_columns(pl.Series(col, matched))
+            elif mode == "typed":
+                out = out.with_columns(series.gather(rows).set(pl.Series(~valid), None))
             else:
-                matched_list = [matched[i] if valid[i] else None for i in range(len(matched))]
-                result = result.with_columns(pl.Series(col, matched_list))
-    return result
+                out = out.with_columns(pl.Series(col, [None] * out.height))
+        return out
 
 
-def _eager_interpolate(
-    anchor_df: pl.DataFrame,
-    dfs: dict[str, pl.DataFrame],
-    anchor_name: str,
-    anchor_timestamps: np.ndarray,
-) -> pl.DataFrame:
-    result = anchor_df.clone()
-    for name, df in dfs.items():
-        if name == anchor_name:
-            continue
+class _InterpolatePlan:
+    """Eager ``interpolate`` for one non-anchor topic.
+
+    Holds the topic's sorted timestamps and each float-convertible
+    column (columns that won't convert are dropped, as in v0.3.x);
+    ``apply`` runs ``np.interp`` for one chunk of anchor rows.
+    """
+
+    def __init__(self, df: pl.DataFrame, anchor_float: np.ndarray):
+        self.anchor_float = anchor_float
+        self.columns: list[tuple[str, np.ndarray]] = []
         other_timestamps = df["timestamp_ns"].to_numpy().astype(float)
         if len(other_timestamps) < 2:
-            continue
-        # Sort
+            return
         sort_idx = np.argsort(other_timestamps)
-        other_timestamps = other_timestamps[sort_idx]
-
-        other_cols = [c for c in df.columns if c != "timestamp_ns"]
-        for col in other_cols:
+        self.other_timestamps = other_timestamps[sort_idx]
+        for col in df.columns:
+            if col == "timestamp_ns":
+                continue
             try:
                 values = df[col].to_numpy()[sort_idx].astype(float)
             except (ValueError, TypeError):
                 continue
-            interpolated = np.interp(
-                anchor_timestamps.astype(float),
-                other_timestamps,
-                values,
-            )
-            result = result.with_columns(pl.Series(col, interpolated))
-    return result
+            self.columns.append((col, values))
 
-
-def _eager_sample_and_hold(
-    anchor_df: pl.DataFrame,
-    dfs: dict[str, pl.DataFrame],
-    anchor_name: str,
-    anchor_timestamps: np.ndarray,
-) -> pl.DataFrame:
-    result = anchor_df.clone()
-    for name, df in dfs.items():
-        if name == anchor_name:
-            continue
-        other_timestamps = df["timestamp_ns"].to_numpy()
-        if len(other_timestamps) == 0:
-            continue
-        sort_idx = np.argsort(other_timestamps)
-        other_timestamps = other_timestamps[sort_idx]
-
-        indices = np.searchsorted(other_timestamps, anchor_timestamps, side="right") - 1
-        valid = indices >= 0
-        other_cols = [c for c in df.columns if c != "timestamp_ns"]
-        for col in other_cols:
-            values = df[col].to_numpy()[sort_idx]
-            clipped = np.clip(indices, 0, len(values) - 1)
-            matched = values[clipped]
-            if matched.dtype.kind in ('f', 'i'):
-                matched = matched.astype(float)
-                matched[~valid] = float('nan')
-                result = result.with_columns(pl.Series(col, matched))
-            else:
-                matched_list = [matched[i] if valid[i] else None for i in range(len(matched))]
-                result = result.with_columns(pl.Series(col, matched_list))
-    return result
+    def apply(self, out: pl.DataFrame, start: int) -> pl.DataFrame:
+        anchor = self.anchor_float[start:start + out.height]
+        for col, values in self.columns:
+            interpolated = np.interp(anchor, self.other_timestamps, values)
+            out = out.with_columns(pl.Series(col, interpolated))
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +420,9 @@ def _eager_sample_and_hold(
 # ---------------------------------------------------------------------------
 
 
-def _synchronize_streaming(
+def _iter_streaming(
     topic_views: dict[str, "TopicView"],
+    *,
     method: str,
     tolerance_ms: float,
     anchor: str | None,
@@ -321,7 +430,8 @@ def _synchronize_streaming(
     boundary: str,
     max_buffer_messages: int,
     max_lateness_ms: float,
-) -> pl.DataFrame:
+    chunk_size: int,
+) -> Iterator[pl.DataFrame]:
     """Streaming sync — bounded-memory per-topic buffers."""
     if anchor is None:
         # Pick the topic with the highest message_count (proxy for highest
@@ -330,54 +440,160 @@ def _synchronize_streaming(
     elif anchor not in topic_views:
         raise KeyError(f"Anchor topic '{anchor}' not found in provided topics")
 
-    tolerance_ns = int(tolerance_ms * 1e6)
-    max_lateness_ns = int(max_lateness_ms * 1e6)
+    return _streaming_chunks(
+        topic_views,
+        anchor=anchor,
+        method=method,
+        tolerance_ns=int(tolerance_ms * 1e6),
+        out_of_order=out_of_order,
+        boundary=boundary,
+        max_buffer_messages=max_buffer_messages,
+        max_lateness_ns=int(max_lateness_ms * 1e6),
+        chunk_size=chunk_size,
+    )
 
-    # Build per-non-anchor-topic chunk iterators that yield
-    # (timestamp_ns, row_dict) tuples — flattening across chunks so the
-    # strategy code can pull row-by-row.
-    non_anchor_views = {
-        name: view for name, view in topic_views.items() if name != anchor
+
+def _streaming_chunks(
+    topic_views: dict[str, "TopicView"],
+    *,
+    anchor: str,
+    method: str,
+    tolerance_ns: int,
+    out_of_order: str,
+    boundary: str,
+    max_buffer_messages: int,
+    max_lateness_ns: int,
+    chunk_size: int,
+) -> Iterator[pl.DataFrame]:
+    # Peek one input chunk per topic so the output schema is fixed
+    # before the first row is matched.
+    sources = {
+        name: _peek_schema(view.iter_chunks(max(chunk_size, _MIN_READ_CHUNK)))
+        for name, view in topic_views.items()
     }
-    non_anchor_iters: dict[str, Iterator[tuple[int, dict]]] = {
-        name: _row_iter(
-            view, name,
+    schema = _streaming_schema(
+        anchor, {name: s for name, (s, _) in sources.items()}, method,
+    )
+
+    def rows_of(name: str) -> Iterator[tuple[int, dict]]:
+        topic_schema, chunks = sources[name]
+        if topic_schema is not None:
+            chunks = _warn_on_new_columns(chunks, name, set(topic_schema))
+        return _rows_from_chunks(
+            chunks, name,
             out_of_order=out_of_order,
             max_lateness_ns=max_lateness_ns,
         )
-        for name, view in non_anchor_views.items()
-    }
 
-    # Anchor topic provides the row schema. We materialize anchor rows
-    # one at a time as well; the anchor is allowed to be large because
-    # the output is the same size as the anchor.
-    anchor_iter = _row_iter(
-        topic_views[anchor], anchor,
-        out_of_order=out_of_order,
-        max_lateness_ns=max_lateness_ns,
-    )
+    # Build per-non-anchor-topic row iterators that yield
+    # (timestamp_ns, row_dict) tuples — flattening across chunks so the
+    # strategy code can pull row-by-row. The anchor streams the same way;
+    # each output row is merged onto one anchor row.
+    non_anchor_iters = {
+        name: rows_of(name) for name in topic_views if name != anchor
+    }
+    anchor_iter = rows_of(anchor)
 
     if method == "nearest":
-        return _streaming_nearest(
+        rows = _streaming_nearest(
             anchor, anchor_iter, non_anchor_iters,
             tolerance_ns=tolerance_ns,
             max_buffer_messages=max_buffer_messages,
         )
-    if method == "sample_and_hold":
-        return _streaming_sample_and_hold(
+    elif method == "sample_and_hold":
+        rows = _streaming_sample_and_hold(
             anchor, anchor_iter, non_anchor_iters,
             max_buffer_messages=max_buffer_messages,
         )
-    if method == "interpolate":
-        return _streaming_interpolate(
+    else:
+        rows = _streaming_interpolate(
             anchor, anchor_iter, non_anchor_iters,
             boundary=boundary,
             max_buffer_messages=max_buffer_messages,
         )
-    raise ValueError(
-        f"Unknown sync method: {method}. "
-        f"Use 'nearest', 'interpolate', or 'sample_and_hold'."
-    )
+    yield from _row_chunks(rows, schema, chunk_size)
+
+
+def _peek_schema(
+    chunks: Iterator[pl.DataFrame],
+) -> tuple[pl.Schema | None, Iterator[pl.DataFrame]]:
+    """Return the first non-empty chunk's schema and an iterator that
+    still yields that chunk. ``(None, empty)`` for an empty topic."""
+    for chunk in chunks:
+        if chunk.height:
+            return chunk.schema, itertools.chain([chunk], chunks)
+    return None, iter(())
+
+
+def _streaming_schema(
+    anchor: str,
+    topic_schemas: dict[str, pl.Schema | None],
+    method: str,
+) -> dict[str, pl.DataType]:
+    """Output schema in row-merge order: anchor, then the other topics.
+
+    Interpolation turns Python ints, floats and bools into floats, so
+    those columns are Float64 under ``interpolate``; boundary ``hold``
+    values are cast to match.
+    """
+    out: dict[str, pl.DataType] = {}
+    order = [anchor] + [name for name in topic_schemas if name != anchor]
+    for name in order:
+        topic_schema = topic_schemas[name]
+        if topic_schema is None:
+            continue
+        prefix = name.lstrip("/").replace("/", "_")
+        for col, dtype in topic_schema.items():
+            if col == "timestamp_ns":
+                if name == anchor:
+                    out[col] = dtype
+                continue
+            if name != anchor and method == "interpolate" and (
+                dtype.is_integer() or dtype.is_float() or dtype == pl.Boolean
+            ):
+                dtype = pl.Float64
+            out[f"{prefix}__{col}"] = dtype
+    return out
+
+
+def _warn_on_new_columns(
+    chunks: Iterator[pl.DataFrame], topic_name: str, known: set[str],
+) -> Iterator[pl.DataFrame]:
+    """Pass chunks through, warning once if a column shows up that the
+    topic's first chunk didn't have (the output schema can't grow)."""
+    warned = False
+    for chunk in chunks:
+        if not warned:
+            new = [c for c in chunk.columns if c not in known]
+            if new:
+                log.warning(
+                    "Topic %s gained columns %s after its first chunk; "
+                    "the synced output's columns are fixed from the first "
+                    "chunk, so these are left out.",
+                    topic_name, new,
+                )
+                warned = True
+        yield chunk
+
+
+def _row_chunks(
+    rows: Iterator[dict],
+    schema: dict[str, pl.DataType],
+    chunk_size: int,
+) -> Iterator[pl.DataFrame]:
+    """Group merged row dicts into DataFrames of ``chunk_size`` rows.
+
+    Missing keys (no match within tolerance) become nulls.
+    """
+    batch: list[dict] = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= chunk_size:
+            df = pl.from_dicts(batch, schema=schema)
+            batch = []
+            yield df
+    if batch:
+        yield pl.from_dicts(batch, schema=schema)
 
 
 def _row_iter(
@@ -387,20 +603,33 @@ def _row_iter(
     out_of_order: str,
     max_lateness_ns: int,
 ) -> Iterator[tuple[int, dict]]:
-    """Stream rows from a topic, applying the out-of-order policy.
+    """Stream rows from a topic view; see :func:`_rows_from_chunks`."""
+    yield from _rows_from_chunks(
+        view.iter_chunks(), topic_name,
+        out_of_order=out_of_order,
+        max_lateness_ns=max_lateness_ns,
+    )
+
+
+def _rows_from_chunks(
+    chunks: Iterable[pl.DataFrame],
+    topic_name: str,
+    *,
+    out_of_order: str,
+    max_lateness_ns: int,
+) -> Iterator[tuple[int, dict]]:
+    """Stream rows from a topic's chunks, applying the out-of-order policy.
 
     Yields (timestamp_ns, row_dict) tuples. The row_dict has columns
     prefixed with ``topic_name__`` (slashes -> underscores) so multiple
-    topics can share an output frame without column collisions.
+    topics can share an output frame without column collisions. Row
+    dicts are built lazily, not a chunk's worth at a time.
 
     Out-of-order policy:
       - "error": raise SyncOutOfOrderError on the first regression.
       - "warn_drop": log + drop regressing samples.
       - "reorder": bounded watermark reorder buffer.
     """
-    import logging
-    log = logging.getLogger("resurrector.core.sync")
-
     safe_prefix = topic_name.lstrip("/").replace("/", "_")
     last_ts: int | None = None
 
@@ -411,12 +640,11 @@ def _row_iter(
         heap: list[tuple[int, dict]] = []
         max_seen: int | None = None
 
-        for chunk in view.iter_chunks():
+        for chunk in chunks:
             if chunk.height == 0:
                 continue
             ts_arr = chunk["timestamp_ns"].to_numpy()
-            row_dicts = chunk.to_dicts()
-            for ts, row in zip(ts_arr, row_dicts):
+            for ts, row in zip(ts_arr, chunk.iter_rows(named=True)):
                 ts = int(ts)
                 if max_seen is None or ts > max_seen:
                     max_seen = ts
@@ -443,12 +671,11 @@ def _row_iter(
         return
 
     # Non-reorder policies: "error" or "warn_drop".
-    for chunk in view.iter_chunks():
+    for chunk in chunks:
         if chunk.height == 0:
             continue
         ts_arr = chunk["timestamp_ns"].to_numpy()
-        row_dicts = chunk.to_dicts()
-        for ts, row in zip(ts_arr, row_dicts):
+        for ts, row in zip(ts_arr, chunk.iter_rows(named=True)):
             ts = int(ts)
             if last_ts is not None and ts < last_ts:
                 if out_of_order == "error":
@@ -478,7 +705,7 @@ def _streaming_nearest(
     *,
     tolerance_ns: int,
     max_buffer_messages: int,
-) -> pl.DataFrame:
+) -> Iterator[dict]:
     """Lookahead-window nearest matching.
 
     Memory bound: O(rate * 2 * tolerance) per topic.
@@ -498,8 +725,6 @@ def _streaming_nearest(
         name: None for name in non_anchor_iters
     }
     exhausted: dict[str, bool] = {name: False for name in non_anchor_iters}
-
-    output_rows: list[dict] = []
 
     for anchor_ts, anchor_row in anchor_iter:
         window_lo = anchor_ts - tolerance_ns
@@ -565,9 +790,7 @@ def _streaming_nearest(
             # else: no sample within tolerance → no columns added →
             # downstream sees them as null. That matches eager.
 
-        output_rows.append(merged)
-
-    return _rows_to_dataframe(output_rows)
+        yield merged
 
 
 def _streaming_sample_and_hold(
@@ -576,7 +799,7 @@ def _streaming_sample_and_hold(
     non_anchor_iters: dict[str, Iterator[tuple[int, dict]]],
     *,
     max_buffer_messages: int,
-) -> pl.DataFrame:
+) -> Iterator[dict]:
     """Use the most recent non-anchor sample at or before each anchor ts."""
     # Per-topic state: most recent sample (ts, row) at or before current
     # anchor, plus a peeked sample that's after.
@@ -587,8 +810,6 @@ def _streaming_sample_and_hold(
         name: None for name in non_anchor_iters
     }
     exhausted: dict[str, bool] = {name: False for name in non_anchor_iters}
-
-    output_rows: list[dict] = []
 
     for anchor_ts, anchor_row in anchor_iter:
         merged = dict(anchor_row)
@@ -618,9 +839,7 @@ def _streaming_sample_and_hold(
                     if k != "timestamp_ns":
                         merged[k] = v
 
-        output_rows.append(merged)
-
-    return _rows_to_dataframe(output_rows)
+        yield merged
 
 
 def _streaming_interpolate(
@@ -630,7 +849,7 @@ def _streaming_interpolate(
     *,
     boundary: str,
     max_buffer_messages: int,
-) -> pl.DataFrame:
+) -> Iterator[dict]:
     """Linear interpolation per anchor timestamp.
 
     For each anchor row, each non-anchor topic needs a `prev` sample
@@ -644,8 +863,6 @@ def _streaming_interpolate(
         name: None for name in non_anchor_iters
     }
     exhausted: dict[str, bool] = {name: False for name in non_anchor_iters}
-
-    output_rows: list[dict] = []
 
     for anchor_ts, anchor_row in anchor_iter:
         # Per-topic merged columns (built locally so we can drop the
@@ -733,33 +950,5 @@ def _streaming_interpolate(
             else:
                 for k, v in cols.items():
                     merged[k] = v
-        output_rows.append(merged)
+        yield merged
 
-    return _rows_to_dataframe(output_rows)
-
-
-def _rows_to_dataframe(rows: list[dict]) -> pl.DataFrame:
-    """Build a Polars DataFrame from a row list, schema unioned across rows.
-
-    Streaming sync may produce rows where some topics' columns are
-    missing (no match in tolerance). We need a single schema so the
-    DataFrame constructor doesn't reject the input.
-    """
-    if not rows:
-        return pl.DataFrame()
-    # Union of all keys, preserving first-seen order.
-    seen: list[str] = []
-    seen_set: set[str] = set()
-    for r in rows:
-        for k in r:
-            if k not in seen_set:
-                seen.append(k)
-                seen_set.add(k)
-    # Pad each row with nulls for missing columns.
-    padded: list[dict] = []
-    for r in rows:
-        if len(r) == len(seen):
-            padded.append(r)
-        else:
-            padded.append({k: r.get(k) for k in seen})
-    return pl.DataFrame(padded, infer_schema_length=len(padded))

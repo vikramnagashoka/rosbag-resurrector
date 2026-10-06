@@ -493,7 +493,7 @@ bf.export(topics=["/imu/data", "/joint_states"],
           downsample_hz=10)
 ```
 
-Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Unsynced exports to Parquet, HDF5, CSV, Zarr, and RLDS are chunk-streamed (memory bounded by `chunk_size`, independent of topic size); with `--sync` (and the `rlds` / `training-tabular` / `multimodal` presets) the synced table is built in memory first. NumPy `.npz` accumulates per-topic and is hard-capped at 1 M rows; for very large topics, prefer Parquet. LeRobot streams its input but holds one episode's frame grid (duration × fps × numeric fields) in memory, because LeRobot's own writer buffers an episode before saving it; camera frames are spilled to disk.
+Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Exports to Parquet, HDF5, CSV, Zarr, and RLDS are chunk-streamed (memory bounded by `chunk_size`, independent of topic size), with or without `--sync`: the synced table (also used by the `rlds` / `training-tabular` / `multimodal` presets) is written a chunk at a time. As in `bf.sync()`, topics under 1 M messages go through the eager sync engine, which loads them first; bigger ones stream. NumPy `.npz` accumulates per-topic and is hard-capped at 1 M rows; for very large topics, prefer Parquet. LeRobot streams its input but holds one episode's frame grid (duration × fps × numeric fields) in memory, because LeRobot's own writer buffers an episode before saving it; camera frames are spilled to disk.
 
 | Format | Best For | Streaming |
 |--------|----------|-----------|
@@ -703,7 +703,7 @@ resurrector/
 
 > **Memory is bounded by the configured chunk size, not by bag size, topic size, or export size.**
 
-That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and unsynced exports to the chunk-streaming formats (Parquet, HDF5, CSV, Zarr, RLDS; `--sync` builds the synced table in memory). LeRobot export streams its input but holds one episode's frame grid, because LeRobot's writer buffers an episode before saving it.
+That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and exports to the chunk-streaming formats (Parquet, HDF5, CSV, Zarr, RLDS), synced or not. LeRobot export streams its input but holds one episode's frame grid, because LeRobot's writer buffers an episode before saving it.
 
 Two formats are explicit exceptions: **NumPy `.npz`** is bounded by total converted-array size and hard-capped at 1 M rows (use Parquet for larger topics — clear `LargeTopicError` is raised). The eager **`bf["/topic"].to_polars()`** path materializes the full topic and refuses topics > 1 M messages unless the user passes `force=True`.
 

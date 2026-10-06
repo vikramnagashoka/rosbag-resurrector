@@ -15,7 +15,10 @@ the fixture to 10M would slow the suite without proving anything new.
 from __future__ import annotations
 
 import gc
+import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -170,6 +173,91 @@ def test_streaming_sync_bounded(large_bag):
     assert result.height > 0
     assert delta_mb < 300, (
         f"streaming sync RSS delta {delta_mb:.1f} MB > 300 MB"
+    )
+
+
+_SYNC_EXPORT_BAG_CONFIG = BagConfig(
+    duration_sec=100.0,
+    imu_hz=1000.0,   # 100K anchor rows: enough that the whole synced table
+    joint_hz=100.0,  # costs several hundred MB, far past the budget below
+    camera_hz=0.0,
+    lidar_hz=0.0,
+    include_tf=False,
+    include_compressed=False,
+)
+
+# Runs in a fresh interpreter so ru_maxrss (the true peak, which
+# _peak_rss_delta_mb can't see: it samples RSS after the call) belongs
+# to this export alone.
+_SYNC_EXPORT_CHILD = """
+import json, resource, sys
+import pyarrow.parquet as pq
+from resurrector.core import export as export_module
+from resurrector.core import sync as sync_module
+from resurrector.core.bag_frame import BagFrame
+from resurrector.core.export import Exporter
+
+bag, out, downsample = sys.argv[1], sys.argv[2], sys.argv[3]
+# Small chunks, so the chunk-bounded part is a sliver of the budget.
+export_module.CHUNK_SIZE = 5_000
+# Route engine='auto' to the streaming engine, the one big bags get.
+sync_module.LARGE_TOPIC_THRESHOLD = 0
+
+def peak_bytes():
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru if sys.platform == "darwin" else ru * 1024
+
+bf = BagFrame(bag)
+bf.metadata
+before = peak_bytes()
+Exporter().export(
+    bag_frame=bf, topics=["/imu/data", "/joint_states"], format="parquet",
+    output_dir=out, sync=True,
+    downsample_hz=float(downsample) if downsample != "none" else None,
+)
+print(json.dumps({
+    "delta_mb": (peak_bytes() - before) / 2**20,
+    "rows": pq.read_metadata(f"{out}/synced.parquet").num_rows,
+}))
+"""
+
+
+@pytest.fixture(scope="session")
+def sync_export_bag(tmp_path_factory):
+    path = tmp_path_factory.mktemp("oom_sync_export") / "sync_export.mcap"
+    generate_bag(path, _SYNC_EXPORT_BAG_CONFIG)
+    yield path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ru_maxrss is POSIX-only")
+@pytest.mark.parametrize("downsample", ["none", "50"])
+def test_synced_export_bounded(sync_export_bag, tmp_path, downsample):
+    """Synced export (CLI --sync, the rlds / training-tabular / multimodal
+    presets) streams, so its peak RSS doesn't grow with the bag.
+
+    Would catch: the synced table built in memory before writing. On
+    this bag that path peaked around 500 MB (and grows with the bag);
+    the streamed path stays near 70 MB, the same at 3x the rows.
+    """
+    import resurrector
+
+    src_root = str(Path(resurrector.__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (src_root, env.get("PYTHONPATH")) if p
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _SYNC_EXPORT_CHILD,
+         str(sync_export_bag), str(tmp_path / "out"), downsample],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    expected_rows = 100_000 if downsample == "none" else 5_000
+    assert abs(result["rows"] - expected_rows) <= 1
+    assert result["delta_mb"] < 200, (
+        f"synced export peak RSS delta {result['delta_mb']:.1f} MB > 200 MB"
     )
 
 

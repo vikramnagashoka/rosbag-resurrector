@@ -2,10 +2,12 @@
 
 Supports: Parquet, HDF5, CSV, NumPy, Zarr, LeRobot, RLDS.
 
-Per the v0.4.0 performance contract, unsynced exports to the
-streaming-friendly formats (Parquet, HDF5, CSV, Zarr, RLDS) write
-chunk-by-chunk so peak memory is bounded by ``CHUNK_SIZE``. With
-``sync=True`` the synced table is built in memory first. LeRobot goes through LeRobot's own writer
+Per the v0.4.0 performance contract, exports to the streaming-friendly
+formats (Parquet, HDF5, CSV, Zarr, RLDS) write chunk-by-chunk so peak
+memory is bounded by ``CHUNK_SIZE``. With ``sync=True`` the synced
+table streams too (:func:`resurrector.core.sync.iter_synchronize`); its
+downsample grid carries across chunks, so the rows written match
+downsampling the whole table. LeRobot goes through LeRobot's own writer
 (:mod:`resurrector.core.lerobot_export`): input is streamed, but one
 episode's frame grid is held in memory until LeRobot saves the episode. NumPy ``.npz`` is the
 exception: the format can't be incrementally appended, so writing
@@ -277,9 +279,10 @@ class Exporter:
     streaming via :meth:`export_frames` / :meth:`export_video`, or
     custom orchestration where ``BagFrame.export`` doesn't quite fit.
 
-    Unsynced chunk-streaming export paths keep peak memory near one chunk
-    (``CHUNK_SIZE`` rows), regardless of total topic size; ``sync=True``
-    builds the synced table in memory first. Exceptions:
+    Chunk-streaming export paths keep peak memory near one chunk
+    (``CHUNK_SIZE`` rows), regardless of total topic size, synced or not
+    (below ``LARGE_TOPIC_THRESHOLD`` the eager sync engine loads the
+    topics it aligns). Exceptions:
     ``numpy`` materializes per-topic and refuses topics over
     ``NUMPY_HARD_CAP`` (1 M rows); ``lerobot`` streams its input but holds
     one episode's frame grid in memory (LeRobot's writer buffers episodes).
@@ -322,14 +325,18 @@ class Exporter:
                 ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
                 ``[all-exports]``).
             output_dir: Directory to write into. Created if missing.
-            sync: When True (and 2+ topics), time-align via
-                :meth:`BagFrame.sync` before exporting; the result is
-                written as a single ``synced.<ext>`` file.
+            sync: When True (and 2+ topics), time-align with
+                :func:`~resurrector.core.sync.iter_synchronize` (same rows
+                as :meth:`BagFrame.sync`) and stream the result, chunk by
+                chunk, into a single ``synced.<ext>`` file.
             sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
                 Only used when ``sync`` is True.
-            downsample_hz: Per-chunk resampling rate before writing. ``None``
-                preserves the native rate. For ``lerobot`` this is the
-                integer fps of the uniform frame grid (default 30).
+            downsample_hz: Resampling rate before writing. ``None``
+                preserves the native rate. Synced output is downsampled as
+                one stream (the same rows as downsampling the whole table);
+                unsynced topics are downsampled per chunk, so their grid
+                restarts every ``CHUNK_SIZE`` rows. For ``lerobot`` this is
+                the integer fps of the uniform frame grid (default 30).
             task: ``lerobot`` only: task label attached to every frame.
             action_topics: ``lerobot`` only: topics whose numeric fields
                 form the ``action`` vector instead of ``observation.state``.
@@ -341,6 +348,11 @@ class Exporter:
             LargeTopicError: If ``format == "numpy"`` and a topic has
                 more than ``NUMPY_HARD_CAP`` rows.
             ValueError: For unknown format strings.
+            KeyError: ``sync=True`` and a topic isn't in the bag.
+            SyncOutOfOrderError, SyncBufferExceededError: ``sync=True``
+                on the streaming engine (topics over
+                ``LARGE_TOPIC_THRESHOLD``). Raised mid-stream, so
+                ``synced.<ext>`` may already be partly written.
         """
         output_path = Path(output_dir)
 
@@ -360,12 +372,16 @@ class Exporter:
         output_path.mkdir(parents=True, exist_ok=True)
 
         if sync and len(topics) > 1:
-            import polars as pl
-            df = bag_frame.sync(topics, method=sync_method)
+            from resurrector.core.sync import iter_synchronize
+            from resurrector.core.transforms import iter_downsample_temporal
+
+            views = {name: bag_frame[name] for name in topics}
+            chunks = iter_synchronize(views, method=sync_method, chunk_size=CHUNK_SIZE)
             if downsample_hz:
-                from resurrector.core.transforms import downsample_temporal
-                df = downsample_temporal(df, downsample_hz)
-            self._stream_dataframe_chunks(iter([df]), format, output_path, "synced")
+                chunks = iter_downsample_temporal(chunks, downsample_hz)
+            self._stream_dataframe_chunks(
+                _at_least_one_chunk(chunks), format, output_path, "synced",
+            )
             return output_path
 
         for topic in topics:
@@ -390,10 +406,7 @@ class Exporter:
             chunks = _transform_chunks(
                 view.iter_chunks(CHUNK_SIZE), downsample_hz
             )
-            self._stream_dataframe_chunks(
-                chunks, format, output_path, safe_name,
-                expected_total_rows=view.message_count,
-            )
+            self._stream_dataframe_chunks(chunks, format, output_path, safe_name)
 
         return output_path
 
@@ -403,15 +416,8 @@ class Exporter:
         format: str,
         output_path: Path,
         name: str,
-        expected_total_rows: int | None = None,
     ) -> ExportResult:
-        """Dispatch streaming chunks to the right format writer.
-
-        ``expected_total_rows`` is forwarded to writers that need it
-        (currently only ``_stream_rlds``, which uses it to derive
-        ``is_last`` per step without materializing the chunks). Writers
-        that don't need it ignore the parameter.
-        """
+        """Dispatch streaming chunks to the right format writer."""
         if format == "parquet":
             return _stream_parquet(chunks, output_path, name)
         elif format == "csv":
@@ -428,10 +434,7 @@ class Exporter:
                 "use Exporter.export(format='lerobot') or export_lerobot()"
             )
         elif format == "rlds":
-            return _stream_rlds(
-                chunks, output_path, name,
-                total_rows=expected_total_rows,
-            )
+            return _stream_rlds(chunks, output_path, name)
         else:
             raise ValueError(
                 f"Unknown export format: {format}. "
@@ -568,6 +571,34 @@ def _transform_chunks(chunks: Iterable, downsample_hz: float | None) -> Iterator
     from resurrector.core.transforms import downsample_temporal
     for chunk in chunks:
         yield downsample_temporal(chunk, downsample_hz)
+
+
+def _at_least_one_chunk(chunks: Iterable) -> Iterator:
+    """Pass chunks through; if there were none, yield one empty frame so
+    the writer still creates its (empty) output file."""
+    empty = True
+    for chunk in chunks:
+        empty = False
+        yield chunk
+    if empty:
+        import polars as pl
+        yield pl.DataFrame()
+
+
+def _with_final_flag(chunks: Iterable) -> Iterator[tuple]:
+    """Yield ``(chunk, is_final)`` for each non-empty chunk.
+
+    Reads one chunk ahead, so at most two chunks are alive at once.
+    """
+    pending = None
+    for chunk in chunks:
+        if chunk.height == 0:
+            continue
+        if pending is not None:
+            yield pending, False
+        pending = chunk
+    if pending is not None:
+        yield pending, True
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +773,6 @@ def _stream_rlds(
     chunks: Iterable,
     output_path: Path,
     name: str,
-    total_rows: int | None = None,
 ) -> ExportResult:
     """Export to RLDS (TFRecord) format — streaming.
 
@@ -759,15 +789,10 @@ def _stream_rlds(
 
     Output: <output_path>/<name>.tfrecord
 
-    Memory: bounded by chunk size. The v0.3.x version did
-    ``list(chunks)`` upfront so it could derive ``is_last`` per row;
-    v0.4.0 takes ``total_rows`` from the caller (the index already
-    knows ``view.message_count``) and uses a running counter, which
-    eliminates the materialization.
-
-    If ``total_rows`` is None we fall back to a one-time materialization
-    so the writer remains correct for callers who don't have a count
-    handy. Inside ``Exporter.export`` we always pass it.
+    Memory: two chunks. ``is_last`` comes from reading one chunk ahead
+    (the last row of the last non-empty chunk), so it lands on the row
+    actually written last even when downsampling or a time slice makes
+    that differ from the topic's message count.
     """
     try:
         import tensorflow as tf
@@ -792,25 +817,15 @@ def _stream_rlds(
         # Fallback: stringify
         return tf.train.Feature(bytes_list=tf.train.BytesList(value=[str(value).encode("utf-8")]))
 
-    # Streaming-friendly path: caller supplied total_rows from the
-    # index. Otherwise fall back to materializing once (the v0.3.x
-    # behavior) so this writer is still safe to call from outside the
-    # Exporter.
-    if total_rows is None:
-        chunk_iter = list(chunks)
-        total_rows = sum(c.height for c in chunk_iter)
-    else:
-        chunk_iter = chunks
-
     with tf.io.TFRecordWriter(str(filepath)) as writer:
-        for chunk in chunk_iter:
+        for chunk, is_final_chunk in _with_final_flag(chunks):
             if not columns:
                 columns = list(chunk.columns)
             chunk_dicts = chunk.to_dicts()
+            last_row_idx = len(chunk_dicts) - 1
             for row_idx, row in enumerate(chunk_dicts):
-                global_idx = rows_written + row_idx
-                is_first = global_idx == 0
-                is_last = global_idx == total_rows - 1
+                is_first = rows_written + row_idx == 0
+                is_last = is_final_chunk and row_idx == last_row_idx
 
                 feature_map: dict[str, tf.train.Feature] = {}
                 for col, val in row.items():

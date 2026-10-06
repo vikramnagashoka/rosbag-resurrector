@@ -153,7 +153,7 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
 - CI matrix: Python 3.10–3.13 · 8 optional-extra installs (LeRobot
   exports round-tripped through the real library) · wheel-install
   smoke test · frontend build · e2e
-- 16 releases on PyPI; exporters to 7 formats (5 chunk-streamed when unsynced)
+- 16 releases on PyPI; exporters to 7 formats (5 chunk-streamed, synced or not)
 - 5 streaming health dimensions: rate stability, size anomalies, time gaps,
   timestamp ordering, topic completeness
 
