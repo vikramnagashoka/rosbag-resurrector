@@ -1,7 +1,14 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
 import { useCapability } from '../components/InstallBanner'
 import { runWithToast, useErrorToast } from '../ErrorToast'
+import {
+  LEROBOT_DEFAULT_FPS,
+  LEROBOT_SYNC_NOTE,
+  fpsRoundingHint,
+  isLerobot,
+  syncAndRateParams,
+} from '../exportOptions'
 
 // Warm-themed export dialog for the notebook. Same workflow as the classic
 // ExportDialog (preset / format / topics / sync / downsample → /api/bags/:id/
@@ -37,6 +44,9 @@ export default function ExportDialog({
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
+  const syncNoteId = useId()
+  const lerobot = isLerobot(format)
+  const roundingHint = fpsRoundingHint(format, downsampleHz)
 
   useEffect(() => {
     let cancelled = false
@@ -62,12 +72,11 @@ export default function ExportDialog({
 
   async function handleExport() {
     setExporting(true)
-    const downsampleNum = downsampleHz.trim() ? parseFloat(downsampleHz) : undefined
     const r = await runWithToast(
       toast,
       () => api.exportBag(bagId, {
         topics: selectedTopics, format, output_dir: outputDir,
-        sync, downsample_hz: downsampleNum, preset: selectedPreset || undefined,
+        ...syncAndRateParams(format, sync, downsampleHz), preset: selectedPreset || undefined,
       }),
       { errorPrefix: 'Export failed' },
     )
@@ -136,8 +145,13 @@ export default function ExportDialog({
             </select>
           </label>
           <label className="nb-modal-field" style={{ width: 140 }}>
-            <span>Downsample (Hz)</span>
-            <input value={downsampleHz} placeholder="e.g. 50" onChange={e => setDownsampleHz(e.target.value)} />
+            <span>{lerobot ? 'Frame rate (fps)' : 'Downsample (Hz)'}</span>
+            <input
+              value={downsampleHz}
+              placeholder={lerobot ? `default ${LEROBOT_DEFAULT_FPS}` : 'e.g. 50'}
+              onChange={e => setDownsampleHz(e.target.value)}
+            />
+            {roundingHint && <div className="nb-export-hint">{roundingHint}</div>}
           </label>
         </div>
 
@@ -158,10 +172,17 @@ export default function ExportDialog({
           </div>
         </div>
 
-        <label className="nb-export-sync">
-          <input type="checkbox" checked={sync} onChange={e => setSync(e.target.checked)} />
+        <label className={lerobot ? 'nb-export-sync is-disabled' : 'nb-export-sync'}>
+          <input
+            type="checkbox"
+            checked={lerobot || sync}
+            disabled={lerobot}
+            aria-describedby={lerobot ? syncNoteId : undefined}
+            onChange={e => setSync(e.target.checked)}
+          />
           Synchronize topics before export
         </label>
+        {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
         {result && <div className="nb-export-result">Exported to {result}</div>}
 

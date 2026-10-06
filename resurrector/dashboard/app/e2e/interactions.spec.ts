@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Locator, type Page } from '@playwright/test'
 
 // Behavioural tests for interactions that screenshot diffs can't
 // reliably capture (clicks, state changes, WebGL canvas content,
@@ -778,5 +778,78 @@ test.describe('Library scan with .bag file', () => {
     await page.waitForTimeout(1500)
     const alerts = await page.getByRole('alert').allTextContents()
     expect(alerts.join('\n')).not.toContain('[object Object]')
+  })
+})
+
+// Shared by the classic and notebook export dialogs: both must tell the truth
+// about LeRobot, which ignores `sync` (it always resamples every topic onto
+// its own fps grid) and reads the rate field as the dataset fps.
+async function expectLerobotExportControlsHonest(page: Page, modal: Locator) {
+  const format = modal.locator('select:has(option[value="hdf5"])')
+  const syncBox = modal.getByRole('checkbox', { name: /Synchronize topics/ })
+  const rate = modal.getByRole('textbox', { name: /^(Downsample|Frame rate)/ })
+
+  // Turn sync on under Parquet so the switch to LeRobot has stale state to leak.
+  await expect(format).toHaveValue('parquet')
+  await expect(syncBox).toBeEnabled()
+  await syncBox.check()
+
+  await format.selectOption('lerobot')
+  await expect(syncBox).toBeDisabled()
+  await expect(syncBox).toBeChecked()
+  await expect(modal.getByText(/Always on for LeRobot/)).toBeVisible()
+  await expect(rate).toHaveAccessibleName(/^Frame rate \(fps/)
+  await expect(rate).toHaveAttribute('placeholder', /30/)
+
+  // A fractional fps is rounded, and the UI says so before export.
+  await rate.fill('14.6')
+  await expect(modal.getByText('Rounded to 15 fps.')).toBeVisible()
+
+  // The request carries exactly what the dialog shows: no sync flag, integer fps.
+  const sent: URL[] = []
+  await page.route(/\/api\/bags\/\d+\/export\?/, async route => {
+    sent.push(new URL(route.request().url()))
+    await route.fulfill({ json: { status: 'completed', output_path: '/tmp/e2e-lerobot' } })
+  })
+  await modal.getByRole('button', { name: 'Export', exact: true }).click()
+  await expect.poll(() => sent.length).toBe(1)
+  const q = sent[0].searchParams
+  expect(q.get('format')).toBe('lerobot')
+  expect(q.get('downsample_hz')).toBe('15')
+  expect(q.has('sync')).toBe(false)
+
+  // Back to Parquet: sync is a real choice again and the user's pick survived.
+  await format.selectOption('parquet')
+  await expect(syncBox).toBeEnabled()
+  await expect(syncBox).toBeChecked()
+  await expect(modal.getByText(/Always on for LeRobot/)).toHaveCount(0)
+  await expect(rate).toHaveAccessibleName(/^Downsample \(Hz/)
+}
+
+test.describe('Export dialog with LeRobot format', () => {
+  test('notebook dialog disables sync and relabels the rate as fps', async ({ page }) => {
+    // Would catch: the notebook export dialog offering "Synchronize topics"
+    // and "Downsample (Hz)" for LeRobot, where the backend ignores sync and
+    // uses the rate as the integer dataset fps (the v0.8.4 audit finding),
+    // or a leftover sync=true riding along on a LeRobot export request.
+    await page.goto('/n')
+    await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-list-item').first()).toBeVisible()
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const modal = page.locator('.nb-export')
+    await expect(modal).toBeVisible()
+    await expectLerobotExportControlsHonest(page, modal)
+  })
+
+  test('classic dialog disables sync and relabels the rate as fps', async ({ page }) => {
+    // Would catch: the same LeRobot sync/fps mislabel in the classic
+    // Explorer export dialog.
+    await page.goto('/classic')
+    await page.getByText(/scene_demo\.mcap/).first().click()
+    await page.waitForURL(/\/classic\/bag\/\d+/)
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const modal = page.locator('div:has(> h2:text-is("Export Data"))')
+    await expect(modal).toBeVisible()
+    await expectLerobotExportControlsHonest(page, modal)
   })
 })
