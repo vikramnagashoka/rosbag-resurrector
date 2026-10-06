@@ -8,11 +8,21 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-10-04
+
+### What's new
+
+**LeRobot export now loads in LeRobot.** It writes through LeRobot's own v3
+writer — camera topics as video, a causal fixed-fps frame grid, one episode
+per bag — behind a new `[lerobot]` extra (Python 3.12+). The bridge also no
+longer freezes the server when playback falls behind.
+
 ### Fixed
 
 - **LeRobot export now produces datasets LeRobot can actually load.** The
   previous writer hand-rolled a LeRobot v2.0 layout that current LeRobot
-  (codebase v3.0) refuses with `BackwardCompatibilityError`. It also omitted
+  (codebase v3.0) refuses to load (its version check rejects v2.0
+  datasets). It also omitted
   the required `episode_index` / `index` / `task_index` / `timestamp`
   columns, declared string fields as `float32`, wrote a fractional `fps`,
   and dropped camera pixels entirely. Export now goes through LeRobot's own
@@ -25,8 +35,9 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
   synchronous and an already-set pause event doesn't suspend. The whole
   bridge froze until end-of-bag — Pause clicks were silently ignored,
   WebSocket sends stalled, and other bags in a multi-bag playback couldn't
-  start on time. It now yields at least every 5 ms when behind (measured
-  +0.5% throughput cost vs. +9.6% for yielding on every message).
+  start on time. It now yields about every 5 ms when behind (measured
+  under 0.5% throughput cost; yielding on every message cost from +2% to
+  over +100%, depending on per-message work).
 - **`--loop` with a topic filter that matches nothing** (a typo'd
   `--topic`, a declared-but-empty topic like the demo bag's `/tf`, or a
   multi-bag topic missing from one bag) spun forever re-opening the bag
@@ -40,7 +51,19 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
   next message): `set_speed()` re-anchors pacing at the current position,
   as resume already did.
 - De-flaked `test_playback_play_pause` (failed on a loaded CI runner with
-  `'stopped' == 'playing'`); the root cause was the starvation above.
+  `'stopped' == 'playing'`); the root cause was the starvation above. The
+  test also plays at 1x now for timing slack.
+- **`resurrector export --list-presets` no longer requires a bag path**
+  (its own help text told you to run it without one). Preset names no
+  longer get truncated in narrow terminals.
+- **CLI error messages keep `[bracketed]` text.** Rich treated it as markup
+  and dropped it, so install hints such as `pip install
+  'rosbag-resurrector[publish]'` printed without the extra name.
+- **RLDS's missing-tensorflow hint** told you to install `[all-exports]`,
+  which doesn't include tensorflow; it now says `pip install tensorflow`.
+- **`resurrector doctor`** now reports LeRobot export (including the
+  Python 3.12+ floor, where the `[lerobot]` extra installs nothing) and
+  RLDS's tensorflow requirement.
 
 ### Changed
 
@@ -59,6 +82,11 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
   install command per missing extra. The capability is reported by
   `GET /api/system/capabilities`; the export endpoint returns a structured
   503 when it's missing and 409 when the target directory isn't empty.
+- **LeRobot export is pip-only.** The DMG/DEB builds don't bundle torch, so
+  they report LeRobot as unavailable; install from PyPI to use it.
+- LeRobot export works from plain scripts on macOS and Windows: camera
+  videos are encoded in parallel only under the `fork` start method, since
+  `spawn` workers re-run an unguarded `__main__`.
 
 ### Test infrastructure
 
@@ -70,6 +98,18 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
   verified to fail against a non-causal (forward) resampler.
 - New e2e spec: the export dialog names `[lerobot]` (not `[all-exports]`)
   for an unavailable LeRobot preset and disables it.
+- Regression tests check what the CLI actually prints (install hints, the
+  preset list), and run an unguarded user script under `spawn` against a
+  two-camera bag.
+
+### Test counts
+
+- Backend: **841 passed** (was 822): new LeRobot exporter, CLI-output and
+  doctor tests, 4 playback regression tests, minus the tests of the old
+  v2.0 layout. 7 LeRobot round-trip tests skip without the extra and run in the
+  new `Extras (lerobot)` CI job. Memory-regression tier: 12 (was 11).
+- Frontend unit: **48 passed** (unchanged)
+- E2E: **39 behavioural** (was 38) plus 7 visual
 
 ## [0.8.3] — 2026-07-26
 

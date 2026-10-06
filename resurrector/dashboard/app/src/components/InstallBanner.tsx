@@ -8,7 +8,7 @@ interface InstallBannerProps {
 }
 
 // Reusable warning banner for optional capabilities. Each surface that
-// gates on `vision`, `bridge_live`, `ros1_convert`, or `all_exports`
+// gates on `vision`, `bridge_live`, `ros1_convert`, `all_exports`, or `lerobot`
 // renders this when the capability is missing — uniform copy, single
 // place to maintain the look.
 export function InstallBanner({ capability, title, helperText }: InstallBannerProps) {

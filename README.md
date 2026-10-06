@@ -4,12 +4,12 @@
 
 <h3 align="center">Semantic search — describe the moment, find the frames</h3>
 <p align="center">
-  <img src="assets/search.gif" alt="Semantic Search on RosBag Resurrector Demo" width="800">
+  <img src="https://raw.githubusercontent.com/vikramnagashoka/rosbag-resurrector/v0.8.4/assets/search.gif" alt="Semantic Search on RosBag Resurrector Demo" width="800">
 </p>
 
 <h3 align="center">✦ Explain — brush a window, get a grounded answer</h3>
 <p align="center">
-  <img src="assets/explain.gif" alt="Explain the unusual observations on RosBag Resurrector Demo" width="800">
+  <img src="https://raw.githubusercontent.com/vikramnagashoka/rosbag-resurrector/v0.8.4/assets/explain.gif" alt="Explain the unusual observations on RosBag Resurrector Demo" width="800">
 </p>
 
 A pandas-like data analysis tool for **ROS 2 (MCAP)** bag files — with automatic quality validation, multi-stream synchronization, ML-ready export, CLIP-powered semantic search, and a PlotJuggler-compatible WebSocket bridge.
@@ -201,7 +201,8 @@ pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search 
 pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
 pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
 pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
-pip install 'rosbag-resurrector[all-exports]'   # Zarr, additional export formats
+pip install 'rosbag-resurrector[all-exports]'   # Zarr + tensorflow-datasets (RLDS also needs: pip install tensorflow)
+pip install 'rosbag-resurrector[lerobot]'       # LeRobot v3 export (Python 3.12+, pulls torch)
 pip install 'rosbag-resurrector[ros1]'          # ROS 1 .bag support via rosbags
 ```
 
@@ -492,7 +493,7 @@ bf.export(topics=["/imu/data", "/joint_states"],
           downsample_hz=10)
 ```
 
-Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Parquet, HDF5, CSV, Zarr, and LeRobot are streamed (memory bounded by `chunk_size`, independent of topic size). NumPy `.npz` and RLDS accumulate per-topic and are bounded by total converted-array size; for very large topics, prefer Parquet.
+Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Unsynced exports to Parquet, HDF5, CSV, Zarr, and RLDS are chunk-streamed (memory bounded by `chunk_size`, independent of topic size); with `--sync` (and the `rlds` / `training-tabular` / `multimodal` presets) the synced table is built in memory first. NumPy `.npz` accumulates per-topic and is hard-capped at 1 M rows; for very large topics, prefer Parquet. LeRobot streams its input but holds one episode's frame grid (duration × fps × numeric fields) in memory, because LeRobot's own writer buffers an episode before saving it; camera frames are spilled to disk.
 
 | Format | Best For | Streaming |
 |--------|----------|-----------|
@@ -500,13 +501,13 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | HDF5 | Mixed numeric/image data, MATLAB compatibility | Chunk-streamed |
 | CSV | Quick inspection, sharing with non-technical team members | Chunk-streamed |
 | Zarr | Cloud-native, chunked, very large datasets | Chunk-streamed |
-| **LeRobot** | Hugging Face LeRobot training: v3 dataset written by LeRobot's own writer, cameras as video | Streamed (one chunk + one frame) |
+| **LeRobot** | Hugging Face LeRobot training: v3 dataset written by LeRobot's own writer, cameras as video | Input streamed; holds one episode's frame grid |
 | NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
 LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). RLDS needs `tensorflow`: `pip install 'rosbag-resurrector[all-exports]'`.
 
-**How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips every export through `LeRobotDataset` and checks frame values.
+**How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips test exports through `LeRobotDataset` and checks frame values against the source bag.
 
 ```bash
 resurrector export run.mcap --preset lerobot -o ./pick_cube \
@@ -702,7 +703,7 @@ resurrector/
 
 > **Memory is bounded by the configured chunk size, not by bag size, topic size, or export size.**
 
-That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and the chunk-streaming export formats (Parquet, HDF5, CSV, Zarr, LeRobot, RLDS).
+That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and unsynced exports to the chunk-streaming formats (Parquet, HDF5, CSV, Zarr, RLDS; `--sync` builds the synced table in memory). LeRobot export streams its input but holds one episode's frame grid, because LeRobot's writer buffers an episode before saving it.
 
 Two formats are explicit exceptions: **NumPy `.npz`** is bounded by total converted-array size and hard-capped at 1 M rows (use Parquet for larger topics — clear `LargeTopicError` is raised). The eager **`bf["/topic"].to_polars()`** path materializes the full topic and refuses topics > 1 M messages unless the user passes `force=True`.
 
@@ -770,7 +771,7 @@ npm install && npm run build
 | test_vision | 8 | FrameSampler, CLIPEmbedder, FrameSearchEngine (auto-skip) |
 | test_bridge_protocol | 6 | PlotJuggler encoding, key format, list expansion |
 | test_bridge_buffer | 7 | Ring buffer put/get, overflow, multi-consumer, threading |
-| test_bridge_playback | 6 | Playback engine: play, pause, resume, speed, topic filter |
+| test_bridge_playback | 11 | Playback engine: play, pause, resume, speed re-anchoring, topic filter, behind-schedule yielding, `--loop` with an empty filter, replay after a final-message pause |
 | test_bridge_server | 6 | REST API: topics, metadata, status, playback controls |
 
 ## Contributing

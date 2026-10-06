@@ -8,6 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape as rich_escape
 
 app = typer.Typer(
     name="resurrector",
@@ -149,7 +150,7 @@ def scan(
 
                 progress.advance(task)
             except Exception as e:
-                console.print(f"[red]Error indexing {scanned_file.path.name}: {e}[/red]")
+                console.print(f"[red]Error indexing {rich_escape(scanned_file.path.name)}: {rich_escape(str(e))}[/red]")
                 progress.advance(task)
 
     console.print(f"[green]Indexed {index.count()} bag(s) total.[/green]")
@@ -457,10 +458,10 @@ def list_bags(
 
 @app.command()
 def export(
-    path: Annotated[Path, typer.Argument(
-        help="Path to a bag file (.mcap). "
+    path: Annotated[Optional[Path], typer.Argument(
+        help="Path to a bag file (.mcap). Not needed with --list-presets. "
              "e.g. resurrector export experiment.mcap --preset lerobot",
-    )],
+    )] = None,
     topics: Annotated[Optional[list[str]], typer.Option("--topics", "-t",
         help="Topics to export. Pass --topics multiple times for multi-topic "
              "exports. When omitted, every topic is exported (or, with --preset, "
@@ -475,16 +476,20 @@ def export(
              "e.g. -f hdf5",
     )] = None,
     output: Annotated[Path, typer.Option("--output", "-o",
-        help="Output directory. Created if missing. e.g. -o ./training_data",
+        help="Output directory. Created if missing (lerobot: must be new or "
+             "empty). e.g. -o ./training_data",
     )] = Path("./export"),
     sync: Annotated[Optional[str], typer.Option("--sync",
         help="Sync method to time-align selected topics: 'nearest', "
              "'interpolate', 'sample_and_hold'. Overrides the preset's "
-             "sync_method if --preset is set. e.g. --sync nearest",
+             "sync_method if --preset is set. Ignored for lerobot, which "
+             "always resamples onto its fps grid. e.g. --sync nearest",
     )] = None,
     downsample: Annotated[Optional[float], typer.Option("--downsample",
         help="Resample to this rate in Hz before writing. Overrides the "
-             "preset's downsample_hz if --preset is set. e.g. --downsample 50",
+             "preset's downsample_hz if --preset is set. For lerobot this is "
+             "the dataset fps, rounded to an integer (default 30). "
+             "e.g. --downsample 50",
     )] = None,
     preset: Annotated[Optional[str], typer.Option("--preset",
         help="Use a named export preset that bundles format + sync + "
@@ -525,9 +530,13 @@ def export(
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
-    All chunk-streaming formats are memory-bounded by chunk size, not topic
-    size — open a 100 GB bag without OOMing. NumPy `.npz` is the exception:
-    it materializes the full topic and refuses topics over 1 M messages.
+    Unsynced exports to Parquet, HDF5, CSV, Zarr, and RLDS are
+    memory-bounded by chunk size, not topic size — open a 100 GB bag without
+    OOMing. With --sync (and the rlds / training-tabular / multimodal
+    presets) the synced table is built in memory first. NumPy `.npz` materializes the full topic and refuses topics over
+    1 M messages. LeRobot streams its input but holds one episode's frame
+    grid (duration x fps x numeric fields) in memory, because LeRobot's own
+    writer buffers an episode before saving it; camera frames go to disk.
 
     **Presets** (--preset NAME) bundle format/sync/downsample for common
     workflows. User-supplied flags always override preset values, so a
@@ -538,7 +547,7 @@ def export(
           resurrector export bag.mcap -t /imu/data -t /joint_states \\
               --sync nearest --downsample 50 --format hdf5 -o ./training
 
-      One-line LeRobot dataset (synced 30 Hz, all topics):
+      One-line LeRobot v3 dataset (30 fps causal grid, cameras as video):
           resurrector export bag.mcap --preset lerobot -o ./lerobot_data
 
       Preset with override (LeRobot defaults but at 60 Hz):
@@ -554,7 +563,7 @@ def export(
     if list_presets_flag:
         from rich.table import Table
         t = Table(title="Export presets", show_header=True, header_style="bold")
-        t.add_column("Name", style="cyan")
+        t.add_column("Name", style="cyan", no_wrap=True)
         t.add_column("Format")
         t.add_column("Sync")
         t.add_column("Hz")
@@ -564,7 +573,7 @@ def export(
             t.add_row(
                 p.name,
                 p.format,
-                f"{p.sync_method}" if p.sync else "—",
+                "fps grid" if p.format == "lerobot" else (f"{p.sync_method}" if p.sync else "—"),
                 f"{p.downsample_hz:.0f}" if p.downsample_hz else "native",
                 p.topic_filter or "all",
                 p.description,
@@ -572,11 +581,18 @@ def export(
         console.print(t)
         if any(p.extras_required for p in PRESETS.values()):
             console.print(
-                "\n[dim]Extras required for some presets — "
-                "`pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+) "
-                "for lerobot, `[all-exports]` for rlds.[/dim]"
+                "\n[dim]Extras required for some presets: "
+                "`pip install 'rosbag-resurrector\\[lerobot]'` (Python 3.12+) "
+                "for lerobot; `pip install 'rosbag-resurrector\\[all-exports]'` "
+                "for multimodal and rlds (rlds also needs `pip install tensorflow`).[/dim]"
             )
         raise typer.Exit()
+
+    if path is None:
+        import click
+        raise click.UsageError(
+            "Missing argument 'PATH'. e.g. resurrector export run.mcap --preset lerobot"
+        )
 
     from resurrector.core.bag_frame import BagFrame
 
@@ -593,7 +609,7 @@ def export(
         for item in split:
             if "=" not in item:
                 console.print(
-                    f"[red]Invalid --split entry {item!r}; expected NAME=RATIO "
+                    f"[red]Invalid --split entry {rich_escape(repr(item))}; expected NAME=RATIO "
                     f"(e.g. train=0.8)[/red]"
                 )
                 raise typer.Exit(2)
@@ -601,7 +617,7 @@ def export(
             try:
                 split_dict[k.strip()] = float(v.strip())
             except ValueError:
-                console.print(f"[red]--split {item!r}: ratio must be numeric[/red]")
+                console.print(f"[red]--split {rich_escape(repr(item))}: ratio must be numeric[/red]")
                 raise typer.Exit(2)
 
     try:
@@ -619,13 +635,13 @@ def export(
             action_topics=action_topic,
         )
     except (ValueError, FileExistsError) as e:
-        console.print(f"[red]Export failed: {e}[/red]")
+        console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except ImportError as e:
-        console.print(f"[yellow]{e}[/yellow]")
+        console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
         raise typer.Exit(1)
     except NotImplementedError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Exported to {result_path}[/green]")
@@ -727,7 +743,7 @@ def publish(
             qc_summary=qc_summary, license=license_id, dry_run=dry_run,
         )
     except ImportError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     if result.dry_run:
@@ -790,7 +806,7 @@ def benchmark(
     try:
         specs = load_specs(metrics)
     except (ValueError, OSError) as e:
-        console.print(f"[red]Bad metrics spec: {e}[/red]")
+        console.print(f"[red]Bad metrics spec: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     # Capture-baseline mode: compute current values, write them, exit.
@@ -801,7 +817,7 @@ def benchmark(
         try:
             values = capture_baseline(bag, specs)
         except UnknownMetricError as e:
-            console.print(f"[red]Metric error: {e}[/red]")
+            console.print(f"[red]Metric error: {rich_escape(str(e))}[/red]")
             raise typer.Exit(1)
         baseline.write_text(json.dumps(values, indent=2))
         console.print(f"[green]Baseline ({len(values)} metrics) written to {baseline}[/green]")
@@ -814,7 +830,7 @@ def benchmark(
     try:
         report = run_benchmark(bag, specs, baseline_values)
     except UnknownMetricError as e:
-        console.print(f"[red]Metric error: {e}[/red]")
+        console.print(f"[red]Metric error: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     if json_output:
@@ -1017,7 +1033,7 @@ def contract_init(
     try:
         save_contract(c, output)
     except RuntimeError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(code=1)
     console.print(
         f"[green]Contract written to {output}[/green] — "
@@ -1321,7 +1337,7 @@ def watch(
                         console.print(f"  Indexed: {len(metadata.topics)} topics, health: ", end="")
                         console.print(badge)
                     except Exception as e:
-                        console.print(f"  [red]Error: {e}[/red]")
+                        console.print(f"  [red]Error: {rich_escape(str(e))}[/red]")
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching.[/dim]")
     finally:
@@ -1382,7 +1398,8 @@ def dataset_add_version(
     )],
     topics: Annotated[Optional[list[str]], typer.Option("--topic", "-t",
         help="Topic to include. Pass --topic multiple times for multi-topic. "
-             "When omitted, every non-image topic is included. "
+             "When omitted, every topic is included (lerobot exports image "
+             "topics as camera video). "
              "e.g. -t /imu/data -t /joint_states",
     )] = None,
     format: Annotated[str, typer.Option("--format", "-f",
@@ -1391,10 +1408,12 @@ def dataset_add_version(
     )] = "parquet",
     sync_method: Annotated[Optional[str], typer.Option("--sync",
         help="Optional time-alignment method for the included topics: "
-             "nearest, interpolate, sample_and_hold. e.g. --sync nearest",
+             "nearest, interpolate, sample_and_hold. Ignored for lerobot "
+             "(always resampled onto its fps grid). e.g. --sync nearest",
     )] = None,
     downsample: Annotated[Optional[float], typer.Option("--downsample",
-        help="Resample to this Hz before export. e.g. --downsample 50",
+        help="Resample to this Hz before export. For lerobot, the dataset "
+             "fps, rounded to an integer (default 30). e.g. --downsample 50",
     )] = None,
     db: Annotated[Optional[Path], typer.Option("--db",
         help="Path to a non-default index database. e.g. --db /data/myindex.db",
@@ -1677,7 +1696,7 @@ def index_frames_cmd(
         for bag_path in bag_paths:
             bag = index.get_bag_by_path(bag_path)
             if bag is None:
-                console.print(f"[yellow]Bag not indexed: {bag_path.name}. Run 'resurrector scan' first.[/yellow]")
+                console.print(f"[yellow]Bag not indexed: {rich_escape(bag_path.name)}. Run 'resurrector scan' first.[/yellow]")
                 progress.advance(task)
                 continue
             try:
@@ -1688,7 +1707,7 @@ def index_frames_cmd(
                 )
                 total_frames += n
             except Exception as e:
-                console.print(f"[red]Error: {bag_path.name}: {e}[/red]")
+                console.print(f"[red]Error: {rich_escape(bag_path.name)}: {rich_escape(str(e))}[/red]")
             progress.advance(task)
 
     console.print(f"[green]Indexed {total_frames} frames from {len(bag_paths)} bag(s).[/green]")
@@ -1876,7 +1895,8 @@ def bridge_playback(
     )] = None,
     loop: Annotated[bool, typer.Option("--loop",
         help="Restart playback from the beginning when the bag ends, "
-             "indefinitely. Useful for live demos. e.g. --loop",
+             "indefinitely. Stops with a warning if the --topic filter "
+             "matches no messages. Useful for live demos. e.g. --loop",
     )] = False,
     no_browser: Annotated[bool, typer.Option("--no-browser",
         help="Skip opening the built-in viewer in the default browser at "
@@ -2206,7 +2226,7 @@ def _demo_download(
                 force=force,
             )
     except Exception as e:
-        console.print(f"[red]Download failed: {type(e).__name__}: {e}[/red]")
+        console.print(f"[red]Download failed: {type(e).__name__}: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     if result.skipped:

@@ -134,8 +134,10 @@ def get_capabilities() -> dict[str, Capability]:
         Capability(
             name="lerobot",
             available=_lerobot_available(),
-            install_command="pip install 'rosbag-resurrector[lerobot]'   # Python 3.12+",
-            description="LeRobot v3 dataset export (state, actions, camera video)",
+            # No trailing "# ..." note: zsh doesn't treat # as a comment
+            # interactively, so a pasted command would hand it to pip.
+            install_command="pip install 'rosbag-resurrector[lerobot]'",
+            description="LeRobot v3 dataset export (state, actions, camera video). Needs Python 3.12+",
         ),
         Capability(
             name="publish",

@@ -7,6 +7,7 @@ what's missing. Designed to be the first thing a new user runs.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import platform
 import shutil
@@ -115,6 +116,33 @@ def _check_converter(name: str, feature: str) -> CheckResult:
     )
 
 
+def _check_spec(name: str, feature: str, fix: str, missing_detail: str = "") -> CheckResult:
+    """Optional-tier presence check via find_spec — avoids importing heavy
+    packages (torch, tensorflow) just to report that they're installed.
+    ``fix`` must stay a bare copy-pasteable command; explanations go in
+    ``missing_detail``."""
+    if importlib.util.find_spec(name) is not None:
+        return CheckResult(feature, "pass", f"{name} available", tier="optional")
+    return CheckResult(
+        feature, "warn", missing_detail or f"{name} not installed", fix, tier="optional",
+    )
+
+
+def _check_lerobot() -> CheckResult:
+    """LeRobot needs Python 3.12+; on older interpreters the [lerobot]
+    extra installs nothing, so say why instead of a bare 'not installed'."""
+    feature = "LeRobot export"
+    v = sys.version_info
+    if tuple(v[:2]) < (3, 12):
+        return CheckResult(
+            feature, "warn",
+            f"needs Python 3.12+ (this is {v[0]}.{v[1]})",
+            "Use Python 3.12+, then: pip install 'rosbag-resurrector[lerobot]'",
+            tier="optional",
+        )
+    return _check_spec("lerobot", feature, "pip install 'rosbag-resurrector[lerobot]'")
+
+
 def run_all_checks() -> list[CheckResult]:
     """Run every check and return results."""
     return [
@@ -164,6 +192,11 @@ def run_all_checks() -> list[CheckResult]:
             "zarr", "Zarr export",
             "pip install 'rosbag-resurrector[all-exports]'",
             tier="optional",
+        ),
+        _check_lerobot(),
+        _check_spec(
+            "tensorflow", "RLDS export (tensorflow)", "pip install tensorflow",
+            missing_detail="tensorflow not installed; [all-exports] doesn't include it",
         ),
         _check_converter("mcap", "mcap CLI (.bag -> .mcap conversion)"),
         _check_converter("ros2", "ros2 CLI (.db3 -> .mcap conversion)"),
