@@ -197,22 +197,15 @@ class TestQCReportSerialization:
 # ---------------------------------------------------------------------------
 
 
-VENV_RESURRECTOR = "/tmp/v060-build/bin/resurrector"
-
-
 def _run_cli(*args: str) -> tuple[int, str, str]:
-    """Run the resurrector CLI under the v060-build venv."""
+    """Run `resurrector qc` from the interpreter running the tests."""
     p = subprocess.run(
-        [VENV_RESURRECTOR, "qc", *args],
-        capture_output=True, text=True,
+        [sys.executable, "-m", "resurrector.cli.main", "qc", *args],
+        capture_output=True, text=True, timeout=60,
     )
     return p.returncode, p.stdout, p.stderr
 
 
-@pytest.mark.skipif(
-    not Path(VENV_RESURRECTOR).exists(),
-    reason="venv-installed CLI not available; CLI tests need /tmp/v060-build",
-)
 class TestQCCLI:
     def test_text_output_on_healthy_fleet(self, fleet_three_healthy):
         rc, out, _ = _run_cli(*[str(p) for p in fleet_three_healthy])

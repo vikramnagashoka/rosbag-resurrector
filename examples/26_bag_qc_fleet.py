@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from _common import ensure_output_dir, header, section
@@ -89,19 +90,24 @@ def main() -> None:
     print(f"  Summary: {parsed['summary']}")
 
     section("Same thing via the CLI: 'resurrector qc'")
+    print(f"  $ resurrector qc {bags[0].name} ... ({len(bags)} bags)")
+    # `python -m resurrector.cli.main` is the `resurrector` console script
+    # of the install running this file, so it works in any venv without
+    # depending on PATH.
     cli_args = [
-        "/tmp/v060-build/bin/resurrector", "qc",
+        sys.executable, "-m", "resurrector.cli.main", "qc",
         *[str(p) for p in bags],
     ]
-    print(f"  $ {' '.join(cli_args[:3])} ...")
-    result = subprocess.run(cli_args, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cli_args, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
-        print(f"  [SKIP] CLI not in venv path; rc={result.returncode}")
-    else:
-        # Print just the head of the output to keep this script's output tight
-        for line in result.stdout.splitlines()[:6]:
-            print(f"  {line}")
-        print("  ... (CLI output truncated; run `resurrector qc <bag>` to see full table)")
+        print(f"  [FAIL] resurrector qc exited {result.returncode}:")
+        for line in (result.stderr or result.stdout).splitlines()[-15:]:
+            print(f"    {line}")
+        sys.exit(1)
+    # Print just the head of the output to keep this script's output tight
+    for line in result.stdout.splitlines()[:6]:
+        print(f"  {line}")
+    print("  ... (CLI output truncated; run `resurrector qc <bag>` to see full table)")
 
     print(
         "\n  ✓ Per-bag: wraps health_report() + adds empty / very-short detection.\n"
