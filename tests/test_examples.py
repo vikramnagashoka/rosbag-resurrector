@@ -10,6 +10,7 @@ missing.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -58,6 +59,60 @@ def test_no_hardcoded_dev_paths_in_examples_or_tests():
         "[sys.executable, '-m', 'resurrector.cli.main', ...] instead):\n"
         + "\n".join(offenders)
     )
+
+
+def test_examples_do_not_import_the_tests_package():
+    # A pip-installed user has examples/ but no tests/ on sys.path.
+    offenders = []
+    for path in _example_sources():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            elif isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            else:
+                continue
+            for name in names:
+                if name == "tests" or name.startswith("tests."):
+                    offenders.append(f"{path.name}:{node.lineno}: {name}")
+    assert not offenders, offenders
+
+
+def test_example_04_skips_image_sections_without_pillow(tmp_path):
+    """04 must exit 0 on a base install (no Pillow, no OpenCV).
+
+    The JPEG decode and PNG export both need Pillow from [vision-lite];
+    before the fix the script died with ImportError on the first
+    CompressedImage frame.
+    """
+    from resurrector.demo.sample_bag import BagConfig, generate_bag
+
+    home = tmp_path / "home"
+    (home / ".resurrector").mkdir(parents=True)
+    generate_bag(
+        home / ".resurrector" / "explore_sample.mcap",
+        BagConfig(duration_sec=0.5),
+    )
+    script = EXAMPLES / "04_image_video_export.py"
+    # sys.modules[name] = None makes `import name` raise ImportError, the
+    # same thing a base install sees.
+    boot = (
+        "import runpy, sys\n"
+        "sys.modules['PIL'] = None\n"
+        "sys.modules['cv2'] = None\n"
+        f"sys.path.insert(0, {str(EXAMPLES)!r})\n"
+        f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
+    )
+    env = {**os.environ, "HOME": str(home)}
+    proc = subprocess.run(
+        [sys.executable, "-c", boot],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "frame 0:" in proc.stdout  # raw sensor_msgs/Image still decodes
+    assert proc.stdout.count("[SKIP]") == 3, proc.stdout
+    assert "vision-lite" in proc.stdout
 
 
 def test_example_26_runs_the_qc_cli(tmp_path):

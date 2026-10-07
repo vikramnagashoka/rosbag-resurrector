@@ -38,21 +38,27 @@ def main() -> None:
     section("Iterate JPEG-compressed frames from /camera/compressed")
     compressed = bf["/camera/compressed"]
     print(f"  message_count: {compressed.message_count}")
-    for i, (ts_ns, frame) in enumerate(compressed.iter_images()):
-        # iter_images decodes the JPEG bytes to a numpy array transparently.
-        print(f"    frame {i}: t={ts_ns/1e9:.3f}s, decoded shape={frame.shape}")
-        if i >= 1:
-            break
+    try:
+        for i, (ts_ns, frame) in enumerate(compressed.iter_images()):
+            # iter_images decodes the JPEG bytes to a numpy array transparently.
+            print(f"    frame {i}: t={ts_ns/1e9:.3f}s, decoded shape={frame.shape}")
+            if i >= 1:
+                break
+    except ImportError as e:
+        print(f"  [SKIP] JPEG decoding needs Pillow: pip install 'rosbag-resurrector[vision-lite]'")
+        print(f"         ({e})")
 
     section("Export first 5 frames as PNGs")
-    pngs_dir = out / "rgb_frames"
-    pngs_dir.parent.mkdir(parents=True, exist_ok=True)
     exporter = Exporter()
-    exporter.export_frames(rgb, output_dir=str(out), max_frames=5)
-    saved = sorted((out / "camera_rgb").glob("*.png"))
-    print(f"  Wrote {len(saved)} PNG file(s):")
-    for p in saved:
-        print(f"    {p.name}  ({p.stat().st_size // 1024} KB)")
+    try:
+        exporter.export_frames(rgb, output_dir=str(out), max_frames=5)
+        saved = sorted((out / "camera_rgb").glob("*.png"))
+        print(f"  Wrote {len(saved)} PNG file(s):")
+        for p in saved:
+            print(f"    {p.name}  ({p.stat().st_size // 1024} KB)")
+    except ImportError as e:
+        print(f"  [SKIP] PNG export needs Pillow: pip install 'rosbag-resurrector[vision-lite]'")
+        print(f"         ({e})")
 
     section("Export same topic as an MP4 video")
     video_path = out / "rgb_clip.mp4"
