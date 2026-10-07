@@ -191,13 +191,12 @@ _SYNC_EXPORT_BAG_CONFIG = BagConfig(
 # to this export alone.
 _SYNC_EXPORT_CHILD = """
 import json, resource, sys
-import pyarrow.parquet as pq
 from resurrector.core import export as export_module
 from resurrector.core import sync as sync_module
 from resurrector.core.bag_frame import BagFrame
-from resurrector.core.export import Exporter
+from resurrector.core.export import ExportError, Exporter
 
-bag, out, downsample = sys.argv[1], sys.argv[2], sys.argv[3]
+bag, out, downsample, fmt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 # Small chunks, so the chunk-bounded part is a sliver of the budget.
 export_module.CHUNK_SIZE = 5_000
 # Route engine='auto' to the streaming engine, the one big bags get.
@@ -210,15 +209,27 @@ def peak_bytes():
 bf = BagFrame(bag)
 bf.metadata
 before = peak_bytes()
-Exporter().export(
-    bag_frame=bf, topics=["/imu/data", "/joint_states"], format="parquet",
-    output_dir=out, sync=True,
-    downsample_hz=float(downsample) if downsample != "none" else None,
-)
-print(json.dumps({
-    "delta_mb": (peak_bytes() - before) / 2**20,
-    "rows": pq.read_metadata(f"{out}/synced.parquet").num_rows,
-}))
+failed = []
+try:
+    Exporter().export(
+        bag_frame=bf, topics=["/imu/data", "/joint_states"], format=fmt,
+        output_dir=out, sync=True,
+        downsample_hz=float(downsample) if downsample != "none" else None,
+    )
+except ExportError as e:  # Zarr can't store the header.frame_id strings
+    failed = sorted(f.column for f in e.failures)
+delta_mb = (peak_bytes() - before) / 2**20
+if fmt == "parquet":
+    import pyarrow.parquet as pq
+    rows = pq.read_metadata(f"{out}/synced.parquet").num_rows
+elif fmt == "hdf5":
+    import h5py
+    with h5py.File(f"{out}/synced.h5", "r") as f:
+        rows = f["synced/timestamp_ns"].shape[0]
+else:
+    import zarr
+    rows = zarr.open_group(f"{out}/synced.zarr", mode="r")["timestamp_ns"].shape[0]
+print(json.dumps({"delta_mb": delta_mb, "rows": rows, "failed": failed}))
 """
 
 
@@ -230,16 +241,23 @@ def sync_export_bag(tmp_path_factory):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="ru_maxrss is POSIX-only")
-@pytest.mark.parametrize("downsample", ["none", "50"])
-def test_synced_export_bounded(sync_export_bag, tmp_path, downsample):
+@pytest.mark.parametrize("fmt,downsample", [
+    ("parquet", "none"), ("parquet", "50"), ("hdf5", "none"), ("zarr", "none"),
+])
+def test_synced_export_bounded(sync_export_bag, tmp_path, fmt, downsample):
     """Synced export (CLI --sync, the rlds / training-tabular / multimodal
     presets) streams, so its peak RSS doesn't grow with the bag.
 
     Would catch: the synced table built in memory before writing. On
     this bag that path peaked around 500 MB (and grows with the bag);
-    the streamed path stays near 70 MB, the same at 3x the rows.
+    the streamed path stays near 70 MB, the same at 3x the rows. HDF5
+    and Zarr (the multimodal preset) go through the same stream plus a
+    per-chunk dtype conversion.
     """
     import resurrector
+
+    if fmt == "zarr":
+        pytest.importorskip("zarr")
 
     src_root = str(Path(resurrector.__file__).resolve().parents[1])
     env = dict(os.environ)
@@ -248,7 +266,7 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, downsample):
     )
     proc = subprocess.run(
         [sys.executable, "-c", _SYNC_EXPORT_CHILD,
-         str(sync_export_bag), str(tmp_path / "out"), downsample],
+         str(sync_export_bag), str(tmp_path / "out"), downsample, fmt],
         capture_output=True, text=True, env=env, check=False,
     )
     assert proc.returncode == 0, proc.stderr
@@ -256,6 +274,10 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, downsample):
 
     expected_rows = 100_000 if downsample == "none" else 5_000
     assert abs(result["rows"] - expected_rows) <= 1
+    if fmt == "zarr":
+        assert all(c.endswith("header.frame_id") for c in result["failed"])
+    else:
+        assert result["failed"] == []
     assert result["delta_mb"] < 200, (
         f"synced export peak RSS delta {result['delta_mb']:.1f} MB > 200 MB"
     )

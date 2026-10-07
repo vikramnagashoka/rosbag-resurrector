@@ -201,3 +201,26 @@ class TestRldsStreaming:
 
         assert len(written) == bf.sync(topics).height
         assert [_step_flag(ex, "is_last") for ex in written] == [0] * (len(written) - 1) + [1]
+
+    @pytest.mark.parametrize("sync,downsample_hz", [
+        (False, None), (True, None), (True, 10.0),
+    ], ids=["unsynced", "synced", "synced-downsampled"])
+    def test_time_sliced_export_marks_last_step(
+        self, tmp_dir, small_bag, written, monkeypatch, sync, downsample_hz,
+    ):
+        """Would catch: ``is_last`` keyed to ``view.message_count - 1``.
+        A time-sliced view still reports the whole topic's message count,
+        so through 0.8.4 an unsliced count was never reached. Small
+        chunks make the synced stream span several, so the flag has to
+        come from the lookahead, not the first chunk."""
+        monkeypatch.setattr(export_module, "CHUNK_SIZE", 32)
+        sliced = BagFrame(small_bag).time_slice(0.5, 1.5)
+        topics = ["/imu/data", "/joint_states"] if sync else ["/imu/data"]
+        Exporter().export(
+            bag_frame=sliced, topics=topics, format="rlds",
+            output_dir=str(tmp_dir / "out"), sync=sync, downsample_hz=downsample_hz,
+        )
+
+        assert 0 < len(written) < sliced["/imu/data"].message_count
+        assert [_step_flag(ex, "is_last") for ex in written] == [0] * (len(written) - 1) + [1]
+        assert [_step_flag(ex, "is_first") for ex in written] == [1] + [0] * (len(written) - 1)

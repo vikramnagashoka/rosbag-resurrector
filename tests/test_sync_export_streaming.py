@@ -22,9 +22,12 @@ from polars.testing import assert_frame_equal
 from resurrector.core import export as export_module
 from resurrector.core import sync as sync_module
 from resurrector.core.bag_frame import BagFrame
-from resurrector.core.export import Exporter
+from resurrector.core.export import ExportError, Exporter
 from resurrector.core.transforms import downsample_temporal, iter_downsample_temporal
+from resurrector.demo.sample_bag import SCHEMAS
+from resurrector.ingest.parser import register_decoder, unregister_decoder
 from tests.fixtures.generate_test_bags import BagConfig, generate_bag
+from tests.fixtures.sync_fixtures import BASE_TIME_NS, _encode_imu_at, _encode_joint_at
 
 TOPICS = ["/imu/data", "/joint_states"]
 
@@ -145,6 +148,167 @@ def test_synced_export_missing_topic_still_raises(bag, tmp_path):
             bag_frame=BagFrame(bag), topics=["/imu/data", "/nope"],
             format="parquet", output_dir=str(tmp_path), sync=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# HDF5 / Zarr: a column's dataset dtype is fixed when the first chunk is
+# written, so it must not depend on whether that chunk happens to hold an
+# unmatched row. The bag below syncs to fully matched leading chunks and
+# unmatched trailing ones.
+# ---------------------------------------------------------------------------
+
+FLAG_TYPE = "resurrector_test/msg/Flag"
+GAP_TOPICS = ["/imu/data", "/joint_states", "/flag"]
+GAP_ROWS = 24      # /imu/data, the anchor: 0 .. 2.3 s every 100 ms
+GAP_MATCHED = 8    # /joint_states and /flag stop after 0.7 s
+
+
+def _decode_flag(data: bytes) -> dict:
+    return {"data": bool(data[4])}
+
+
+@pytest.fixture
+def flag_decoder():
+    """A one-field Boolean message type, decoded through the public
+    decoder registry (none of the built-in types carry a bool)."""
+    register_decoder(FLAG_TYPE, _decode_flag)
+    yield
+    unregister_decoder(FLAG_TYPE)
+
+
+@pytest.fixture(scope="module")
+def gap_bag(tmp_path_factory) -> Path:
+    from mcap.writer import Writer
+
+    path = tmp_path_factory.mktemp("gap") / "gap.mcap"
+    with open(path, "wb") as f:
+        writer = Writer(f)
+        writer.start(profile="ros2", library="resurrector-test")
+        channels = {}
+        for topic, msg_type, schema_text in [
+            ("/imu/data", "sensor_msgs/msg/Imu", SCHEMAS["sensor_msgs/msg/Imu"]["data"]),
+            ("/joint_states", "sensor_msgs/msg/JointState",
+             SCHEMAS["sensor_msgs/msg/JointState"]["data"]),
+            ("/flag", FLAG_TYPE, "bool data\n"),
+        ]:
+            sid = writer.register_schema(
+                name=msg_type, encoding="ros2msg", data=schema_text.encode(),
+            )
+            channels[topic] = writer.register_channel(
+                topic=topic, message_encoding="cdr", schema_id=sid,
+            )
+        for i in range(GAP_ROWS):
+            t = BASE_TIME_NS + i * 100_000_000
+            writer.add_message(channels["/imu/data"], log_time=t, publish_time=t,
+                               data=_encode_imu_at(t))
+            if i < GAP_MATCHED:
+                writer.add_message(channels["/joint_states"], log_time=t,
+                                   publish_time=t, data=_encode_joint_at(t))
+                writer.add_message(channels["/flag"], log_time=t, publish_time=t,
+                                   data=b"\x00\x01\x00\x00" + bytes([i % 2 == 0]))
+        writer.finish()
+    return path
+
+
+def _read_columns(out_dir: Path, fmt: str) -> dict[str, np.ndarray]:
+    if fmt == "hdf5":
+        import h5py
+        with h5py.File(out_dir / "synced.h5", "r") as f:
+            return {k: f["synced"][k][:] for k in f["synced"]}
+    import zarr
+    group = zarr.open_group(str(out_dir / "synced.zarr"), mode="r")
+    return {k: group[k][:] for k in group.array_keys()}
+
+
+def _export_gap(bf: BagFrame, topics: list[str], fmt: str, out: Path) -> set[str]:
+    """Synced export of ``topics``; returns the columns that failed."""
+    try:
+        Exporter().export(
+            bag_frame=bf, topics=topics, format=fmt, output_dir=str(out), sync=True,
+        )
+    except ExportError as e:
+        return {f.column for f in e.failures}
+    return set()
+
+
+def _assert_written_like(got: dict[str, np.ndarray], expected: pl.DataFrame,
+                         strings: set[str]) -> None:
+    """Every non-string column written as float64 with the reference's
+    values, NaN exactly where the reference has NaN or null."""
+    assert got["timestamp_ns"].dtype == np.int64
+    np.testing.assert_array_equal(got["timestamp_ns"], expected["timestamp_ns"].to_numpy())
+    for col in set(expected.columns) - strings - {"timestamp_ns"}:
+        assert got[col].dtype == np.float64, col
+        np.testing.assert_array_equal(
+            got[col], expected[col].cast(pl.Float64).to_numpy(), err_msg=col,
+        )
+
+
+@pytest.mark.parametrize("fmt", ["hdf5", "zarr"])
+def test_synced_hdf5_zarr_int_columns_unmatched_after_first_chunk(
+    gap_bag, tmp_path, monkeypatch, sync_engine, fmt,
+):
+    """The multimodal preset (Zarr + sync) on the streaming engine.
+
+    Would catch: the streaming engine keeping the non-anchor Int64
+    columns (the header stamps every ROS topic carries) as Int64 with
+    nulls where unmatched, while the writer sized the dataset as int64
+    from a fully matched first chunk: every unmatched stamp was then
+    stored as 0, silently, in both formats.
+    """
+    if fmt == "zarr":
+        pytest.importorskip("zarr")
+    topics = ["/imu/data", "/joint_states"]
+    monkeypatch.setattr(export_module, "CHUNK_SIZE", 4)
+    bf = BagFrame(gap_bag)
+    expected = bf.sync(topics, engine="eager")
+    stamp = "joint_states__header.stamp_sec"
+    assert expected.height == GAP_ROWS
+    assert expected.schema[stamp] == pl.Float64
+    assert expected[stamp][:4].is_not_nan().all()  # first chunk fully matched
+    assert expected[stamp][GAP_MATCHED:].is_nan().all()
+
+    failed = _export_gap(bf, topics, fmt, tmp_path)
+    strings = {c for c, dt in expected.schema.items() if dt == pl.String}
+    # Zarr has no variable-length strings; that's the only loss allowed.
+    assert failed == (strings if fmt == "zarr" else set())
+
+    got = _read_columns(tmp_path, fmt)
+    assert got[stamp][0] == expected[stamp][0] > 1.6e9
+    assert np.isnan(got[stamp][GAP_MATCHED:]).all(), got[stamp]
+    _assert_written_like(got, expected, strings)
+
+
+@pytest.mark.parametrize("fmt", ["hdf5", "zarr"])
+def test_synced_hdf5_zarr_bool_column_unmatched_after_first_chunk(
+    gap_bag, tmp_path, monkeypatch, flag_decoder, sync_engine, fmt,
+):
+    """A non-anchor Boolean column stays Boolean in the synced frame,
+    null where unmatched (both engines). HDF5 / Zarr write Booleans as
+    float64: 1.0 / 0.0, NaN for a missing value, whatever chunk the
+    first null lands in.
+
+    Would catch: the dataset sized as bool from a fully matched first
+    chunk, after which the chunk with nulls (an object array) failed the
+    column, on both engines.
+    """
+    if fmt == "zarr":
+        pytest.importorskip("zarr")
+    monkeypatch.setattr(export_module, "CHUNK_SIZE", 4)
+    bf = BagFrame(gap_bag)
+    expected = bf.sync(GAP_TOPICS, engine="eager")
+    assert expected.schema["flag__data"] == pl.Boolean
+    assert expected["flag__data"][:4].null_count() == 0
+    assert expected["flag__data"][GAP_MATCHED:].is_null().all()
+
+    failed = _export_gap(bf, GAP_TOPICS, fmt, tmp_path)
+    strings = {c for c, dt in expected.schema.items() if dt == pl.String}
+    assert failed == (strings if fmt == "zarr" else set())
+
+    got = _read_columns(tmp_path, fmt)
+    np.testing.assert_array_equal(got["flag__data"][:GAP_MATCHED], [1.0, 0.0] * 4)
+    assert np.isnan(got["flag__data"][GAP_MATCHED:]).all()
+    _assert_written_like(got, expected, strings)
 
 
 # ---------------------------------------------------------------------------

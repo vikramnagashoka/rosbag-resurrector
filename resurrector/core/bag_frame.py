@@ -728,6 +728,14 @@ class BagFrame:
 
         Returns:
             A unified Polars DataFrame with columns prefixed by topic name.
+            Non-anchor numeric columns are Float64, NaN where unmatched;
+            the full dtype rules, and where the streaming engine differs
+            from eager, are in the :mod:`resurrector.core.sync` docstring.
+
+        Raises:
+            SyncOutOfOrderError, SyncBufferExceededError,
+                SyncBoundaryError, SyncSchemaDriftError: streaming engine
+                only; see :func:`resurrector.core.sync.synchronize`.
         """
         from resurrector.core.sync import synchronize
         topic_views = {name: self[name] for name in topics}

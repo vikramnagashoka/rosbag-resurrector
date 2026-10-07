@@ -1,13 +1,14 @@
 """Multi-stream temporal synchronization.
 
 Aligns multiple topics that publish at independent rates to a single
-anchor stream. Two engines, both produce DataFrames in the same wire
-format:
+anchor stream. Two engines, producing the same columns except where
+listed further down:
 
 - **eager** (v0.3.x behavior): materializes every topic via
-  ``view.to_polars()`` and matches via ``np.searchsorted``. Globally
-  correct on every edge case but O(N) memory per topic. Available
-  for backward compat and small bags via ``engine="eager"``.
+  ``view.to_polars()`` and matches via ``np.searchsorted``. Sees each
+  whole topic at once (sorts it, unifies its dtypes) at O(N) memory
+  per topic. Available for backward compat and small bags via
+  ``engine="eager"``.
 
 - **streaming** (v0.4.0): per-topic bounded lookahead buffers around
   the current anchor timestamp. Memory bounded by
@@ -23,14 +24,55 @@ keep the v0.3.x behavior, big bags get the bounded-memory path.
 Both engines produce output in chunks through :func:`iter_synchronize`;
 :func:`synchronize` concatenates them. The output schema is fixed
 before the first chunk, so every chunk can go to the same streaming
-writer (this is how synced exports stay bounded):
+writer (this is how synced exports stay bounded).
 
-- eager: exactly the schema the one-shot v0.3.x frame had.
-- streaming: taken from each topic's first input chunk. Anchor columns
-  come first, then each other topic's columns in the order the topics
-  were passed. A topic with no match anywhere still gets its columns
-  (all null), and ``interpolate`` makes numeric and bool columns
-  Float64.
+Output columns, both engines: ``timestamp_ns`` (the anchor's), the
+anchor topic's columns, then each other topic's columns in the order
+the topics were passed, each topic's in its own column order (topics
+with no messages are left out). Anchor columns keep their dtype
+(Float32, UInt and Int32 included). A non-anchor integer (signed or
+unsigned) or float column (Float32 included) is Float64, with NaN,
+never null, where a row has no match or the source value is null;
+``interpolate`` makes non-anchor Booleans Float64 too. Other non-anchor
+columns (Boolean, String, List, ...) keep their dtype, null where
+unmatched. ``nearest`` and ``sample_and_hold`` are tested to give the
+same frame on both engines (``tests/test_sync_streaming.py``) apart
+from the differences below.
+
+Where the streaming engine differs from eager:
+
+- Dtypes come from each topic's first chunk, where eager unifies them
+  across the whole topic. A later chunk the output column can't hold
+  raises :class:`SyncSchemaDriftError` (an all-null first chunk then
+  values; ints then floats in an anchor Int64 column). Ints and floats
+  mix freely in a Float64 output column. A column that first appears
+  after a topic's first chunk is left out, with a warning.
+- A non-numeric non-anchor column with no match on any row keeps its
+  dtype (all null); eager gives it the Null dtype.
+- Fixed-size Array columns keep their dtype, null where unmatched;
+  eager turns numeric Arrays into Array(Float64), NaN-filled where
+  unmatched, and its ``interpolate`` raises ``ValueError`` on them.
+  Variable-length List columns match under ``nearest`` and
+  ``sample_and_hold``.
+- ``nearest`` with duplicate timestamps in a non-anchor topic:
+  streaming takes the last of the duplicates; eager takes the first
+  when the anchor is at or before them.
+- ``interpolate``: eager converts every column it can to float (strings
+  holding numbers included), runs ``np.interp`` (so a null sample turns
+  both neighbouring intervals NaN, and values past a topic's first and
+  last sample hold the edge value), and drops the columns it can't
+  convert and topics with fewer than two samples. Streaming
+  interpolates int, float and bool values only, holds the earlier
+  sample's value for anything else (strings, lists, a null on either
+  side), keeps every column and topic, and follows ``boundary``
+  (default: missing, NaN in numeric columns) for anchor rows without a
+  sample at or before them or strictly after them (so at a topic's
+  last sample, too).
+- An empty anchor topic: streaming returns an empty frame; eager raises
+  ``KeyError`` as for an unknown anchor.
+- ``out_of_order``, ``boundary``, ``max_buffer_messages`` and
+  ``max_lateness_ms`` apply to streaming only. Eager sorts each
+  non-anchor topic and keeps anchor rows in recorded order.
 
 Failure modes are surfaced as typed exceptions:
 
@@ -40,6 +82,8 @@ Failure modes are surfaced as typed exceptions:
 - :class:`SyncOutOfOrderError` — only when ``out_of_order="error"``.
 - :class:`SyncBoundaryError` — only when ``boundary="error"`` and an
   interpolation lacks bracketing samples.
+- :class:`SyncSchemaDriftError` — a topic's column changed dtype
+  partway through in a way its output column can't hold.
 """
 
 from __future__ import annotations
@@ -57,6 +101,7 @@ from resurrector.core.exceptions import (
     SyncBoundaryError,
     SyncBufferExceededError,
     SyncOutOfOrderError,
+    SyncSchemaDriftError,
 )
 
 if TYPE_CHECKING:
@@ -117,7 +162,8 @@ def synchronize(
                 arrivals beyond the window get dropped.
         boundary: streaming-only, interpolate-only. How to handle an
             anchor timestamp that lacks bracketing samples on a topic:
-              - ``"null"`` (default): emit None/NaN for that column.
+              - ``"null"`` (default): emit a missing value for that
+                topic's columns (NaN in numeric ones, null otherwise).
               - ``"drop"``: skip the entire anchor row.
               - ``"hold"``: use whichever edge sample exists.
               - ``"error"``: raise SyncBoundaryError.
@@ -175,8 +221,9 @@ def iter_synchronize(
           for), but output is built one chunk at a time.
 
     Sync errors (:class:`SyncOutOfOrderError`,
-    :class:`SyncBoundaryError`, :class:`SyncBufferExceededError`) are
-    raised during iteration, possibly after earlier chunks were yielded.
+    :class:`SyncBoundaryError`, :class:`SyncBufferExceededError`,
+    :class:`SyncSchemaDriftError`) are raised during iteration, possibly
+    after earlier chunks were yielded.
 
     Args:
         chunk_size: Maximum rows per yielded DataFrame. The streaming
@@ -318,7 +365,8 @@ class _GatherPlan:
     whether that is a match; ``apply`` gathers one chunk's worth.
     Column handling matches the v0.3.x one-shot build:
 
-    - numeric (NumPy kind ``f``/``i``): Float64, NaN where unmatched.
+    - numeric (NumPy kind ``f``/``i``/``u``): Float64, NaN where
+      unmatched or null.
     - anything else: the source dtype, null where unmatched; Null dtype
       if no anchor row gets a non-null value (what inference gave).
     """
@@ -358,7 +406,10 @@ class _GatherPlan:
             series = df[col]
             # The whole column's NumPy kind decides, as it did when the
             # column was matched in one piece (Int64 with nulls is "f").
-            if series.to_numpy().dtype.kind in ("f", "i"):
+            # Unsigned ints count as numeric too, so that no integer
+            # column comes out nullable (the streaming engine applies
+            # the same rule from the dtype alone).
+            if series.to_numpy().dtype.kind in ("f", "i", "u"):
                 mode = "numeric"
             elif (series.is_not_null().to_numpy()[self.rows] & self.valid).any():
                 mode = "typed"
@@ -471,14 +522,21 @@ def _streaming_chunks(
         name: _peek_schema(view.iter_chunks(max(chunk_size, _MIN_READ_CHUNK)))
         for name, view in topic_views.items()
     }
-    schema = _streaming_schema(
+    schema, as_float = _streaming_schema(
         anchor, {name: s for name, (s, _) in sources.items()}, method,
     )
 
     def rows_of(name: str) -> Iterator[tuple[int, dict]]:
         topic_schema, chunks = sources[name]
         if topic_schema is not None:
-            chunks = _warn_on_new_columns(chunks, name, set(topic_schema))
+            prefix = name.lstrip("/").replace("/", "_")
+            chunks = _check_chunk_schemas(
+                chunks, name, topic_schema,
+                float_out={
+                    col for col in topic_schema
+                    if schema.get(f"{prefix}__{col}") == pl.Float64
+                },
+            )
         return _rows_from_chunks(
             chunks, name,
             out_of_order=out_of_order,
@@ -511,7 +569,7 @@ def _streaming_chunks(
             boundary=boundary,
             max_buffer_messages=max_buffer_messages,
         )
-    yield from _row_chunks(rows, schema, chunk_size)
+    yield from _row_chunks(rows, schema, as_float, chunk_size)
 
 
 def _peek_schema(
@@ -529,14 +587,18 @@ def _streaming_schema(
     anchor: str,
     topic_schemas: dict[str, pl.Schema | None],
     method: str,
-) -> dict[str, pl.DataType]:
+) -> tuple[dict[str, pl.DataType], list[str]]:
     """Output schema in row-merge order: anchor, then the other topics.
 
-    Interpolation turns Python ints, floats and bools into floats, so
-    those columns are Float64 under ``interpolate``; boundary ``hold``
-    values are cast to match.
+    Returns the schema and the non-anchor columns widened to Float64.
+    Those follow the eager engine's rule: every non-anchor integer or
+    float column is Float64, with NaN (never null) where a row has no
+    match or the source value is null. Under ``interpolate`` Boolean
+    columns are widened too (interpolation yields fractions; boundary
+    ``hold`` values are cast to match). Anchor columns keep their dtype.
     """
     out: dict[str, pl.DataType] = {}
+    as_float: list[str] = []
     order = [anchor] + [name for name in topic_schemas if name != anchor]
     for name in order:
         topic_schema = topic_schemas[name]
@@ -548,52 +610,83 @@ def _streaming_schema(
                 if name == anchor:
                     out[col] = dtype
                 continue
-            if name != anchor and method == "interpolate" and (
-                dtype.is_integer() or dtype.is_float() or dtype == pl.Boolean
+            out_col = f"{prefix}__{col}"
+            if name != anchor and (
+                dtype.is_integer() or dtype.is_float()
+                or (method == "interpolate" and dtype == pl.Boolean)
             ):
                 dtype = pl.Float64
-            out[f"{prefix}__{col}"] = dtype
-    return out
+                as_float.append(out_col)
+            out[out_col] = dtype
+    return out, as_float
 
 
-def _warn_on_new_columns(
-    chunks: Iterator[pl.DataFrame], topic_name: str, known: set[str],
+def _check_chunk_schemas(
+    chunks: Iterator[pl.DataFrame],
+    topic_name: str,
+    first: pl.Schema,
+    *,
+    float_out: set[str],
 ) -> Iterator[pl.DataFrame]:
-    """Pass chunks through, warning once if a column shows up that the
-    topic's first chunk didn't have (the output schema can't grow)."""
+    """Pass a topic's chunks through, checking each against its first.
+
+    The output dtype of every column was fixed from the first chunk, so
+    a later chunk must fit it: the same dtype, or all-null (Null), or,
+    for a column whose output is Float64 (``float_out``: every
+    non-anchor numeric column, and anchor columns that started as
+    Float64), any integer or float dtype. Anything else would fail
+    inside polars or be truncated, so it raises
+    :class:`SyncSchemaDriftError`. A column the first chunk didn't have
+    can't be added to the output; that is warned about once.
+    """
     warned = False
     for chunk in chunks:
-        if not warned:
-            new = [c for c in chunk.columns if c not in known]
-            if new:
-                log.warning(
-                    "Topic %s gained columns %s after its first chunk; "
-                    "the synced output's columns are fixed from the first "
-                    "chunk, so these are left out.",
-                    topic_name, new,
-                )
-                warned = True
+        for col, dtype in chunk.schema.items():
+            expected = first.get(col)
+            if expected is None:
+                if not warned:
+                    log.warning(
+                        "Topic %s gained columns %s after its first chunk; "
+                        "the synced output's columns are fixed from the first "
+                        "chunk, so these are left out.",
+                        topic_name, [c for c in chunk.columns if c not in first],
+                    )
+                    warned = True
+                continue
+            if dtype == expected or dtype == pl.Null:
+                continue
+            if col in float_out and (dtype.is_integer() or dtype.is_float()):
+                continue
+            raise SyncSchemaDriftError(
+                topic_name=topic_name,
+                column=col,
+                expected=str(expected),
+                got=str(dtype),
+            )
         yield chunk
 
 
 def _row_chunks(
     rows: Iterator[dict],
     schema: dict[str, pl.DataType],
+    as_float: list[str],
     chunk_size: int,
 ) -> Iterator[pl.DataFrame]:
     """Group merged row dicts into DataFrames of ``chunk_size`` rows.
 
-    Missing keys (no match within tolerance) become nulls.
+    Missing keys (no match within tolerance) become nulls, then NaN in
+    the ``as_float`` columns.
     """
+    nan = [pl.col(c).fill_null(float("nan")) for c in as_float]
     batch: list[dict] = []
     for row in rows:
         batch.append(row)
         if len(batch) >= chunk_size:
-            df = pl.from_dicts(batch, schema=schema)
+            df = pl.from_dicts(batch, schema=schema).with_columns(nan)
             batch = []
             yield df
     if batch:
-        yield pl.from_dicts(batch, schema=schema)
+        yield pl.from_dicts(batch, schema=schema).with_columns(nan)
 
 
 def _row_iter(

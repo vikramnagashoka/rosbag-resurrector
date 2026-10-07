@@ -420,6 +420,8 @@ synced = bf.sync(["/imu/data", "/joint_states"], method="interpolate")
 synced = bf.sync(["/imu/data", "/camera/rgb"], method="sample_and_hold")
 ```
 
+The anchor topic's columns keep their dtypes. Every other topic's integer and float columns come back as Float64, with NaN where a row has no match; booleans, strings and lists keep their dtype, null where unmatched (`interpolate` makes booleans Float64 too). Topics over 1 M messages go through the streaming sync engine; where it differs from the eager one (mostly `interpolate` at a topic's edges) is listed in the [`sync.py`](resurrector/core/sync.py) module docstring. For a sync too big to hold, `resurrector.core.sync.iter_synchronize` yields the same rows a chunk at a time.
+
 ### Reproducible Datasets
 
 Create named, versioned dataset collections with full provenance tracking — the bridge between raw bags and ML training pipelines:
@@ -504,6 +506,8 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | **LeRobot** | Hugging Face LeRobot training: v3 dataset written by LeRobot's own writer, cameras as video | Input streamed; holds one episode's frame grid |
 | NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
+
+HDF5, Zarr and NumPy have no missing value for integers or booleans, so those columns are written as float64 with NaN marking a missing value (booleans as 1.0 / 0.0); `timestamp_ns` stays int64. Integers beyond ±2^53 lose precision there (a warning says so); Parquet writes each column's dtype unchanged, nulls included.
 
 LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). RLDS needs `tensorflow`: `pip install 'rosbag-resurrector[all-exports]'`.
 
@@ -716,7 +720,7 @@ Every knob below has a sensible default. Override per-call when you need to — 
 | Knob | Default | Where it applies | When to change it |
 |---|---|---|---|
 | `chunk_size=` | `50_000` | `iter_chunks()`, `materialize_ipc_cache()`, `stream_bucketed_minmax()`, all chunk-streaming exporters | Lower for tighter RSS budgets on small machines; raise to reduce per-chunk overhead on fast NVMe |
-| `max_buffer_messages=` | `100_000` | `bf.sync(engine="streaming")` per-topic lookahead buffer | Raise if a genuine rate mismatch trips `SyncBufferOverflowError`; lower to fail faster on misconfigured topics |
+| `max_buffer_messages=` | `100_000` | `bf.sync(engine="streaming")` per-topic lookahead buffer | Raise if a genuine rate mismatch trips `SyncBufferExceededError`; lower to fail faster on misconfigured topics |
 | `max_lateness_ms=` | `0.0` | `bf.sync(out_of_order="reorder")` watermark window | Set > 0 to admit late samples within the window when reordering. Ignored unless `out_of_order="reorder"` |
 | `tolerance_ms=` | required arg | `bf.sync()` match window | Per-call — depends on your sensor rates |
 | `engine=` | `"auto"` | `bf.sync()` engine selector | `"auto"` picks eager when every topic is < 1 M messages, streaming otherwise. Force one explicitly to override |

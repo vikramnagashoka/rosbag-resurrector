@@ -14,6 +14,11 @@ exception: the format can't be incrementally appended, so writing
 requires materializing every column. We hard-cap NumPy export at
 ``NUMPY_HARD_CAP`` rows and raise :class:`LargeTopicError` past that
 — users on bigger topics should use Parquet (which streams).
+
+HDF5, Zarr and NumPy have no missing value for integers or Booleans,
+and their arrays can't change dtype after the first chunk, so those
+columns are written as float64 with NaN for a missing value (see
+:class:`_NumpyColumns`); ``timestamp_ns`` stays int64.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
 import numpy as np
+import polars as pl
 
 from resurrector.core.exceptions import LargeTopicError
 
@@ -323,7 +329,10 @@ class Exporter:
             format: ``parquet`` (default), ``hdf5``, ``csv``, ``numpy``,
                 ``zarr`` (needs ``[all-exports]``), ``lerobot`` (needs
                 ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
-                ``[all-exports]``).
+                ``[all-exports]``). ``hdf5``, ``zarr`` and ``numpy``
+                write integer and Boolean columns as float64, NaN for a
+                missing value (``timestamp_ns`` stays int64); Parquet
+                keeps every dtype and nulls as they are.
             output_dir: Directory to write into. Created if missing.
             sync: When True (and 2+ topics), time-align with
                 :func:`~resurrector.core.sync.iter_synchronize` (same rows
@@ -349,10 +358,13 @@ class Exporter:
                 more than ``NUMPY_HARD_CAP`` rows.
             ValueError: For unknown format strings.
             KeyError: ``sync=True`` and a topic isn't in the bag.
-            SyncOutOfOrderError, SyncBufferExceededError: ``sync=True``
-                on the streaming engine (topics over
-                ``LARGE_TOPIC_THRESHOLD``). Raised mid-stream, so
-                ``synced.<ext>`` may already be partly written.
+            SyncOutOfOrderError, SyncBufferExceededError,
+                SyncSchemaDriftError: ``sync=True`` on the streaming
+                engine (topics over ``LARGE_TOPIC_THRESHOLD``). Raised
+                mid-stream, so ``synced.<ext>`` may already be partly
+                written.
+            ExportError: Some columns couldn't be written (e.g. strings
+                in Zarr); the other columns are complete.
         """
         output_path = Path(output_dir)
 
@@ -581,7 +593,6 @@ def _at_least_one_chunk(chunks: Iterable) -> Iterator:
         empty = False
         yield chunk
     if empty:
-        import polars as pl
         yield pl.DataFrame()
 
 
@@ -608,14 +619,93 @@ def _with_final_flag(chunks: Iterable) -> Iterator[tuple]:
 # ---------------------------------------------------------------------------
 
 
-def _safe_column_to_numpy(df, col: str) -> tuple[np.ndarray | None, ExportColumnFailure | None]:
-    """Convert one column to numpy, returning the array or a failure record."""
-    try:
-        return df[col].to_numpy(), None
-    except Exception as e:
-        return None, ExportColumnFailure(
-            column=col, error_type=type(e).__name__, message=str(e),
-        )
+# float64 represents every integer up to this magnitude exactly.
+_FLOAT64_EXACT_INT = 2**53
+
+
+class _NumpyColumns:
+    """Column -> NumPy conversion for the HDF5, Zarr and ``.npz`` writers.
+
+    HDF5 and Zarr append each chunk to an array whose dtype is fixed by
+    the first chunk written (``.npz`` follows the same rule so the three
+    agree), so a column's NumPy dtype is chosen once, from its polars
+    dtype, assuming any chunk may hold nulls. (A chunk's own conversion
+    won't do: Int64 converts to int64 or float64, Boolean to bool or
+    object, depending on whether that chunk has a null.)
+
+    - Float32 / Float64 keep their width; null -> NaN.
+    - Integer and Boolean columns -> float64 (Booleans as 1.0 / 0.0);
+      null -> NaN. Integers beyond +/-2**53 are rounded, with a warning.
+    - ``timestamp_ns`` stays int64: every row has one, and float64 would
+      round nanosecond timestamps.
+    - Anything else (strings, lists, ...) converts as polars does; the
+      writer decides whether it can store it.
+
+    A later chunk whose column can't be cast to the chosen dtype fails
+    that column instead of being stored wrong.
+    """
+
+    def __init__(self) -> None:
+        self._targets: dict[str, "pl.DataType | None"] = {}
+        self._warned: set[str] = set()
+
+    def convert(
+        self, chunk, col: str,
+    ) -> tuple[np.ndarray | None, ExportColumnFailure | None]:
+        """Convert one column of ``chunk``, or return a failure record."""
+        series = chunk[col]
+        if col not in self._targets:
+            self._targets[col] = _numpy_target(col, series.dtype)
+        target = self._targets[col]
+        try:
+            if target is None:
+                return series.to_numpy(), None
+            dtype = series.dtype
+            if not (dtype.is_numeric() or dtype == pl.Boolean or dtype == pl.Null):
+                raise TypeError(
+                    f"column is {dtype} in this chunk but was written as "
+                    f"{target} from an earlier one"
+                )
+            if target == pl.Int64 and series.null_count():
+                raise ValueError(f"{col} has missing values")
+            if (
+                dtype.is_integer() and target == pl.Float64
+                and col not in self._warned
+                and _beyond_float64_exact(series)
+            ):
+                logger.warning(
+                    "Column %r has integers beyond +/-2**53; they are written "
+                    "as float64 and rounded. Export to Parquet to keep them "
+                    "exact.", col,
+                )
+                self._warned.add(col)
+            return series.cast(target, strict=True).to_numpy(), None
+        except Exception as e:
+            return None, ExportColumnFailure(
+                column=col, error_type=type(e).__name__, message=str(e),
+            )
+
+
+def _beyond_float64_exact(series: "pl.Series") -> bool:
+    """True if an integer series holds a value beyond +/-2**53, where
+    float64 stops representing every integer. Checked on the integers
+    themselves: after the cast, 2**53 + 1 has already become 2**53."""
+    lo, hi = series.min(), series.max()
+    return (hi is not None and hi > _FLOAT64_EXACT_INT) or (
+        lo is not None and lo < -_FLOAT64_EXACT_INT
+    )
+
+
+def _numpy_target(col: str, dtype) -> "pl.DataType | None":
+    """The polars dtype a column is cast to before NumPy conversion, or
+    None to convert it as is. See :class:`_NumpyColumns`."""
+    if col == "timestamp_ns" and dtype.is_integer():
+        return pl.Int64
+    if dtype == pl.Float32:
+        return pl.Float32
+    if dtype.is_integer() or dtype.is_float() or dtype == pl.Boolean:
+        return pl.Float64
+    return None
 
 
 def _stream_parquet(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
@@ -657,7 +747,10 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     """Stream chunks to HDF5 using resizable datasets (append mode).
 
     Each column becomes a resizable dataset; each chunk extends it.
-    Columns that fail to serialize are collected and reported.
+    Dataset dtypes come from the polars schema (see
+    :class:`_NumpyColumns`: integers and Booleans as float64 with NaN for
+    a missing value). Columns that fail to serialize are collected and
+    reported.
     """
     import h5py
 
@@ -665,6 +758,8 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     rows_written = 0
     failures: list[ExportColumnFailure] = []
     failed_cols: set[str] = set()
+
+    columns = _NumpyColumns()
 
     with h5py.File(filepath, "w") as f:
         group = f.create_group(name)
@@ -675,7 +770,7 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
             for col in chunk.columns:
                 if col in failed_cols:
                     continue
-                arr, failure = _safe_column_to_numpy(chunk, col)
+                arr, failure = columns.convert(chunk, col)
                 if failure is not None:
                     failures.append(failure)
                     failed_cols.add(col)
@@ -734,20 +829,22 @@ def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResul
     than ``NUMPY_HARD_CAP`` (1 M rows) before reaching here, raising
     :class:`LargeTopicError` with a pointer to Parquet (which streams).
     The cap exists because past ~1 M rows the materialized arrays
-    plus ``savez_compressed`` buffers easily exceed 1 GB.
+    plus ``savez_compressed`` buffers easily exceed 1 GB. Column dtypes
+    follow :class:`_NumpyColumns`, as for HDF5 and Zarr.
     """
     filepath = output_path / f"{name}.npz"
     rows_written = 0
     failures: list[ExportColumnFailure] = []
     failed_cols: set[str] = set()
     col_chunks: dict[str, list[np.ndarray]] = {}
+    columns = _NumpyColumns()
 
     for chunk in chunks:
         chunk_rows = chunk.height
         for col in chunk.columns:
             if col in failed_cols:
                 continue
-            arr, failure = _safe_column_to_numpy(chunk, col)
+            arr, failure = columns.convert(chunk, col)
             if failure is not None:
                 failures.append(failure)
                 failed_cols.add(col)
@@ -854,6 +951,7 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     Compatible with both zarr 2.x (DirectoryStore + create_dataset) and
     zarr 3.x (LocalStore + create_array). Detected at import time.
     Either way: peak memory bounded by chunk size, not topic size.
+    Array dtypes follow :class:`_NumpyColumns`, as for HDF5.
     """
     try:
         import zarr
@@ -880,13 +978,14 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         root = zarr.group(store, overwrite=True)
 
     arrays: dict = {}
+    columns = _NumpyColumns()
 
     for chunk in chunks:
         chunk_rows = chunk.height
         for col in chunk.columns:
             if col in failed_cols:
                 continue
-            arr, failure = _safe_column_to_numpy(chunk, col)
+            arr, failure = columns.convert(chunk, col)
             if failure is not None:
                 failures.append(failure)
                 failed_cols.add(col)

@@ -101,11 +101,38 @@ class SyncOutOfOrderError(ResurrectorError):
         )
 
 
+class SyncSchemaDriftError(ResurrectorError):
+    """Raised when a topic's column changes dtype partway through a
+    streaming sync.
+
+    The streaming engine fixes every output column's dtype from the
+    topic's first chunk (so each output chunk fits one writer). A later
+    chunk whose values that dtype can't hold (an all-null first chunk
+    followed by values, floats after ints in an integer column, ...)
+    would otherwise fail inside polars or be silently truncated.
+    """
+
+    def __init__(self, topic_name: str, column: str, expected: str, got: str):
+        self.topic_name = topic_name
+        self.column = column
+        self.expected = expected
+        self.got = got
+        super().__init__(
+            f"Topic {topic_name!r} column {column!r} changed dtype mid-stream: "
+            f"{expected} in its first chunk, {got} later. The streaming sync "
+            f"engine fixes each column's dtype from the topic's first chunk "
+            f"and can't hold these values. Pass engine='eager' if the topics "
+            f"fit in memory (it unifies dtypes across the whole topic), or "
+            f"leave {topic_name!r} out of the sync."
+        )
+
+
 class SyncBoundaryError(ResurrectorError):
     """Raised when interpolation can't bracket an anchor timestamp.
 
     Only raised when ``boundary='error'``. Default is ``boundary='null'``
-    which emits None/NaN at the boundaries instead.
+    which emits a missing value at the boundaries instead (NaN in
+    numeric columns).
     """
 
     def __init__(self, topic_name: str, anchor_ts: int, position: str):
