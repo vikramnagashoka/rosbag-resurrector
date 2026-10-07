@@ -15,6 +15,8 @@ Covers:
   (card + CLI QC both read it), checked against a real export
 - Format-aware Loading snippet (LeRobot datasets load via LeRobotDataset)
 - LeRobot datasets get the codebase-version tag LeRobotDataset needs
+- Card topics follow what export_version exported (per-bag filters win)
+- Card read/write is UTF-8 regardless of the locale encoding
 """
 
 from __future__ import annotations
@@ -478,3 +480,160 @@ class TestRealDatasetExport:
         card = build_dataset_card(out, "me/everything")
         assert "| Topics | all topics |" in card
         assert "| Source bags | 1 |" in card
+
+    def test_card_for_per_bag_topic_filter(self, tmp_path):
+        """Would catch: a version with topics=None and a per-bag filter
+        exporting only that bag's topics while the card said 'all topics'.
+        export_version gives a BagRef's own topics precedence."""
+        from resurrector.core.dataset import BagRef, DatasetManager
+
+        bag = generate_bag(tmp_path / "run1.mcap", BagConfig(duration_sec=1.0))
+        mgr = DatasetManager(tmp_path / "idx.db")
+        try:
+            mgr.create("imu-only")
+            mgr.create_version("imu-only", "1.0",
+                               [BagRef(path=str(bag), topics=["/imu/data"])],
+                               export_format="parquet")
+            out = mgr.export_version("imu-only", "1.0", str(tmp_path / "datasets"))
+        finally:
+            mgr.close()
+        assert sorted(f.name for f in out.glob("*.parquet")) == ["imu_data.parquet"]
+        card = build_dataset_card(out, "me/imu-only")
+        assert "all topics" not in card
+        assert "| Topics | 1 |" in card
+        assert "- `/imu/data`" in card
+
+
+def _card_for(config: dict) -> str:
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d)
+        (p / "dataset_config.json").write_text(json.dumps({"config": config, "metadata": {}}))
+        return build_dataset_card(p, "me/x")
+
+
+def _ref(path: str, topics: list[str] | None = None) -> dict:
+    return {"path": path, "topics": topics, "start_time": None, "end_time": None}
+
+
+class TestCardTopicsFollowExport:
+    """Would catch: the card describing the version-level ``topics`` while
+    export_version exports each bag's own filter first (``ref.topics or
+    config.topics or every topic in the bag``)."""
+
+    def test_bag_filter_overrides_version_topics(self):
+        card = _card_for({"export_format": "parquet", "topics": ["/joint_states"],
+                          "bag_refs": [_ref("/data/a.mcap", ["/imu/data"])]})
+        assert "| Topics | 1 |" in card
+        assert "- `/imu/data`" in card
+        assert "/joint_states" not in card
+
+    def test_bag_filters_are_unioned(self):
+        card = _card_for({"export_format": "parquet", "topics": None, "bag_refs": [
+            _ref("/data/a.mcap", ["/imu/data"]),
+            _ref("/data/b.mcap", ["/imu/data", "/joint_states"]),
+        ]})
+        assert "| Topics | 2 |" in card
+        assert "- `/imu/data`" in card and "- `/joint_states`" in card
+        assert "all topics" not in card
+
+    def test_mixed_filtered_and_unfiltered_bags(self):
+        card = _card_for({"export_format": "parquet", "topics": None, "bag_refs": [
+            _ref("/data/a.mcap", ["/imu/data"]),
+            _ref("/data/b.mcap"),
+        ]})
+        assert "| Topics | 1 listed + all topics from 1 of 2 bags |" in card
+        assert "- `/imu/data`" in card
+        assert "- plus every topic in 1 of 2 source bags (no topic filter)" in card
+
+    def test_empty_version_list_is_all_topics(self):
+        """export_version's ``or`` chain treats ``topics=[]`` like None."""
+        card = _card_for({"export_format": "parquet", "topics": [],
+                          "bag_refs": [_ref("/data/a.mcap")]})
+        assert "| Topics | all topics |" in card
+
+    def test_lerobot_ignores_bag_filters(self):
+        """export_lerobot applies the version's topics to every episode."""
+        card = _card_for({"export_format": "lerobot", "topics": None,
+                          "bag_refs": [_ref("/data/a.mcap", ["/imu/data"])]})
+        assert "| Topics | all topics |" in card
+        assert "/imu/data" not in card
+
+
+# Outside cp1252 (Windows' usual locale encoding) and ASCII.
+_NON_ASCII = "Pick the red cube → 拾取红色方块"
+
+_ASCII_LOCALE_PRELUDE = f"""
+import locale, sys
+TEXT = {_NON_ASCII!r}
+try:
+    TEXT.encode(locale.getpreferredencoding(False))
+except UnicodeEncodeError:
+    pass
+else:
+    sys.exit(3)  # this locale can encode TEXT, so the run proves nothing
+"""
+
+
+def _run_in_ascii_locale(body: str, *args: str) -> None:
+    """Run ``body`` in a Python whose locale encoding can't encode
+    ``_NON_ASCII`` (C locale, UTF-8 mode off), like a Windows cp1252 box."""
+    import os
+    import subprocess
+
+    import resurrector
+
+    root = str(Path(resurrector.__file__).resolve().parent.parent)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("LC_", "LANG", "PYTHONUTF8", "PYTHONIOENCODING"))}
+    env.update(LC_ALL="C", LANG="C", PYTHONUTF8="0",
+               PYTHONPATH=os.pathsep.join(filter(None, [root, env.get("PYTHONPATH")])))
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8=0", "-c", _ASCII_LOCALE_PRELUDE + body, *args],
+        env=env, capture_output=True, text=True, errors="replace", timeout=120,
+    )
+    if proc.returncode == 3:
+        pytest.skip("the C locale here can encode the test text; nothing to prove")
+    assert proc.returncode == 0, proc.stderr
+
+
+class TestCardEncoding:
+    """Would catch: README.md written (and dataset_config.json read) in the
+    locale encoding. User-written descriptions reach the card, so a
+    non-cp1252 character crashed publishing on Windows."""
+
+    def test_card_with_non_ascii_description_writes_utf8(self, tmp_path):
+        _run_in_ascii_locale(
+            "from resurrector.core.publish import publish_dataset\n"
+            "publish_dataset(sys.argv[1], 'me/x', dry_run=True, extra_description=TEXT)\n",
+            str(tmp_path),
+        )
+        assert _NON_ASCII in (tmp_path / "README.md").read_text(encoding="utf-8")
+
+    def test_utf8_dataset_config_description_reaches_card(self, tmp_path):
+        """A hand-written dataset_config.json is UTF-8 (JSON's encoding),
+        not escaped ASCII like DatasetManager writes."""
+        (tmp_path / "dataset_config.json").write_text(json.dumps({
+            "config": {"export_format": "parquet", "topics": ["/imu/data"],
+                       "bag_refs": [_ref("/data/a.mcap")]},
+            "metadata": {"description": _NON_ASCII},
+        }, ensure_ascii=False), encoding="utf-8")
+        _run_in_ascii_locale(
+            "from resurrector.core.publish import publish_dataset\n"
+            "publish_dataset(sys.argv[1], 'me/x', dry_run=True)\n",
+            str(tmp_path),
+        )
+        card = (tmp_path / "README.md").read_text(encoding="utf-8")
+        assert _NON_ASCII in card
+        assert "| Format | `parquet` |" in card
+
+    def test_dataset_readme_with_non_ascii_description(self, tmp_path):
+        """Guard for the dataset README writer, which already forces UTF-8."""
+        _run_in_ascii_locale(
+            "from pathlib import Path\n"
+            "from resurrector.core.dataset_readme import generate_dataset_readme\n"
+            "generate_dataset_readme(Path(sys.argv[1]), 'x', '1.0',\n"
+            "    {'export_format': 'parquet', 'bag_refs': []},\n"
+            "    {'description': TEXT}, {})\n",
+            str(tmp_path),
+        )
+        assert _NON_ASCII in (tmp_path / "README.md").read_text(encoding="utf-8")

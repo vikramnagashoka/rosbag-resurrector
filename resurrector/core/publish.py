@@ -57,7 +57,9 @@ class PublishResult:
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text())
+        # JSON is UTF-8; the locale default (cp1252 on Windows) would drop
+        # a hand-written config whose description isn't ASCII.
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -105,6 +107,33 @@ def _tag_codebase_version(api: Any, repo_id: str, tag: str) -> None:
 _LEROBOT_INDEX_FEATURES = frozenset(
     {"timestamp", "frame_index", "episode_index", "index", "task_index"}
 )
+
+
+def _exported_topics(config: dict[str, Any], export_format: str) -> tuple[list[str], int, int]:
+    """Topics the export actually wrote, as ``DatasetManager.export_version`` picks them.
+
+    A bag's own ``topics`` wins over the version's, and an empty or missing
+    filter means every topic in the bag. LeRobot ignores per-bag filters
+    and applies the version's list to every episode.
+
+    Returns:
+        ``(named, n_unfiltered, n_bags)``: the union of the filters in
+        effect (first-seen order), how many bags were exported with every
+        topic, and how many bags there are. Without bag refs the version's
+        list stands alone as one selection.
+    """
+    default = list(config.get("topics") or [])
+    refs = config.get("bag_refs") or []
+    if export_format == "lerobot" or not refs:
+        selections = [default]
+    else:
+        selections = [
+            list((ref.get("topics") if isinstance(ref, dict) else None) or default)
+            for ref in refs
+        ]
+    named = list(dict.fromkeys(t for sel in selections for t in sel))
+    n_unfiltered = sum(1 for sel in selections if not sel)
+    return named, n_unfiltered, len(selections)
 
 
 def _shape_str(shape: Any) -> str:
@@ -158,8 +187,9 @@ def build_dataset_card(
     dataset gets episode/frame/fps rows and a feature table from
     ``meta/info.json`` (a bare ``resurrector export --preset lerobot`` dir
     has nothing else to go on) and a ``LeRobotDataset`` loading snippet;
-    everything else gets ``datasets.load_dataset``. A version whose
-    ``topics`` is None is shown as "all topics".
+    everything else gets ``datasets.load_dataset``. Topics are the ones
+    the export used: a bag's own filter wins over the version's, and a bag
+    with neither was exported, and is shown, with "all topics".
 
     Args:
         dataset_dir: Path to the materialized dataset.
@@ -183,12 +213,15 @@ def build_dataset_card(
         extra_description = metadata.get("description") or config.get("description")
 
     data_files = _data_files(dataset_dir, manifest)
-    topics = config.get("topics") or []
     # `resurrector export --preset lerobot` writes no dataset_config.json;
     # the LeRobot layout identifies itself.
     export_format = config.get("export_format") or (
         "lerobot" if _lerobot_codebase_version(dataset_dir) else "unknown"
     )
+    if config:
+        topics, n_unfiltered, n_selections = _exported_topics(config, export_format)
+    else:
+        topics, n_unfiltered, n_selections = [], 0, 0
     # meta/info.json is what LeRobot wrote: episode/frame totals and features.
     info = _load_json(dataset_dir / "meta" / "info.json") if export_format == "lerobot" else {}
     bag_refs = config.get("bag_refs") or []
@@ -226,9 +259,16 @@ def build_dataset_card(
     # unknown; info.json's totals below say what's in it instead of "0".
     if config or not info:
         overview.append(("Source bags", str(len(bag_refs))))
-        # DatasetManager stores topics=None for "every topic in each bag".
-        all_topics = bool(config) and config.get("topics") is None
-        overview.append(("Topics", "all topics" if all_topics else str(len(topics))))
+        if n_unfiltered == 0:
+            topics_cell = str(len(topics))
+        elif n_unfiltered == n_selections:
+            topics_cell = "all topics"
+        else:
+            topics_cell = (
+                f"{len(topics)} listed + all topics from "
+                f"{n_unfiltered} of {n_selections} bags"
+            )
+        overview.append(("Topics", topics_cell))
     if info.get("total_episodes") is not None:
         overview.append(("Episodes", str(info["total_episodes"])))
     if info.get("total_frames") is not None:
@@ -282,6 +322,11 @@ def build_dataset_card(
             body.append(f"- `{t}`")
         if len(topics) > 50:
             body.append(f"- … and {len(topics) - 50} more")
+        if n_unfiltered:
+            body.append(
+                f"- plus every topic in {n_unfiltered} of {n_selections} "
+                "source bags (no topic filter)"
+            )
         body.append("")
 
     features = info.get("features")
@@ -373,7 +418,9 @@ def publish_dataset(
         extra_description=extra_description,
     )
     card_path = dataset_dir / "README.md"
-    card_path.write_text(card)
+    # The card carries user-written descriptions; the locale default
+    # (cp1252 on Windows) can't encode most non-Latin text.
+    card_path.write_text(card, encoding="utf-8")
 
     n_files = sum(1 for f in dataset_dir.rglob("*") if f.is_file())
     url = f"https://huggingface.co/datasets/{repo_id}"
