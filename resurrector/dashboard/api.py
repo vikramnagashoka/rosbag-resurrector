@@ -1688,6 +1688,11 @@ async def delete_dataset_version_api(
 
 
 _BRIDGE_DEFAULT_PORT = 9090
+# How long Stop waits after SIGTERM before escalating to SIGKILL.
+_BRIDGE_STOP_GRACE_S = 5.0
+# Upper bound on one proxied request. Bridge REST calls answer in
+# milliseconds, so running into this means the bridge is hung.
+_BRIDGE_PROXY_TIMEOUT_S = 30.0
 
 
 def _get_bridge_state():
@@ -1695,6 +1700,84 @@ def _get_bridge_state():
     if not hasattr(app.state, "bridge"):
         app.state.bridge = {"process": None, "port": None, "mode": None}
     return app.state.bridge
+
+
+def _bridge_log_path(port: int) -> Path:
+    """File that receives a dashboard-launched bridge's stderr.
+
+    ``~/.resurrector/logs/bridge-<port>.log`` unless
+    ``RESURRECTOR_BRIDGE_LOG_DIR`` points elsewhere. One file per port,
+    truncated on every start, so it holds a single session's startup
+    errors, tracebacks and warnings.
+    """
+    log_dir = os.environ.get(
+        "RESURRECTOR_BRIDGE_LOG_DIR", str(Path.home() / ".resurrector" / "logs"),
+    )
+    return Path(log_dir) / f"bridge-{port}.log"
+
+
+def _open_bridge_log(port: int) -> tuple[Path, Any]:
+    """Open the bridge stderr log for writing; return ``(path, file)``.
+
+    Falls back to a fresh file in the system temp dir when the configured
+    log dir can't be created or written (read-only home, bad
+    ``RESURRECTOR_BRIDGE_LOG_DIR``), so a log location problem never
+    stops the bridge from starting. ``mkstemp`` gives a unique name
+    created with O_EXCL, which is safe in a shared /tmp.
+    """
+    import tempfile
+    path = _bridge_log_path(port)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path, open(path, "wb")
+    except OSError as e:
+        fd, fallback = tempfile.mkstemp(
+            prefix=f"resurrector-bridge-{port}-", suffix=".log",
+        )
+        logger.warning(
+            "Cannot write bridge log %s (%s); logging to %s instead",
+            path, e, fallback,
+        )
+        return Path(fallback), os.fdopen(fd, "wb")
+
+
+def _last_error_line(path: Path, max_bytes: int = 8192) -> str:
+    """Last line of ``path`` that isn't uvicorn INFO/DEBUG chatter.
+
+    For a crash that's the exception line of the traceback; for a port
+    bind failure it's uvicorn's ERROR line, which is followed by INFO
+    shutdown lines. Rich box borders are stripped. Returns "" if the
+    file is missing or nothing qualifies.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - max_bytes))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(tail.splitlines()):
+        line = line.strip(" \t│╭╮╰╯─")
+        if line and not line.startswith(("INFO:", "DEBUG:")):
+            return line[:500]
+    return ""
+
+
+async def _stop_bridge_process(proc: Any, grace_s: float) -> None:
+    """SIGTERM ``proc``; SIGKILL it if it is still alive after ``grace_s``.
+
+    Both waits run in a worker thread. ``proc.wait()`` called directly
+    inside an ``async def`` stalls every other dashboard request for the
+    whole grace period. Raises ``subprocess.TimeoutExpired`` if even
+    SIGKILL doesn't reap it within ``grace_s``.
+    """
+    import subprocess
+    proc.terminate()
+    try:
+        await asyncio.to_thread(proc.wait, grace_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        await asyncio.to_thread(proc.wait, grace_s)
 
 
 @app.post("/api/bridge/start")
@@ -1777,12 +1860,24 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
     cmd.extend(["--port", str(port)])
     cmd.append("--no-browser")  # don't open a viewer; the dashboard IS the viewer
 
+    # Plain traceback instead of typer's Rich box, so the log's last line
+    # is the exception itself.
+    env = {**os.environ, "_TYPER_STANDARD_TRACEBACK": "1"}
+    # Nothing in the dashboard reads the bridge's output, so it must never
+    # go to a PIPE: uvicorn writes an access-log line per request to
+    # stdout, and once ~64 KB sat undrained the bridge's next write()
+    # blocked its event loop for good. stdout (access log + banner) is
+    # discarded; stderr (startup errors, tracebacks, warnings) goes to a
+    # file, which can't back up.
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        log_path, log_file = _open_bridge_log(port)
+        with log_file:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
+                env=env,
+            )
     except OSError as e:
         raise HTTPException(500, f"Failed to start bridge: {e}")
 
@@ -1791,10 +1886,13 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
     deadline = time.time() + 10
     ready = False
     while time.time() < deadline:
-        if proc.poll() is not None:
-            stderr = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace")
+        rc = proc.poll()
+        if rc is not None:
+            cause = _last_error_line(log_path) or "no error output"
             raise HTTPException(
-                500, f"Bridge exited during startup: {stderr[:500]}",
+                500,
+                f"Bridge exited during startup (exit code {rc}): {cause}. "
+                f"Full log: {log_path}",
             )
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
@@ -1805,7 +1903,11 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
 
     if not ready:
         proc.terminate()
-        raise HTTPException(504, f"Bridge did not start listening on port {port} within 10s")
+        raise HTTPException(
+            504,
+            f"Bridge did not start listening on port {port} within 10s. "
+            f"Log: {log_path}",
+        )
 
     state["process"] = proc
     state["port"] = port
@@ -1825,15 +1927,13 @@ async def stop_bridge_api() -> dict[str, Any]:
     if proc is None or proc.poll() is not None:
         state["process"] = None
         return {"stopped": False, "reason": "no running bridge"}
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        proc.kill()
-        proc.wait(timeout=5)
-    state["process"] = None
-    state["port"] = None
-    state["mode"] = None
+    await _stop_bridge_process(proc, _BRIDGE_STOP_GRACE_S)
+    # Other requests run while we wait, so a Start may already have
+    # registered a new bridge; only clear the state if it is still ours.
+    if state["process"] is proc:
+        state["process"] = None
+        state["port"] = None
+        state["mode"] = None
     return {"stopped": True}
 
 
@@ -1886,13 +1986,22 @@ async def bridge_proxy(rest_path: str, request: Request) -> Any:
     body = await request.body()
     params = dict(request.query_params)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=_BRIDGE_PROXY_TIMEOUT_S) as client:
         try:
             resp = await client.request(
                 method, url, content=body, params=params,
                 headers={"Accept": "application/json"},
             )
-        except httpx.ConnectError as e:
+        except httpx.TimeoutException:
+            raise HTTPException(
+                504,
+                f"Bridge on port {port} did not respond within "
+                f"{_BRIDGE_PROXY_TIMEOUT_S:g}s. It may be hung: stop and "
+                f"restart it from the Bridge page.",
+            )
+        except httpx.TransportError as e:
+            # Refused, reset, or closed without a response (bridge died
+            # mid-request).
             raise HTTPException(502, f"Cannot reach bridge at {url}: {e}")
 
     # Log non-2xx so we can diagnose proxied failures without having to
@@ -1918,16 +2027,15 @@ async def _cleanup_bridge_on_shutdown() -> None:
     Without this, Ctrl+C on the dashboard leaves the bridge orphaned
     on port 9090 and a subsequent dashboard restart can't reclaim it.
     """
+    import subprocess
     state = _get_bridge_state()
     proc = state["process"]
     if proc is None or proc.poll() is not None:
         return
-    proc.terminate()
     try:
-        proc.wait(timeout=3)
-    except Exception:
-        proc.kill()
-        proc.wait(timeout=3)
+        await _stop_bridge_process(proc, grace_s=3.0)
+    except subprocess.TimeoutExpired:
+        logger.warning("Bridge pid %s did not exit after SIGKILL", proc.pid)
 
 
 # ============================================================================

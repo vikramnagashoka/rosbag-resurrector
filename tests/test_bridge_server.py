@@ -98,3 +98,49 @@ class TestBridgeREST:
         async with client as c:
             resp = await c.get("/")
             assert resp.status_code == 200
+
+
+def _ws_scope() -> dict:
+    return {
+        "type": "websocket",
+        "asgi": {"version": "3.0"},
+        "scheme": "ws",
+        "path": "/ws",
+        "raw_path": b"/ws",
+        "root_path": "",
+        "query_string": b"",
+        "headers": [],
+        "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+        "subprotocols": [],
+    }
+
+
+class TestWebSocketHandlerLifecycle:
+    async def test_handler_returns_after_client_disconnects(self, test_bag):
+        # Regression: the handler ran asyncio.gather(send_loop, receive_loop,
+        # event_loop). Only receive_loop notices a disconnect; the other two
+        # loop forever, so the handler never returned, its cleanup never ran,
+        # and uvicorn's graceful shutdown waited on it indefinitely.
+        # Driven at the raw ASGI level so the test owns both ends and can
+        # bound the wait instead of hanging.
+        from resurrector.bridge.server import BridgeServer
+
+        bridge = BridgeServer(mode="playback", bag_path=test_bag, speed=10.0)
+        app = bridge.create_app()
+        to_app: asyncio.Queue = asyncio.Queue()
+        from_app: asyncio.Queue = asyncio.Queue()
+        await to_app.put({"type": "websocket.connect"})
+        handler = asyncio.create_task(app(_ws_scope(), to_app.get, from_app.put))
+        try:
+            accept = await asyncio.wait_for(from_app.get(), timeout=30)
+            assert accept["type"] == "websocket.accept"
+            assert len(bridge._event_subscribers) == 1
+
+            await to_app.put({"type": "websocket.disconnect", "code": 1001})
+            await asyncio.wait_for(handler, timeout=30)
+        finally:
+            if not handler.done():
+                handler.cancel()
+
+        assert bridge._event_subscribers == []
