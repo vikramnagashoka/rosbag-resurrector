@@ -531,12 +531,14 @@ def export(
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
-    Unsynced exports to Parquet, HDF5, CSV, Zarr, and RLDS are
-    memory-bounded by chunk size, not topic size — open a 100 GB bag without
-    OOMing. With --sync (and the rlds / training-tabular / multimodal
-    presets) the synced table is built in memory first. NumPy `.npz` materializes the full topic and refuses topics over
-    1 M messages. LeRobot streams its input but holds one episode's frame
-    grid (duration x fps x numeric fields) in memory, because LeRobot's own
+    Exports to Parquet, HDF5, CSV, Zarr, and RLDS are memory-bounded by
+    chunk size, not topic size — open a 100 GB bag without OOMing. With
+    --sync (and the rlds / training-tabular / multimodal presets) the
+    synced table is written a chunk at a time too; topics under 1 M
+    messages are loaded by the eager sync engine first. NumPy `.npz`
+    materializes the full topic and refuses topics over 1 M messages.
+    LeRobot streams its input but holds one episode's frame grid
+    (duration x fps x numeric fields) in memory, because LeRobot's own
     writer buffers an episode before saving it; camera frames go to disk.
 
     **Presets** (--preset NAME) bundle format/sync/downsample for common

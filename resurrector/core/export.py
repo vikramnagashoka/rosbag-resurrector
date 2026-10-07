@@ -2,16 +2,23 @@
 
 Supports: Parquet, HDF5, CSV, NumPy, Zarr, LeRobot, RLDS.
 
-Per the v0.4.0 performance contract, unsynced exports to the
-streaming-friendly formats (Parquet, HDF5, CSV, Zarr, RLDS) write
-chunk-by-chunk so peak memory is bounded by ``CHUNK_SIZE``. With
-``sync=True`` the synced table is built in memory first. LeRobot goes through LeRobot's own writer
+Per the v0.4.0 performance contract, exports to the streaming-friendly
+formats (Parquet, HDF5, CSV, Zarr, RLDS) write chunk-by-chunk so peak
+memory is bounded by ``CHUNK_SIZE``. With ``sync=True`` the synced
+table streams too (:func:`resurrector.core.sync.iter_synchronize`); its
+downsample grid carries across chunks, so the rows written match
+downsampling the whole table. LeRobot goes through LeRobot's own writer
 (:mod:`resurrector.core.lerobot_export`): input is streamed, but one
 episode's frame grid is held in memory until LeRobot saves the episode. NumPy ``.npz`` is the
 exception: the format can't be incrementally appended, so writing
 requires materializing every column. We hard-cap NumPy export at
 ``NUMPY_HARD_CAP`` rows and raise :class:`LargeTopicError` past that
 — users on bigger topics should use Parquet (which streams).
+
+HDF5, Zarr and NumPy have no missing value for integers or Booleans,
+and their arrays can't change dtype after the first chunk, so those
+columns are written as float64 with NaN for a missing value (see
+:class:`_NumpyColumns`); ``timestamp_ns`` stays int64.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
+import polars as pl
 
 from resurrector.core.exceptions import LargeTopicError
 
@@ -393,9 +401,10 @@ class Exporter:
     streaming via :meth:`export_frames` / :meth:`export_video`, or
     custom orchestration where ``BagFrame.export`` doesn't quite fit.
 
-    Unsynced chunk-streaming export paths keep peak memory near one chunk
-    (``CHUNK_SIZE`` rows), regardless of total topic size; ``sync=True``
-    builds the synced table in memory first. Exceptions:
+    Chunk-streaming export paths keep peak memory near one chunk
+    (``CHUNK_SIZE`` rows), regardless of total topic size, synced or not
+    (below ``LARGE_TOPIC_THRESHOLD`` the eager sync engine loads the
+    topics it aligns). Exceptions:
     ``numpy`` materializes per-topic and refuses topics over
     ``NUMPY_HARD_CAP`` (1 M rows); ``lerobot`` streams its input but holds
     one episode's frame grid in memory (LeRobot's writer buffers episodes).
@@ -438,15 +447,23 @@ class Exporter:
                 ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
                 ``[all-exports]``, which installs tensorflow where it
                 ships wheels; see :data:`TENSORFLOW_PLATFORMS`).
+                ``hdf5``, ``zarr`` and ``numpy``
+                write integer and Boolean columns as float64, NaN for a
+                missing value (``timestamp_ns`` stays int64); Parquet
+                keeps every dtype and nulls as they are.
             output_dir: Directory to write into. Created if missing.
-            sync: When True (and 2+ topics), time-align via
-                :meth:`BagFrame.sync` before exporting; the result is
-                written as a single ``synced.<ext>`` file.
+            sync: When True (and 2+ topics), time-align with
+                :func:`~resurrector.core.sync.iter_synchronize` (same rows
+                as :meth:`BagFrame.sync`) and stream the result, chunk by
+                chunk, into a single ``synced.<ext>`` file.
             sync_method: ``nearest`` / ``interpolate`` / ``sample_and_hold``.
                 Only used when ``sync`` is True.
-            downsample_hz: Per-chunk resampling rate before writing. ``None``
-                preserves the native rate. For ``lerobot`` this is the
-                integer fps of the uniform frame grid (default 30).
+            downsample_hz: Resampling rate before writing. ``None``
+                preserves the native rate. Synced output is downsampled as
+                one stream (the same rows as downsampling the whole table);
+                unsynced topics are downsampled per chunk, so their grid
+                restarts every ``CHUNK_SIZE`` rows. For ``lerobot`` this is
+                the integer fps of the uniform frame grid (default 30).
             task: ``lerobot`` only: task label attached to every frame.
             action_topics: ``lerobot`` only: topics whose numeric fields
                 form the ``action`` vector instead of ``observation.state``.
@@ -460,6 +477,14 @@ class Exporter:
             ImportError: The format's optional dependency is missing.
                 Raised before ``output_dir`` is created.
             ValueError: For unknown format strings.
+            KeyError: ``sync=True`` and a topic isn't in the bag.
+            SyncOutOfOrderError, SyncBufferExceededError,
+                SyncSchemaDriftError: ``sync=True`` on the streaming
+                engine (topics over ``LARGE_TOPIC_THRESHOLD``). Raised
+                mid-stream, so ``synced.<ext>`` may already be partly
+                written.
+            ExportError: Some columns couldn't be written (e.g. strings
+                in Zarr); the other columns are complete.
         """
         require_export_dependencies(format)
         output_path = Path(output_dir)
@@ -480,12 +505,16 @@ class Exporter:
         output_path.mkdir(parents=True, exist_ok=True)
 
         if sync and len(topics) > 1:
-            import polars as pl
-            df = bag_frame.sync(topics, method=sync_method)
+            from resurrector.core.sync import iter_synchronize
+            from resurrector.core.transforms import iter_downsample_temporal
+
+            views = {name: bag_frame[name] for name in topics}
+            chunks = iter_synchronize(views, method=sync_method, chunk_size=CHUNK_SIZE)
             if downsample_hz:
-                from resurrector.core.transforms import downsample_temporal
-                df = downsample_temporal(df, downsample_hz)
-            self._stream_dataframe_chunks(iter([df]), format, output_path, "synced")
+                chunks = iter_downsample_temporal(chunks, downsample_hz)
+            self._stream_dataframe_chunks(
+                _at_least_one_chunk(chunks), format, output_path, "synced",
+            )
             return output_path
 
         for topic in topics:
@@ -510,10 +539,7 @@ class Exporter:
             chunks = _transform_chunks(
                 view.iter_chunks(CHUNK_SIZE), downsample_hz
             )
-            self._stream_dataframe_chunks(
-                chunks, format, output_path, safe_name,
-                expected_total_rows=view.message_count,
-            )
+            self._stream_dataframe_chunks(chunks, format, output_path, safe_name)
 
         return output_path
 
@@ -523,15 +549,8 @@ class Exporter:
         format: str,
         output_path: Path,
         name: str,
-        expected_total_rows: int | None = None,
     ) -> ExportResult:
-        """Dispatch streaming chunks to the right format writer.
-
-        ``expected_total_rows`` is forwarded to writers that need it
-        (currently only ``_stream_rlds``, which uses it to derive
-        ``is_last`` per step without materializing the chunks). Writers
-        that don't need it ignore the parameter.
-        """
+        """Dispatch streaming chunks to the right format writer."""
         if format == "parquet":
             return _stream_parquet(chunks, output_path, name)
         elif format == "csv":
@@ -548,10 +567,7 @@ class Exporter:
                 "use Exporter.export(format='lerobot') or export_lerobot()"
             )
         elif format == "rlds":
-            return _stream_rlds(
-                chunks, output_path, name,
-                total_rows=expected_total_rows,
-            )
+            return _stream_rlds(chunks, output_path, name)
         else:
             raise ValueError(
                 f"Unknown export format: {format}. "
@@ -690,6 +706,33 @@ def _transform_chunks(chunks: Iterable, downsample_hz: float | None) -> Iterator
         yield downsample_temporal(chunk, downsample_hz)
 
 
+def _at_least_one_chunk(chunks: Iterable) -> Iterator:
+    """Pass chunks through; if there were none, yield one empty frame so
+    the writer still creates its (empty) output file."""
+    empty = True
+    for chunk in chunks:
+        empty = False
+        yield chunk
+    if empty:
+        yield pl.DataFrame()
+
+
+def _with_final_flag(chunks: Iterable) -> Iterator[tuple]:
+    """Yield ``(chunk, is_final)`` for each non-empty chunk.
+
+    Reads one chunk ahead, so at most two chunks are alive at once.
+    """
+    pending = None
+    for chunk in chunks:
+        if chunk.height == 0:
+            continue
+        if pending is not None:
+            yield pending, False
+        pending = chunk
+    if pending is not None:
+        yield pending, True
+
+
 # ---------------------------------------------------------------------------
 # Streaming writers — one per format. Each consumes an iterable of
 # pl.DataFrame chunks, writes them, and returns an ExportResult with any
@@ -697,14 +740,93 @@ def _transform_chunks(chunks: Iterable, downsample_hz: float | None) -> Iterator
 # ---------------------------------------------------------------------------
 
 
-def _safe_column_to_numpy(df, col: str) -> tuple[np.ndarray | None, ExportColumnFailure | None]:
-    """Convert one column to numpy, returning the array or a failure record."""
-    try:
-        return df[col].to_numpy(), None
-    except Exception as e:
-        return None, ExportColumnFailure(
-            column=col, error_type=type(e).__name__, message=str(e),
-        )
+# float64 represents every integer up to this magnitude exactly.
+_FLOAT64_EXACT_INT = 2**53
+
+
+class _NumpyColumns:
+    """Column -> NumPy conversion for the HDF5, Zarr and ``.npz`` writers.
+
+    HDF5 and Zarr append each chunk to an array whose dtype is fixed by
+    the first chunk written (``.npz`` follows the same rule so the three
+    agree), so a column's NumPy dtype is chosen once, from its polars
+    dtype, assuming any chunk may hold nulls. (A chunk's own conversion
+    won't do: Int64 converts to int64 or float64, Boolean to bool or
+    object, depending on whether that chunk has a null.)
+
+    - Float32 / Float64 keep their width; null -> NaN.
+    - Integer and Boolean columns -> float64 (Booleans as 1.0 / 0.0);
+      null -> NaN. Integers beyond +/-2**53 are rounded, with a warning.
+    - ``timestamp_ns`` stays int64: every row has one, and float64 would
+      round nanosecond timestamps.
+    - Anything else (strings, lists, ...) converts as polars does; the
+      writer decides whether it can store it.
+
+    A later chunk whose column can't be cast to the chosen dtype fails
+    that column instead of being stored wrong.
+    """
+
+    def __init__(self) -> None:
+        self._targets: dict[str, "pl.DataType | None"] = {}
+        self._warned: set[str] = set()
+
+    def convert(
+        self, chunk, col: str,
+    ) -> tuple[np.ndarray | None, ExportColumnFailure | None]:
+        """Convert one column of ``chunk``, or return a failure record."""
+        series = chunk[col]
+        if col not in self._targets:
+            self._targets[col] = _numpy_target(col, series.dtype)
+        target = self._targets[col]
+        try:
+            if target is None:
+                return series.to_numpy(), None
+            dtype = series.dtype
+            if not (dtype.is_numeric() or dtype == pl.Boolean or dtype == pl.Null):
+                raise TypeError(
+                    f"column is {dtype} in this chunk but was written as "
+                    f"{target} from an earlier one"
+                )
+            if target == pl.Int64 and series.null_count():
+                raise ValueError(f"{col} has missing values")
+            if (
+                dtype.is_integer() and target == pl.Float64
+                and col not in self._warned
+                and _beyond_float64_exact(series)
+            ):
+                logger.warning(
+                    "Column %r has integers beyond +/-2**53; they are written "
+                    "as float64 and rounded. Export to Parquet to keep them "
+                    "exact.", col,
+                )
+                self._warned.add(col)
+            return series.cast(target, strict=True).to_numpy(), None
+        except Exception as e:
+            return None, ExportColumnFailure(
+                column=col, error_type=type(e).__name__, message=str(e),
+            )
+
+
+def _beyond_float64_exact(series: "pl.Series") -> bool:
+    """True if an integer series holds a value beyond +/-2**53, where
+    float64 stops representing every integer. Checked on the integers
+    themselves: after the cast, 2**53 + 1 has already become 2**53."""
+    lo, hi = series.min(), series.max()
+    return (hi is not None and hi > _FLOAT64_EXACT_INT) or (
+        lo is not None and lo < -_FLOAT64_EXACT_INT
+    )
+
+
+def _numpy_target(col: str, dtype) -> "pl.DataType | None":
+    """The polars dtype a column is cast to before NumPy conversion, or
+    None to convert it as is. See :class:`_NumpyColumns`."""
+    if col == "timestamp_ns" and dtype.is_integer():
+        return pl.Int64
+    if dtype == pl.Float32:
+        return pl.Float32
+    if dtype.is_integer() or dtype.is_float() or dtype == pl.Boolean:
+        return pl.Float64
+    return None
 
 
 def _stream_parquet(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
@@ -746,7 +868,10 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     """Stream chunks to HDF5 using resizable datasets (append mode).
 
     Each column becomes a resizable dataset; each chunk extends it.
-    Columns that fail to serialize are collected and reported.
+    Dataset dtypes come from the polars schema (see
+    :class:`_NumpyColumns`: integers and Booleans as float64 with NaN for
+    a missing value). Columns that fail to serialize are collected and
+    reported.
     """
     import h5py
 
@@ -754,6 +879,8 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     rows_written = 0
     failures: list[ExportColumnFailure] = []
     failed_cols: set[str] = set()
+
+    columns = _NumpyColumns()
 
     with h5py.File(filepath, "w") as f:
         group = f.create_group(name)
@@ -764,7 +891,7 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
             for col in chunk.columns:
                 if col in failed_cols:
                     continue
-                arr, failure = _safe_column_to_numpy(chunk, col)
+                arr, failure = columns.convert(chunk, col)
                 if failure is not None:
                     failures.append(failure)
                     failed_cols.add(col)
@@ -823,20 +950,22 @@ def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResul
     than ``NUMPY_HARD_CAP`` (1 M rows) before reaching here, raising
     :class:`LargeTopicError` with a pointer to Parquet (which streams).
     The cap exists because past ~1 M rows the materialized arrays
-    plus ``savez_compressed`` buffers easily exceed 1 GB.
+    plus ``savez_compressed`` buffers easily exceed 1 GB. Column dtypes
+    follow :class:`_NumpyColumns`, as for HDF5 and Zarr.
     """
     filepath = output_path / f"{name}.npz"
     rows_written = 0
     failures: list[ExportColumnFailure] = []
     failed_cols: set[str] = set()
     col_chunks: dict[str, list[np.ndarray]] = {}
+    columns = _NumpyColumns()
 
     for chunk in chunks:
         chunk_rows = chunk.height
         for col in chunk.columns:
             if col in failed_cols:
                 continue
-            arr, failure = _safe_column_to_numpy(chunk, col)
+            arr, failure = columns.convert(chunk, col)
             if failure is not None:
                 failures.append(failure)
                 failed_cols.add(col)
@@ -862,7 +991,6 @@ def _stream_rlds(
     chunks: Iterable,
     output_path: Path,
     name: str,
-    total_rows: int | None = None,
 ) -> ExportResult:
     """Export to RLDS (TFRecord) format — streaming.
 
@@ -879,15 +1007,10 @@ def _stream_rlds(
 
     Output: <output_path>/<name>.tfrecord
 
-    Memory: bounded by chunk size. The v0.3.x version did
-    ``list(chunks)`` upfront so it could derive ``is_last`` per row;
-    v0.4.0 takes ``total_rows`` from the caller (the index already
-    knows ``view.message_count``) and uses a running counter, which
-    eliminates the materialization.
-
-    If ``total_rows`` is None we fall back to a one-time materialization
-    so the writer remains correct for callers who don't have a count
-    handy. Inside ``Exporter.export`` we always pass it.
+    Memory: two chunks. ``is_last`` comes from reading one chunk ahead
+    (the last row of the last non-empty chunk), so it lands on the row
+    actually written last even when downsampling or a time slice makes
+    that differ from the topic's message count.
     """
     try:
         import tensorflow as tf
@@ -914,25 +1037,15 @@ def _stream_rlds(
         # Fallback: stringify
         return tf.train.Feature(bytes_list=tf.train.BytesList(value=[str(value).encode("utf-8")]))
 
-    # Streaming-friendly path: caller supplied total_rows from the
-    # index. Otherwise fall back to materializing once (the v0.3.x
-    # behavior) so this writer is still safe to call from outside the
-    # Exporter.
-    if total_rows is None:
-        chunk_iter = list(chunks)
-        total_rows = sum(c.height for c in chunk_iter)
-    else:
-        chunk_iter = chunks
-
     with tf.io.TFRecordWriter(str(filepath)) as writer:
-        for chunk in chunk_iter:
+        for chunk, is_final_chunk in _with_final_flag(chunks):
             if not columns:
                 columns = list(chunk.columns)
             chunk_dicts = chunk.to_dicts()
+            last_row_idx = len(chunk_dicts) - 1
             for row_idx, row in enumerate(chunk_dicts):
-                global_idx = rows_written + row_idx
-                is_first = global_idx == 0
-                is_last = global_idx == total_rows - 1
+                is_first = rows_written + row_idx == 0
+                is_last = is_final_chunk and row_idx == last_row_idx
 
                 feature_map: dict[str, tf.train.Feature] = {}
                 for col, val in row.items():
@@ -961,6 +1074,7 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     Compatible with both zarr 2.x (DirectoryStore + create_dataset) and
     zarr 3.x (LocalStore + create_array). Detected at import time.
     Either way: peak memory bounded by chunk size, not topic size.
+    Array dtypes follow :class:`_NumpyColumns`, as for HDF5.
     """
     try:
         import zarr
@@ -986,13 +1100,14 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         root = zarr.group(store, overwrite=True)
 
     arrays: dict = {}
+    columns = _NumpyColumns()
 
     for chunk in chunks:
         chunk_rows = chunk.height
         for col in chunk.columns:
             if col in failed_cols:
                 continue
-            arr, failure = _safe_column_to_numpy(chunk, col)
+            arr, failure = columns.convert(chunk, col)
             if failure is not None:
                 failures.append(failure)
                 failed_cols.add(col)
