@@ -713,7 +713,7 @@ def publish(
       Publish for real:
           resurrector publish ./datasets/pick-place/1.0 --repo-id me/pick-place
     """
-    from resurrector.core.publish import publish_dataset
+    from resurrector.core.publish import publish_dataset, read_dataset_config
 
     if not dataset_dir.is_dir():
         console.print(f"[red]Not a directory: {dataset_dir}[/red]")
@@ -722,22 +722,19 @@ def publish(
     # Optional QC pass over the source bags, if the config records them.
     qc_summary = None
     if qc:
-        import json as _json
-        cfg_path = dataset_dir / "dataset_config.json"
         bag_paths = []
-        if cfg_path.exists():
-            try:
-                cfg = _json.loads(cfg_path.read_text())
-                # bag_refs may be plain path strings (resurrector export) or
-                # {path: ...} dicts (dataset export) — handle both.
-                raw_refs = cfg.get("bag_refs") or []
-                candidates = [
-                    r["path"] if isinstance(r, dict) else r
-                    for r in raw_refs
-                ]
-                bag_paths = [c for c in candidates if c and Path(c).exists()]
-            except Exception:
-                bag_paths = []
+        try:
+            cfg, _ = read_dataset_config(dataset_dir)
+            # bag_refs are {path: ...} dicts (dataset export); plain path
+            # strings are accepted for hand-written configs.
+            raw_refs = cfg.get("bag_refs") or []
+            candidates = [
+                r.get("path") if isinstance(r, dict) else r
+                for r in raw_refs
+            ]
+            bag_paths = [c for c in candidates if c and Path(c).exists()]
+        except Exception:
+            bag_paths = []
         if bag_paths:
             from resurrector.core.qc import run_qc
             report = run_qc(bag_paths)

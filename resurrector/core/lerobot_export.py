@@ -22,14 +22,17 @@ Our job is the mapping from a bag to LeRobot frames:
   ``observation.images.<topic>`` = one video stream per image topic.
 
 Memory: the resampler streams ``iter_chunks()`` and holds one chunk plus the
-grid-shaped output; images stream one frame at a time (LeRobot spills frames
-to disk before encoding). The output itself is grid-sized by definition.
+grid-shaped output; images stream one frame at a time (LeRobot spills each
+frame to a PNG, then encodes the episode's PNGs to MP4 or embeds them in the
+data parquet and deletes them; the emptied spill directories are removed
+after ``finalize()``). The output itself is grid-sized by definition.
 """
 
 from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -335,6 +338,28 @@ def _features(ep: _Episode, cam_shapes: dict[str, tuple[int, int, int]], use_vid
     return feats
 
 
+def _remove_empty_image_dirs(root: Path) -> None:
+    """Remove the empty ``images/`` spill directories LeRobot leaves behind.
+
+    LeRobot (0.6.x) writes each camera frame as a PNG under
+    ``images/<camera>/episode-NNNNNN/``. In ``save_episode()`` it then either
+    encodes those PNGs to MP4 (video mode) or embeds their bytes into
+    ``data/*.parquet`` (image mode, ``use_videos=False``), and deletes each
+    ``episode-NNNNNN`` directory. Either way ``images/<camera>/`` and
+    ``images/`` stay behind, empty. Only empty directories are removed
+    (``os.rmdir`` refuses anything else), so if a LeRobot version ever keeps
+    frames on disk under ``images/``, they stay.
+    """
+    images = root / "images"
+    if not images.is_dir():
+        return
+    for dirpath, _dirs, _files in os.walk(images, topdown=False):
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass  # not empty
+
+
 def _prepare_root(root: Path) -> None:
     """LeRobot's create() requires a non-existent root. Allow an empty dir."""
     if root.exists():
@@ -450,6 +475,7 @@ def export_lerobot(
         shutil.rmtree(root, ignore_errors=True)
         raise
     dataset.finalize()
+    _remove_empty_image_dirs(root)
 
     logger.info("Wrote LeRobot dataset: %d episode(s), %d frames @ %d fps -> %s",
                 len(bags), total_frames, fps, root)

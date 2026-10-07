@@ -12,11 +12,15 @@ The card is the point. Every published dataset becomes a public HF page that:
 
 Design split:
 - ``build_dataset_card(...)`` is a **pure function** — no network, fully
-  testable. It reads whatever the dataset dir contains (manifest, config)
-  and an optional QC summary, and returns the card markdown string.
+  testable. It reads whatever the dataset dir contains (manifest, config,
+  LeRobot's ``meta/info.json``) and an optional QC summary, and returns the
+  card markdown string.
 - ``publish_dataset(...)`` is the thin push: build the card, write it into
-  the dir as README.md, upload via ``huggingface_hub``. ``dry_run=True``
-  does everything except the upload, so the path is testable offline.
+  the dir as README.md, upload via ``huggingface_hub``. For a LeRobot
+  dataset it then tags the Hub repo with the dataset's codebase version
+  (``v3.0``), moving the tag on re-publish, because ``LeRobotDataset``
+  refuses an untagged repo. ``dry_run=True`` does everything except the
+  network calls (upload and tag), so the path is testable offline.
 
 ``huggingface_hub`` is an optional dependency (the ``[publish]`` extra). It's
 imported lazily inside ``publish_dataset`` so the card builder — and the rest
@@ -53,9 +57,107 @@ class PublishResult:
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        return json.loads(path.read_text())
+        # JSON is UTF-8; the locale default (cp1252 on Windows) would drop
+        # a hand-written config whose description isn't ASCII.
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_dataset_config(dataset_dir: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return ``(config, metadata)`` from a dataset dir's ``dataset_config.json``.
+
+    ``DatasetManager.export_version`` nests the version config (format,
+    topics, bag_refs, ...) under ``"config"`` and the card fields under
+    ``"metadata"``. A flat hand-written file is read as the config itself.
+    A missing or unreadable file gives ``({}, {})``.
+    """
+    raw = _load_json(Path(dataset_dir) / "dataset_config.json")
+    config = raw.get("config")
+    metadata = raw.get("metadata")
+    return (
+        config if isinstance(config, dict) else raw,
+        metadata if isinstance(metadata, dict) else {},
+    )
+
+
+def _lerobot_codebase_version(dataset_dir: Path) -> str | None:
+    """Codebase version of a LeRobot dataset dir (``"v3.0"``), else None."""
+    version = _load_json(dataset_dir / "meta" / "info.json").get("codebase_version")
+    return version if isinstance(version, str) and version else None
+
+
+def _tag_codebase_version(api: Any, repo_id: str, tag: str) -> None:
+    """Point ``tag`` at the commit just uploaded.
+
+    ``LeRobotDataset(repo_id)`` picks its Hub revision from the repo's
+    codebase-version tags and refuses a repo that has none. Re-publishing
+    has to move the tag, or LeRobot keeps loading the previous upload.
+    Same steps as LeRobot's own ``push_to_hub``.
+    """
+    existing = {t.name for t in api.list_repo_refs(repo_id, repo_type="dataset").tags}
+    if tag in existing:
+        api.delete_tag(repo_id, tag=tag, repo_type="dataset")
+    api.create_tag(repo_id, tag=tag, repo_type="dataset")
+
+
+# Per-frame index columns LeRobot adds to every dataset; the card lists the
+# features the export actually chose (state, action, cameras).
+_LEROBOT_INDEX_FEATURES = frozenset(
+    {"timestamp", "frame_index", "episode_index", "index", "task_index"}
+)
+
+
+def _exported_topics(config: dict[str, Any], export_format: str) -> tuple[list[str], int, int]:
+    """Topics the export actually wrote, as ``DatasetManager.export_version`` picks them.
+
+    A bag's own ``topics`` wins over the version's, and an empty or missing
+    filter means every topic in the bag. LeRobot ignores per-bag filters
+    and applies the version's list to every episode.
+
+    Returns:
+        ``(named, n_unfiltered, n_bags)``: the union of the filters in
+        effect (first-seen order), how many bags were exported with every
+        topic, and how many bags there are. Without bag refs the version's
+        list stands alone as one selection.
+    """
+    default = list(config.get("topics") or [])
+    refs = config.get("bag_refs") or []
+    if export_format == "lerobot" or not refs:
+        selections = [default]
+    else:
+        selections = [
+            list((ref.get("topics") if isinstance(ref, dict) else None) or default)
+            for ref in refs
+        ]
+    named = list(dict.fromkeys(t for sel in selections for t in sel))
+    n_unfiltered = sum(1 for sel in selections if not sel)
+    return named, n_unfiltered, len(selections)
+
+
+def _shape_str(shape: Any) -> str:
+    if isinstance(shape, (list, tuple)):
+        return "x".join(str(d) for d in shape)
+    return str(shape)
+
+
+def _data_files(dataset_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    """Data files from ``manifest.json``, else from a walk of the directory.
+
+    ``resurrector export`` writes no manifest; only ``DatasetManager`` does.
+    JSON metadata and markdown aren't counted either way.
+    """
+    if manifest:
+        names = list(manifest)
+    else:
+        names = [
+            f.relative_to(dataset_dir).as_posix()
+            for f in dataset_dir.rglob("*")
+            if f.is_file()
+            and not any(part.startswith(".") for part in f.relative_to(dataset_dir).parts)
+        ]
+    return [f for f in names if not f.endswith(".json") and not f.endswith(".md")]
 
 
 def _grade_from_score(score: int) -> str:
@@ -78,9 +180,16 @@ def build_dataset_card(
 ) -> str:
     """Build the HuggingFace dataset-card markdown for a dataset directory.
 
-    Pure function — no network, no filesystem writes. Reads ``manifest.json``
-    and ``dataset_config.json`` from the directory if present; tolerates their
-    absence.
+    Pure function — no network, no filesystem writes. Reads ``manifest.json``,
+    ``dataset_config.json`` and (for LeRobot datasets) ``meta/info.json``
+    from the directory if present; tolerates their absence. Without a
+    manifest, data files are counted from the directory itself. A LeRobot
+    dataset gets episode/frame/fps rows and a feature table from
+    ``meta/info.json`` (a bare ``resurrector export --preset lerobot`` dir
+    has nothing else to go on) and a ``LeRobotDataset`` loading snippet;
+    everything else gets ``datasets.load_dataset``. Topics are the ones
+    the export used: a bag's own filter wins over the version's, and a bag
+    with neither was exported, and is shown, with "all topics".
 
     Args:
         dataset_dir: Path to the materialized dataset.
@@ -96,16 +205,25 @@ def build_dataset_card(
     """
     dataset_dir = Path(dataset_dir)
     manifest = _load_json(dataset_dir / "manifest.json")
-    config = _load_json(dataset_dir / "dataset_config.json")
+    config, metadata = read_dataset_config(dataset_dir)
     task_categories = task_categories or ["robotics"]
     # Attribution / description precedence: explicit arg > config description.
     # For re-hosted CC-BY data this is where the required credit lands.
     if extra_description is None:
-        extra_description = config.get("description")
+        extra_description = metadata.get("description") or config.get("description")
 
-    data_files = [f for f in manifest if not f.endswith(".json") and not f.endswith(".md")]
-    topics = config.get("topics") or []
-    export_format = config.get("export_format", "unknown")
+    data_files = _data_files(dataset_dir, manifest)
+    # `resurrector export --preset lerobot` writes no dataset_config.json;
+    # the LeRobot layout identifies itself.
+    export_format = config.get("export_format") or (
+        "lerobot" if _lerobot_codebase_version(dataset_dir) else "unknown"
+    )
+    if config:
+        topics, n_unfiltered, n_selections = _exported_topics(config, export_format)
+    else:
+        topics, n_unfiltered, n_selections = [], 0, 0
+    # meta/info.json is what LeRobot wrote: episode/frame totals and features.
+    info = _load_json(dataset_dir / "meta" / "info.json") if export_format == "lerobot" else {}
     bag_refs = config.get("bag_refs") or []
     name = repo_id.split("/")[-1]
 
@@ -136,15 +254,34 @@ def build_dataset_card(
         body += [extra_description, ""]
 
     # Overview table
+    overview = [("Format", f"`{export_format}`")]
+    # A bare LeRobot export has no config, so its bags and topics are
+    # unknown; info.json's totals below say what's in it instead of "0".
+    if config or not info:
+        overview.append(("Source bags", str(len(bag_refs))))
+        if n_unfiltered == 0:
+            topics_cell = str(len(topics))
+        elif n_unfiltered == n_selections:
+            topics_cell = "all topics"
+        else:
+            topics_cell = (
+                f"{len(topics)} listed + all topics from "
+                f"{n_unfiltered} of {n_selections} bags"
+            )
+        overview.append(("Topics", topics_cell))
+    if info.get("total_episodes") is not None:
+        overview.append(("Episodes", str(info["total_episodes"])))
+    if info.get("total_frames") is not None:
+        overview.append(("Frames", str(info["total_frames"])))
+    if info.get("fps"):
+        overview.append(("Frame rate", f"{info['fps']} fps"))
+    overview.append(("Data files", str(len(data_files))))
     body += [
         "## Overview",
         "",
         "| | |",
         "|---|---|",
-        f"| Format | `{export_format}` |",
-        f"| Source bags | {len(bag_refs)} |",
-        f"| Topics | {len(topics)} |",
-        f"| Data files | {len(data_files)} |",
+        *[f"| {k} | {v} |" for k, v in overview],
         "",
     ]
 
@@ -185,15 +322,47 @@ def build_dataset_card(
             body.append(f"- `{t}`")
         if len(topics) > 50:
             body.append(f"- … and {len(topics) - 50} more")
+        if n_unfiltered:
+            body.append(
+                f"- plus every topic in {n_unfiltered} of {n_selections} "
+                "source bags (no topic filter)"
+            )
         body.append("")
 
-    # Load snippet
+    features = info.get("features")
+    if isinstance(features, dict):
+        rows = [
+            f"| `{key}` | {ft.get('dtype', '?')} | {_shape_str(ft.get('shape', '?'))} |"
+            for key, ft in features.items()
+            if key not in _LEROBOT_INDEX_FEATURES and isinstance(ft, dict)
+        ]
+        if rows:
+            body += [
+                "## Features",
+                "",
+                "| Feature | Type | Shape |",
+                "|---|---|---|",
+                *rows,
+                "",
+            ]
+
+    # Load snippet. A LeRobot v3 dataset (episode metadata, MP4 cameras)
+    # isn't a plain HF table; LeRobot's own loader is the way in.
+    if export_format == "lerobot":
+        load = [
+            "from lerobot.datasets.lerobot_dataset import LeRobotDataset",
+            f'ds = LeRobotDataset("{repo_id}")',
+        ]
+    else:
+        load = [
+            "from datasets import load_dataset",
+            f'ds = load_dataset("{repo_id}")',
+        ]
     body += [
         "## Loading",
         "",
         "```python",
-        "from datasets import load_dataset",
-        f'ds = load_dataset("{repo_id}")',
+        *load,
         "```",
         "",
         "---",
@@ -217,9 +386,11 @@ def publish_dataset(
     """Publish a dataset directory to the HuggingFace Hub.
 
     Builds the dataset card, writes it as ``README.md`` into the directory,
-    and uploads the whole folder. With ``dry_run=True`` it does everything
-    except the network upload (writes the card, counts files) so the flow is
-    verifiable offline.
+    and uploads the whole folder. A LeRobot dataset's repo is then tagged
+    with its codebase version (e.g. ``v3.0``), which ``LeRobotDataset``
+    requires before it will load from the Hub. With ``dry_run=True`` it does
+    everything except the network calls (writes the card, counts files) so
+    the flow is verifiable offline.
 
     Args:
         dataset_dir: Materialized dataset directory.
@@ -247,7 +418,9 @@ def publish_dataset(
         extra_description=extra_description,
     )
     card_path = dataset_dir / "README.md"
-    card_path.write_text(card)
+    # The card carries user-written descriptions; the locale default
+    # (cp1252 on Windows) can't encode most non-Latin text.
+    card_path.write_text(card, encoding="utf-8")
 
     n_files = sum(1 for f in dataset_dir.rglob("*") if f.is_file())
     url = f"https://huggingface.co/datasets/{repo_id}"
@@ -276,6 +449,9 @@ def publish_dataset(
         repo_id=repo_id,
         repo_type="dataset",
     )
+    codebase_version = _lerobot_codebase_version(dataset_dir)
+    if codebase_version:
+        _tag_codebase_version(api, repo_id, codebase_version)
     return PublishResult(
         repo_id=repo_id, url=url, card_path=str(card_path),
         n_files=n_files, dry_run=False,
