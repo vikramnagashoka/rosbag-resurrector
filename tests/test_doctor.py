@@ -98,7 +98,7 @@ class TestRender:
             if r.tier != "optional":
                 continue
             # Only hints carrying an extras spec ("[...]") need quoting; a
-            # plain `pip install tensorflow` is safe on zsh as-is.
+            # plain `pip install mcap` is safe on zsh as-is.
             if "pip install" not in r.fix_hint or "[" not in r.fix_hint:
                 continue
             assert "'rosbag-resurrector[" in r.fix_hint, (

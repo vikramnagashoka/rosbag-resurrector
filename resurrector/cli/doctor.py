@@ -143,6 +143,20 @@ def _check_lerobot() -> CheckResult:
     return _check_spec("lerobot", feature, "pip install 'rosbag-resurrector[lerobot]'")
 
 
+def _check_rlds() -> CheckResult:
+    """RLDS writes TFRecords with tensorflow, which [all-exports] installs
+    only where tensorflow ships wheels; elsewhere say why instead of
+    pointing at an extra that can't deliver it."""
+    from resurrector.core import export
+    feature = "RLDS export (tensorflow)"
+    if export.export_dependency_problem("rlds") is None:
+        return CheckResult(feature, "pass", "tensorflow available", tier="optional")
+    return CheckResult(
+        feature, "warn", export.tensorflow_missing_detail(),
+        export.tensorflow_install_hint(), tier="optional",
+    )
+
+
 def run_all_checks() -> list[CheckResult]:
     """Run every check and return results."""
     return [
@@ -194,10 +208,7 @@ def run_all_checks() -> list[CheckResult]:
             tier="optional",
         ),
         _check_lerobot(),
-        _check_spec(
-            "tensorflow", "RLDS export (tensorflow)", "pip install tensorflow",
-            missing_detail="tensorflow not installed; [all-exports] doesn't include it",
-        ),
+        _check_rlds(),
         _check_converter("mcap", "mcap CLI (.bag -> .mcap conversion)"),
         _check_converter("ros2", "ros2 CLI (.db3 -> .mcap conversion)"),
     ]

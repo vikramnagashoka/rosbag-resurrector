@@ -67,7 +67,7 @@ jobs:
         extra:
           - vision-lite     # PIL + opencv-python-headless
           - vision          # vision-lite + sentence-transformers (downloads CLIP model)
-          - all-exports     # zarr + tensorflow-datasets (heavy: TF wheel ~600 MB)
+          - all-exports     # zarr + tensorflow + tensorflow-datasets (heavy: TF wheel ~600 MB)
           - watch           # watchdog (tiny)
           - ros1            # rosbags (for legacy .bag reading)
           - publish         # huggingface_hub (v0.7 dataset publishing)
@@ -115,6 +115,15 @@ jobs:
         run: |
           pytest tests/test_lerobot_export.py -q -rs | tee lerobot.log
           ! grep -q "SKIPPED" lerobot.log
+
+      - name: Assert RLDS tests actually ran
+        # Same guard for RLDS: before [all-exports] carried tensorflow, every
+        # tensorflow-gated test in these files skipped here and read as coverage.
+        if: matrix.extra == 'all-exports'
+        run: |
+          python -c "import tensorflow, zarr"
+          pytest tests/test_export_ml.py tests/test_export_v040.py tests/test_rlds_capability.py -q -rs | tee rlds.log
+          ! grep -q "SKIPPED" rlds.log
 
       - name: Run pytest
         run: pytest tests/ -q

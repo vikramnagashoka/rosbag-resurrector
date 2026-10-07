@@ -76,10 +76,14 @@ class TestRLDSExport:
         assert example.features.feature["step/is_last"].int64_list.value[0] == 0
 
 
-def test_rlds_raises_helpful_error_when_tf_missing(tmp_dir, sample_bag):
-    """If tensorflow isn't available, the user gets a clear install hint."""
-    if tf_available:
-        pytest.skip("tensorflow IS installed; skipping the missing-deps test")
+def test_rlds_raises_helpful_error_when_tf_missing(tmp_dir, sample_bag, monkeypatch):
+    """If tensorflow isn't available, the user gets a clear install hint.
+
+    Hides tensorflow via sys.modules so this runs (rather than skips) in
+    CI's all-exports job too, where a skip would trip the RLDS guard step.
+    """
+    import sys
+    monkeypatch.setitem(sys.modules, "tensorflow", None)
     bf = BagFrame(sample_bag)
     with pytest.raises(ImportError, match="tensorflow"):
         bf.export(
