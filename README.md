@@ -227,12 +227,12 @@ python examples/09_plotjuggler_bridge.py      # WebSocket bridge for live viz
 Plus the v0.3.1 power features (`11_density_ribbon.py` through `18_polars_lazy_filter.py`) — bookmarks, math/transform editor, brush-to-trim export, cross-bag overlay, "Open in Jupyter", lazy Polars filter pushdown. Then `19_export_presets_and_splits.py` through `26_bag_qc_fleet.py` cover export presets and splits, multi-bag playback, recording while streaming, bridge events and filters, TF + point clouds, custom message decoders, bag concatenation, and fleet QC.
 
 Each script:
-- Runs in **under 10 seconds** end-to-end
+- Finishes in seconds: most in under 2, `01` in about 10 on first run (it generates the demo bag), `09` in about 11 (it streams for 10). `15` runs the dashboard until Ctrl+C.
 - Auto-generates the demo bag on first run
 - Auto-skips with install instructions when an optional extra (CLIP, OpenCV, etc.) isn't installed
 - Has a one-line "what this is and why" header so you can decide whether to keep reading
 
-Full index in [examples/README.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 25 pass on a fresh install, the toolkit is healthy.
+Full index in [examples/README.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/examples/README.md). Running them in sequence also serves as a smoke test. On a fresh install with no extras, all 25 exit 0: `04`, `05` and `07` print what to install and skip the parts that need `[vision-lite]`, `[lerobot]`, tensorflow (RLDS) or a CLIP backend, and `15_dashboard_walkthrough.py` keeps the dashboard running until you press Ctrl+C.
 
 ## Features
 

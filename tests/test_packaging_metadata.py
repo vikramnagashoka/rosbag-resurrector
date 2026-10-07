@@ -142,7 +142,7 @@ def test_readme_example_count_matches_examples_dir():
         int(n)
         for pattern in (
             r"\b(\d+) standalone exploration scripts\b",
-            r"\bif all (\d+) pass\b",
+            r"\ball (\d+) exit 0\b",
         )
         for n in re.findall(pattern, text)
     ]
