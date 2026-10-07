@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import importlib.machinery
 import types
 from pathlib import Path
 
@@ -118,6 +119,9 @@ def _fake_tensorflow(written: list) -> types.ModuleType:
             written.append(record)
 
     tf = types.ModuleType("tensorflow")
+    # A real spec, so Exporter's find_spec pre-flight sees the stub as an
+    # installed tensorflow (a None __spec__ makes find_spec raise).
+    tf.__spec__ = importlib.machinery.ModuleSpec("tensorflow", loader=None)
     tf.train = types.SimpleNamespace(
         Feature=Feature, Features=Features, Example=Example,
         Int64List=_ValueList, FloatList=_ValueList, BytesList=_ValueList,

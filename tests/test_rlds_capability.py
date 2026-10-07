@@ -451,7 +451,7 @@ class TestRldsWriterImportError:
         tf_platform(True)
         out = tmp_dir / "rlds_out"
         with pytest.raises(ImportError) as ei:
-            _stream_rlds(iter(()), out, "episode", total_rows=0)
+            _stream_rlds(iter(()), out, "episode")
         assert str(ei.value) == (
             f"RLDS export needs tensorflow, which isn't installed. Install with: {EXTRA_CMD}"
         )
@@ -464,7 +464,7 @@ class TestRldsWriterImportError:
         deps(broken=("tensorflow",))
         out = tmp_dir / "rlds_out"
         with pytest.raises(ImportError) as ei:
-            _stream_rlds(iter(()), out, "episode", total_rows=0)
+            _stream_rlds(iter(()), out, "episode")
         assert str(ei.value) == f"RLDS export needs tensorflow, which failed to import: {BROKEN_TF}"
         assert str(ei.value.__cause__) == BROKEN_TF
         assert not out.exists()

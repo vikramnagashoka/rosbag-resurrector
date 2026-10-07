@@ -420,7 +420,7 @@ synced = bf.sync(["/imu/data", "/joint_states"], method="interpolate")
 synced = bf.sync(["/imu/data", "/camera/rgb"], method="sample_and_hold")
 ```
 
-The anchor topic's columns keep their dtypes. Every other topic's integer and float columns come back as Float64, with NaN where a row has no match; booleans, strings and lists keep their dtype, null where unmatched (`interpolate` makes booleans Float64 too). Topics over 1 M messages go through the streaming sync engine; where it differs from the eager one (mostly `interpolate` at a topic's edges) is listed in the [`sync.py`](resurrector/core/sync.py) module docstring. For a sync too big to hold, `resurrector.core.sync.iter_synchronize` yields the same rows a chunk at a time.
+The anchor topic's columns keep their dtypes. Every other topic's integer and float columns come back as Float64, with NaN where a row has no match; booleans, strings and lists keep their dtype, null where unmatched (`interpolate` makes booleans Float64 too). Topics over 1 M messages go through the streaming sync engine; where it differs from the eager one (mostly `interpolate` at a topic's edges) is listed in the [`sync.py`](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/resurrector/core/sync.py) module docstring. For a sync too big to hold, `resurrector.core.sync.iter_synchronize` yields the same rows a chunk at a time.
 
 ### Reproducible Datasets
 
