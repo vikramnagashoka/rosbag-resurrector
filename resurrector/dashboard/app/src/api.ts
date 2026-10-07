@@ -223,6 +223,13 @@ export interface ExportPreset {
   available: boolean
 }
 
+// POST /api/bags/{id}/export (export_bag in resurrector/dashboard/api.py).
+// Not `output` like the trim and dataset-export endpoints.
+export interface ExportBagResponse {
+  status: string
+  output_path: string
+}
+
 export interface FrameSearchResult {
   query: string
   mode: 'frames' | 'clips'
@@ -328,7 +335,7 @@ export const api = {
       downsample_hz?: number
       preset?: string
     },
-  ) => request<{ output: string }>('POST', `/api/bags/${bagId}/export`, { body, query: {
+  ) => request<ExportBagResponse>('POST', `/api/bags/${bagId}/export`, { body, query: {
     topics: body.topics.join(','),
     format: body.format,
     output_dir: body.output_dir,

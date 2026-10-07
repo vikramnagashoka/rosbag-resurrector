@@ -1,7 +1,15 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
 import { useCapability } from '../components/InstallBanner'
 import { runWithToast, useErrorToast } from '../ErrorToast'
+import {
+  LEROBOT_DEFAULT_FPS,
+  LEROBOT_SYNC_NOTE,
+  fpsRoundingHint,
+  isLerobot,
+  rateError,
+  syncAndRateParams,
+} from '../exportOptions'
 
 // Warm-themed export dialog for the notebook. Same workflow as the classic
 // ExportDialog (preset / format / topics / sync / downsample → /api/bags/:id/
@@ -37,6 +45,12 @@ export default function ExportDialog({
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
+  const rateId = useId()
+  const rateNoteId = useId()
+  const syncNoteId = useId()
+  const lerobot = isLerobot(format)
+  const rateErr = rateError(format, downsampleHz)
+  const rateNote = rateErr ?? fpsRoundingHint(format, downsampleHz)
 
   useEffect(() => {
     let cancelled = false
@@ -62,16 +76,15 @@ export default function ExportDialog({
 
   async function handleExport() {
     setExporting(true)
-    const downsampleNum = downsampleHz.trim() ? parseFloat(downsampleHz) : undefined
     const r = await runWithToast(
       toast,
       () => api.exportBag(bagId, {
         topics: selectedTopics, format, output_dir: outputDir,
-        sync, downsample_hz: downsampleNum, preset: selectedPreset || undefined,
+        ...syncAndRateParams(format, sync, downsampleHz), preset: selectedPreset || undefined,
       }),
       { errorPrefix: 'Export failed' },
     )
-    if (r) { setResult(r.output); toast.push('info', `Exported to ${r.output}`) }
+    if (r) { setResult(r.output_path); toast.push('info', `Exported to ${r.output_path}`) }
     setExporting(false)
   }
 
@@ -135,10 +148,24 @@ export default function ExportDialog({
               <option value="rlds">RLDS</option>
             </select>
           </label>
-          <label className="nb-modal-field" style={{ width: 140 }}>
-            <span>Downsample (Hz)</span>
-            <input value={downsampleHz} placeholder="e.g. 50" onChange={e => setDownsampleHz(e.target.value)} />
-          </label>
+          {/* A div, not a wrapping <label>: the note below must describe the
+              input (aria-describedby), not become part of its name. */}
+          <div className="nb-modal-field" style={{ width: 140 }}>
+            <label htmlFor={rateId}>{lerobot ? 'Frame rate (fps)' : 'Downsample (Hz)'}</label>
+            <input
+              id={rateId}
+              value={downsampleHz}
+              placeholder={lerobot ? `default ${LEROBOT_DEFAULT_FPS}` : 'e.g. 50'}
+              onChange={e => setDownsampleHz(e.target.value)}
+              aria-invalid={rateErr ? true : undefined}
+              aria-describedby={rateNote ? rateNoteId : undefined}
+            />
+            {rateNote && (
+              <div id={rateNoteId} className={rateErr ? 'nb-export-hint is-error' : 'nb-export-hint'}>
+                {rateNote}
+              </div>
+            )}
+          </div>
         </div>
 
         <label className="nb-modal-field">
@@ -158,19 +185,26 @@ export default function ExportDialog({
           </div>
         </div>
 
-        <label className="nb-export-sync">
-          <input type="checkbox" checked={sync} onChange={e => setSync(e.target.checked)} />
+        <label className={lerobot ? 'nb-export-sync is-disabled' : 'nb-export-sync'}>
+          <input
+            type="checkbox"
+            checked={lerobot || sync}
+            disabled={lerobot}
+            aria-describedby={lerobot ? syncNoteId : undefined}
+            onChange={e => setSync(e.target.checked)}
+          />
           Synchronize topics before export
         </label>
+        {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
-        {result && <div className="nb-export-result">Exported to {result}</div>}
+        {result && <div className="nb-export-result" role="status">Exported to {result}</div>}
 
         <div className="nb-modal-actions">
           <button className="nb-btn" onClick={onClose}>Close</button>
           <button
             className="nb-btn nb-btn-accent"
             onClick={handleExport}
-            disabled={exporting || selectedTopics.length === 0}
+            disabled={exporting || selectedTopics.length === 0 || rateErr !== null}
           >{exporting ? 'Exporting…' : 'Export'}</button>
         </div>
       </div>

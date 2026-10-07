@@ -1,7 +1,15 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
 import { InstallBanner, useCapability } from './InstallBanner'
 import { runWithToast, useErrorToast } from '../ErrorToast'
+import {
+  LEROBOT_DEFAULT_FPS,
+  LEROBOT_SYNC_NOTE,
+  fpsRoundingHint,
+  isLerobot,
+  rateError,
+  syncAndRateParams,
+} from '../exportOptions'
 
 interface Props {
   bagId: number
@@ -49,6 +57,14 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
+  const outputDirId = useId()
+  const rateId = useId()
+  const rateNoteId = useId()
+  const syncNoteId = useId()
+  const lerobot = isLerobot(format)
+  const rateErr = rateError(format, downsampleHz)
+  const rateNote = rateErr ?? fpsRoundingHint(format, downsampleHz)
+  const canExport = !exporting && selectedTopics.length > 0 && rateErr === null
 
   // Fetch available presets once on mount
   useEffect(() => {
@@ -79,7 +95,6 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
 
   async function handleExport() {
     setExporting(true)
-    const downsampleNum = downsampleHz.trim() ? parseFloat(downsampleHz) : undefined
     const r = await runWithToast(
       toast,
       () =>
@@ -87,8 +102,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           topics: selectedTopics,
           format,
           output_dir: outputDir,
-          sync,
-          downsample_hz: downsampleNum,
+          ...syncAndRateParams(format, sync, downsampleHz),
           // Pass the preset only if user picked one AND hasn't overridden everything;
           // backend uses preset to fill any unset values. Sending the preset
           // even when manual is fine — user-supplied values still win.
@@ -97,8 +111,8 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
       { errorPrefix: 'Export failed' },
     )
     if (r) {
-      setResult(r.output)
-      toast.push('info', `Exported to ${r.output}`)
+      setResult(r.output_path)
+      toast.push('info', `Exported to ${r.output_path}`)
     }
     setExporting(false)
   }
@@ -205,8 +219,9 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
         </div>
 
         <div style={{ marginBottom: 16 }}>
-          <label style={labelStyle}>Output directory</label>
+          <label htmlFor={outputDirId} style={labelStyle}>Output directory</label>
           <input
+            id={outputDirId}
             type="text"
             value={outputDir}
             onChange={e => setOutputDir(e.target.value)}
@@ -216,16 +231,29 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
 
         <div style={{ marginBottom: 16, display: 'flex', gap: 12 }}>
           <div style={{ flex: 1 }}>
-            <label style={labelStyle}>
-              Downsample (Hz, optional)
+            <label htmlFor={rateId} style={labelStyle}>
+              {lerobot
+                ? `Frame rate (fps, default ${LEROBOT_DEFAULT_FPS})`
+                : 'Downsample (Hz, optional)'}
             </label>
             <input
+              id={rateId}
               type="text"
               value={downsampleHz}
-              placeholder="e.g. 50"
+              placeholder={lerobot ? String(LEROBOT_DEFAULT_FPS) : 'e.g. 50'}
               onChange={e => setDownsampleHz(e.target.value)}
-              style={fieldStyle}
+              aria-invalid={rateErr ? true : undefined}
+              aria-describedby={rateNote ? rateNoteId : undefined}
+              style={rateErr ? { ...fieldStyle, borderColor: '#f85149' } : fieldStyle}
             />
+            {rateNote && (
+              <div
+                id={rateNoteId}
+                style={{ fontSize: 12, color: rateErr ? '#f85149' : '#8b949e', marginTop: 6 }}
+              >
+                {rateNote}
+              </div>
+            )}
           </div>
         </div>
 
@@ -261,16 +289,29 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
             alignItems: 'center',
             gap: 8,
             fontSize: 13,
-            marginBottom: 16,
-            cursor: 'pointer',
+            marginBottom: lerobot ? 6 : 16,
+            color: lerobot ? '#8b949e' : undefined,
+            cursor: lerobot ? 'not-allowed' : 'pointer',
           }}
         >
-          <input type="checkbox" checked={sync} onChange={e => setSync(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={lerobot || sync}
+            disabled={lerobot}
+            aria-describedby={lerobot ? syncNoteId : undefined}
+            onChange={e => setSync(e.target.checked)}
+          />
           Synchronize topics before export
         </label>
+        {lerobot && (
+          <div id={syncNoteId} style={{ fontSize: 12, color: '#8b949e', marginBottom: 16 }}>
+            {LEROBOT_SYNC_NOTE}
+          </div>
+        )}
 
         {result && (
           <div
+            role="status"
             style={{
               background: '#0d2818',
               border: '1px solid #238636',
@@ -281,7 +322,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
               marginBottom: 16,
             }}
           >
-            {result}
+            Exported to {result}
           </div>
         )}
 
@@ -301,14 +342,14 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           </button>
           <button
             onClick={handleExport}
-            disabled={exporting || selectedTopics.length === 0}
+            disabled={!canExport}
             style={{
-              background: exporting || selectedTopics.length === 0 ? '#21262d' : '#238636',
+              background: canExport ? '#238636' : '#21262d',
               border: 'none',
               borderRadius: 6,
               padding: '8px 16px',
               color: '#fff',
-              cursor: exporting || selectedTopics.length === 0 ? 'not-allowed' : 'pointer',
+              cursor: canExport ? 'pointer' : 'not-allowed',
               fontWeight: 600,
             }}
           >

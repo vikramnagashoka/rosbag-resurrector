@@ -1,4 +1,6 @@
-import { test, expect } from '@playwright/test'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 
 // Behavioural tests for interactions that screenshot diffs can't
 // reliably capture (clicks, state changes, WebGL canvas content,
@@ -778,5 +780,156 @@ test.describe('Library scan with .bag file', () => {
     await page.waitForTimeout(1500)
     const alerts = await page.getByRole('alert').allTextContents()
     expect(alerts.join('\n')).not.toContain('[object Object]')
+  })
+})
+
+// Shared by the classic and notebook export dialogs: both must tell the truth
+// about LeRobot, which ignores `sync` (it always resamples every topic onto
+// its own fps grid) and reads the rate field as the dataset fps.
+async function expectLerobotExportControlsHonest(page: Page, modal: Locator) {
+  const format = modal.locator('select:has(option[value="hdf5"])')
+  const syncBox = modal.getByRole('checkbox', { name: /Synchronize topics/ })
+  const rate = modal.getByRole('textbox', { name: /^(Downsample|Frame rate)/ })
+  const exportButton = modal.getByRole('button', { name: 'Export', exact: true })
+
+  // Sync OFF under Parquet, then LeRobot: the box must still read checked,
+  // because LeRobot always aligns. Rendering the user's own `sync` here
+  // (checked={sync}) would show an unchecked, disabled box.
+  await expect(format).toHaveValue('parquet')
+  await expect(syncBox).toBeEnabled()
+  await syncBox.uncheck()
+  await expect(syncBox).not.toBeChecked()
+  await format.selectOption('lerobot')
+  await expect(syncBox).toBeChecked()
+  await expect(syncBox).toBeDisabled()
+  await format.selectOption('parquet')
+  await expect(syncBox).toBeEnabled()
+  await expect(syncBox).not.toBeChecked()
+
+  // Sync ON under Parquet so the switch to LeRobot has stale state to leak.
+  await syncBox.check()
+
+  await format.selectOption('lerobot')
+  await expect(syncBox).toBeDisabled()
+  await expect(syncBox).toBeChecked()
+  await expect(modal.getByText(/Always on for LeRobot/)).toBeVisible()
+  await expect(rate).toHaveAccessibleName(/^Frame rate \(fps[^)]*\)$/)
+  await expect(rate).toHaveAttribute('placeholder', /30/)
+
+  // An fps that rounds to 0 blocks Export: the backend would read 0 as
+  // "unset" and silently write 30 fps.
+  await rate.fill('0.4')
+  await expect(rate).toHaveAccessibleDescription('LeRobot needs at least 1 fps.')
+  await expect(modal.getByText(/Rounded to 0 fps/)).toHaveCount(0)
+  await expect(exportButton).toBeDisabled()
+
+  // A fractional fps is rounded, and the UI says so before export. The note
+  // describes the field; it is not part of the field's name.
+  await rate.fill('14.6')
+  await expect(modal.getByText('Rounded to 15 fps.')).toBeVisible()
+  await expect(rate).toHaveAccessibleName(/^Frame rate \(fps[^)]*\)$/)
+  await expect(rate).toHaveAccessibleDescription('Rounded to 15 fps.')
+  await expect(exportButton).toBeEnabled()
+
+  // The request carries exactly what the dialog shows: no sync flag, integer
+  // fps. Fulfilled with export_bag's real response shape.
+  const sent: URL[] = []
+  await page.route(/\/api\/bags\/\d+\/export\?/, async route => {
+    sent.push(new URL(route.request().url()))
+    await route.fulfill({ json: { status: 'completed', output_path: '/tmp/e2e-lerobot' } })
+  })
+  await exportButton.click()
+  await expect.poll(() => sent.length).toBe(1)
+  const q = sent[0].searchParams
+  expect(q.get('format')).toBe('lerobot')
+  expect(q.get('downsample_hz')).toBe('15')
+  expect(q.has('sync')).toBe(false)
+  await expect(modal.getByRole('status')).toHaveText('Exported to /tmp/e2e-lerobot')
+
+  // Back to Parquet: sync is a real choice again and the user's pick survived.
+  await format.selectOption('parquet')
+  await expect(syncBox).toBeEnabled()
+  await expect(syncBox).toBeChecked()
+  await expect(modal.getByText(/Always on for LeRobot/)).toHaveCount(0)
+  await expect(rate).toHaveAccessibleName(/^Downsample \(Hz/)
+}
+
+// A real Parquet export through the hermetic dashboard (no route mocking):
+// the dialog must name the directory the backend actually wrote.
+async function expectRealExportReportsPath(
+  page: Page,
+  request: APIRequestContext,
+  modal: Locator,
+  label: string,
+) {
+  const paths = await (await request.get('/api/system/paths')).json()
+  const root = paths.allowed_roots[0] as string
+  const outDir = join(root, `e2e-export-${label}-${Date.now()}`)
+
+  await modal.getByRole('textbox', { name: 'Output directory' }).fill(outDir)
+  await modal.getByRole('button', { name: 'Export', exact: true }).click()
+
+  await expect(modal.getByRole('status')).toHaveText(`Exported to ${outDir}`, { timeout: 30_000 })
+  await expect(page.getByRole('alert').filter({ hasText: `Exported to ${outDir}` })).toBeVisible()
+  expect((await page.getByRole('alert').allTextContents()).join('\n')).not.toContain('undefined')
+  // The path shown is where the files are.
+  expect(existsSync(join(outDir, 'lidar_points.parquet'))).toBe(true)
+}
+
+async function openNotebookExportDialog(page: Page): Promise<Locator> {
+  await page.goto('/n')
+  await expect(page.getByText('INVESTIGATIONS')).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('.nb-list-item').first()).toBeVisible()
+  await page.getByRole('button', { name: 'Export', exact: true }).click()
+  const modal = page.locator('.nb-export')
+  await expect(modal).toBeVisible()
+  return modal
+}
+
+async function openClassicExportDialog(page: Page): Promise<Locator> {
+  await page.goto('/classic')
+  await page.getByText(/scene_demo\.mcap/).first().click()
+  await page.waitForURL(/\/classic\/bag\/\d+/)
+  await page.getByRole('button', { name: 'Export', exact: true }).click()
+  const modal = page.locator('div:has(> h2:text-is("Export Data"))')
+  await expect(modal).toBeVisible()
+  return modal
+}
+
+test.describe('Export dialog with LeRobot format', () => {
+  test('notebook dialog disables sync and relabels the rate as fps', async ({ page }) => {
+    // Would catch: the notebook export dialog offering "Synchronize topics"
+    // and "Downsample (Hz)" for LeRobot, where the backend ignores sync and
+    // uses the rate as the integer dataset fps (the v0.8.4 audit finding);
+    // a leftover sync=true riding along on a LeRobot export request; the
+    // checkbox showing the user's own unchecked sync under LeRobot; an fps
+    // of 0.4 being sent as 0 (silently 30 fps); the rounding note leaking
+    // into the field's accessible name.
+    const modal = await openNotebookExportDialog(page)
+    await expectLerobotExportControlsHonest(page, modal)
+  })
+
+  test('classic dialog disables sync and relabels the rate as fps', async ({ page }) => {
+    // Would catch: the same LeRobot sync/fps problems in the classic
+    // Explorer export dialog.
+    const modal = await openClassicExportDialog(page)
+    await expectLerobotExportControlsHonest(page, modal)
+  })
+})
+
+test.describe('Export dialog success message', () => {
+  test('notebook dialog shows the path a real export wrote', async ({ page, request }) => {
+    // Would catch: api.exportBag typed as { output } while export_bag
+    // returns { status, output_path }, which made every successful export
+    // report "Exported to undefined".
+    const modal = await openNotebookExportDialog(page)
+    await expectRealExportReportsPath(page, request, modal, 'notebook')
+  })
+
+  test('classic dialog shows the path a real export wrote', async ({ page, request }) => {
+    // Would catch: the same { output } / { output_path } mismatch in the
+    // classic Explorer export dialog.
+    const modal = await openClassicExportDialog(page)
+    await expectRealExportReportsPath(page, request, modal, 'classic')
   })
 })
