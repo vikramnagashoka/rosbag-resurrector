@@ -66,18 +66,20 @@ def long_bag(tmp_dir):
 _TIMER_SLACK_SEC = 0.02
 
 
-# Generous on purpose: the wait ends as soon as the predicate holds, so the
-# limit only costs time when something is genuinely hung. 15 s still failed
-# 1 run in 20 with every core saturated and pytest at background priority.
+# A hang detector, not a timing bound. The wait returns as soon as the
+# predicate holds, so the limit costs nothing on a healthy run. It is
+# generous because a CPU-starved runner can stall the event loop for many
+# seconds, and that alone must not fail a test; only a real hang should.
 _HANG_TIMEOUT_SEC = 120.0
 
-# Bounds below compare loop.time() values around 1e5-1e6 s, so float
-# rounding in deadline arithmetic is ~1e-10 s; this only absorbs that.
+# Bounds below compare loop.time() values (monotonic seconds, up to ~1e7
+# on a long-running host), so float rounding in deadline arithmetic is
+# ~1e-9 s; this only absorbs that.
 _FLOAT_EPS = 1e-6
 
-# Long enough that no offset wait can fire during a state-based test,
-# which never awaits anything that could take this long.
-_FAR_OFFSET_SEC = 60.0
+# An offset no state-based test can see fire: even at the 20x speed cap it
+# is a 3-minute wait, against at most a 0.05 s sleep inside those tests.
+_FAR_OFFSET_SEC = 3600.0
 
 
 async def _wait_until(
@@ -491,8 +493,9 @@ class TestOffsetBookkeeping:
 
     Every test here brackets a control call between two ``loop.time()``
     reads and checks the recorded remainder / deadline against bounds that
-    hold however long the runner stalls. Offsets are ``_FAR_OFFSET_SEC`` so
-    no wait can fire mid-test; nothing awaited here sleeps anyway.
+    hold however long the runner stalls. Offsets are ``_FAR_OFFSET_SEC``
+    (except the one test that waits for a rescheduled offset to fire), so
+    no wait can fire mid-test.
     """
 
     @pytest.mark.asyncio
@@ -507,22 +510,30 @@ class TestOffsetBookkeeping:
         mp = _two_bags(bag_a, bag_b, _FAR_OFFSET_SEC, speed=speed)
         t0 = loop.time()
         await mp.play()
+        t_played = loop.time()
         try:
+            # Serve a measurable slice of the offset. The sleep's length is
+            # irrelevant: the bounds below use the times actually observed.
+            await asyncio.sleep(0.05)
+            t_pausing = loop.time()
             await mp.pause()
             t1 = loop.time()
             pending = mp._pending[1]
             assert pending.task is None, "bag b's offset wait still running after pause()"
             assert mp._engines[1].state == PlaybackState.STOPPED
-            # At most (t1 - t0) wall s elapsed between scheduling and pausing,
-            # which is (t1 - t0) * speed bag seconds of offset served.
+            # The wait was scheduled inside play() and held inside pause(),
+            # so the wall time it ran is between (t_pausing - t_played) and
+            # (t1 - t0); times speed, that's the bag-time served.
+            served_at_least = (t_pausing - t_played) * speed
             served_at_most = (t1 - t0) * speed
             assert (
                 _FAR_OFFSET_SEC - served_at_most - _FLOAT_EPS
                 <= pending.remaining_sec
-                <= _FAR_OFFSET_SEC + _FLOAT_EPS
+                <= _FAR_OFFSET_SEC - served_at_least + _FLOAT_EPS
             ), (
-                f"remaining {pending.remaining_sec!r} bag-s; expected within "
-                f"{served_at_most:.6f} bag-s below the {_FAR_OFFSET_SEC} s offset"
+                f"remaining {pending.remaining_sec!r} bag-s; expected the "
+                f"{_FAR_OFFSET_SEC} s offset minus {served_at_least:.6f} to "
+                f"{served_at_most:.6f} bag-s served at {speed}x"
             )
         finally:
             await mp.stop()
@@ -609,27 +620,40 @@ class TestOffsetBookkeeping:
         schedule, so at 4x bag b started a full ``offset`` wall seconds in
         and lagged bag a by ~4x its configured offset.
         """
+        new_speed = 4.0
         loop = asyncio.get_running_loop()
         mp = _two_bags(bag_a, bag_b, _FAR_OFFSET_SEC, speed=1.0)
         await mp.play()
         try:
             pending = mp._pending[1]
             old_task, old_deadline = pending.task, pending.deadline
+            # Serve a measurable slice first, so keeping the full offset
+            # can't pass for keeping the unserved part.
+            await asyncio.sleep(0.05)
             t0 = loop.time()
-            await mp.set_speed(4.0)
+            await mp.set_speed(new_speed)
             t1 = loop.time()
-
-            def rescaled(t: float) -> float:
-                # Deadline if set_speed() ran at time t: the bag seconds
-                # still unserved at 1x, waited out at 4x. Monotonic in t.
-                return t + max(0.0, old_deadline - t) * 1.0 / 4.0
 
             assert old_task.cancelled(), "old offset wait still running"
             assert pending.task is not None and pending.task is not old_task
-            assert pending.speed == 4.0
-            assert rescaled(t0) - _FLOAT_EPS <= pending.deadline <= rescaled(t1) + _FLOAT_EPS, (
+            assert pending.speed == new_speed
+            # set_speed() ran between t0 and t1, so the bag-time still
+            # unserved at 1x is old_deadline minus a moment in [t0, t1] ...
+            assert (
+                old_deadline - t1 - _FLOAT_EPS
+                <= pending.remaining_sec
+                <= old_deadline - t0 + _FLOAT_EPS
+            ), (
+                f"remaining {pending.remaining_sec!r} bag-s; expected the "
+                f"{old_deadline - t1:.6f}-{old_deadline - t0:.6f} s left at 1x"
+            )
+            # ... and the new wait is that remainder at 4x, also scheduled
+            # from a moment in [t0, t1].
+            scheduled_at = pending.deadline - pending.remaining_sec / new_speed
+            assert t0 - _FLOAT_EPS <= scheduled_at <= t1 + _FLOAT_EPS, (
                 f"deadline {pending.deadline - t0:.6f}s after set_speed(); expected "
-                f"~{rescaled(t0) - t0:.6f}s (was {old_deadline - t0:.6f}s at 1x)"
+                f"remaining / {new_speed} = {pending.remaining_sec / new_speed:.6f}s "
+                f"(was {old_deadline - t0:.6f}s at 1x)"
             )
             assert mp._engines[1].state == PlaybackState.STOPPED
         finally:
