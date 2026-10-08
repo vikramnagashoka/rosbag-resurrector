@@ -151,7 +151,7 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
 
 ## Numbers that keep it honest
 
-- 1289 backend tests · 80 frontend unit tests · 54 Playwright e2e (including
+- 1290 backend tests · 80 frontend unit tests · 54 Playwright e2e (including
   visual baselines), plus the dedicated memory-regression CI job
 - CI matrix: Python 3.10–3.13 · 8 optional-extra installs (LeRobot
   exports round-tripped through the real library) · wheel-install

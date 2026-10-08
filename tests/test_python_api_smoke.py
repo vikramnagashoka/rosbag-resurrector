@@ -103,3 +103,22 @@ def test_sync(smoke_bag):
     )
     assert synced.height > 0
     assert "timestamp_ns" in synced.columns
+
+
+def test_bridge_runtime_deps_ship_with_the_base_install():
+    """The bridge's runtime dependencies come with a plain ``pip install``.
+
+    Would catch: httpx and websockets living only in the [dev] extra. Every
+    CI job but this one installs [dev], which hid the gap: on a base install
+    the dashboard's bridge proxy (Play/Pause/Seek) raised ModuleNotFoundError
+    -> HTTP 500, and the bridge's /ws returned 404 because uvicorn found no
+    WebSocket implementation. The wheel-smoke job installs only the wheel and
+    pytest, so this test is the one that sees a base install.
+    """
+    import httpx  # noqa: F401  (dashboard -> bridge proxy)
+    import websockets  # noqa: F401  (bridge /ws)
+    from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
+
+    assert AutoWebSocketsProtocol is not None, (
+        "uvicorn found no WebSocket library; the bridge's /ws would return 404"
+    )
