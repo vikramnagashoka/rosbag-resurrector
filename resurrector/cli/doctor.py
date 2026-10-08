@@ -131,13 +131,16 @@ def _check_spec(name: str, feature: str, fix: str, missing_detail: str = "") -> 
 def _check_lerobot() -> CheckResult:
     """LeRobot needs Python 3.12+; on older interpreters the [lerobot]
     extra installs nothing, so say why instead of a bare 'not installed'."""
+    from resurrector.core.lerobot_export import LEROBOT_MIN_PYTHON
+
     feature = "LeRobot export"
     v = sys.version_info
-    if tuple(v[:2]) < (3, 12):
+    floor = ".".join(map(str, LEROBOT_MIN_PYTHON))
+    if tuple(v[:2]) < LEROBOT_MIN_PYTHON:
         return CheckResult(
             feature, "warn",
-            f"needs Python 3.12+ (this is {v[0]}.{v[1]})",
-            "Use Python 3.12+, then: pip install 'rosbag-resurrector[lerobot]'",
+            f"needs Python {floor}+ (this is {v[0]}.{v[1]})",
+            f"Use Python {floor}+, then: pip install 'rosbag-resurrector[lerobot]'",
             tier="optional",
         )
     return _check_spec("lerobot", feature, "pip install 'rosbag-resurrector[lerobot]'")
