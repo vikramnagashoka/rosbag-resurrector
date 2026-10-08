@@ -1068,6 +1068,17 @@ def _stream_csv(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
     return ExportResult(path=filepath, rows_written=rows_written)
 
 
+# HDF5 caches chunks per dataset: 8 MiB, indexed by an 8191-slot (64 KiB)
+# table, by default since HDF5 2.0, which h5py 3.16 bundles. This writer
+# only appends, so a written chunk is never read again and the cache just
+# holds it: peak RSS grew by up to 8 MiB per column with the row count.
+# With a fixed chunk length (h5py's own guess for these datasets) a cache
+# of a few chunks still keeps each column's trailing partial chunk between
+# appends. The widest element is a 16-byte variable-length string reference.
+_HDF5_CHUNK_ROWS = 1024
+_HDF5_CHUNK_CACHE = {"rdcc_nbytes": 4 * 16 * _HDF5_CHUNK_ROWS, "rdcc_nslots": 521}
+
+
 def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
     """Stream chunks to HDF5 using resizable datasets (append mode).
 
@@ -1083,7 +1094,7 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
 
     filepath = output_path / f"{name}.h5"
 
-    with h5py.File(filepath, "w") as f:
+    with h5py.File(filepath, "w", **_HDF5_CHUNK_CACHE) as f:
         group = f.create_group(name)
         datasets: dict[str, h5py.Dataset] = {}
 
@@ -1092,11 +1103,13 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
                 if text:
                     datasets[col] = group.create_dataset(
                         col, shape=(0,), maxshape=(None,),
+                        chunks=(_HDF5_CHUNK_ROWS,),
                         dtype=h5py.string_dtype(),
                     )
                 else:
                     datasets[col] = group.create_dataset(
                         col, shape=(0,), maxshape=(None,),
+                        chunks=(_HDF5_CHUNK_ROWS,),
                         dtype=arr.dtype, compression="gzip",
                     )
             if len(arr) == 0:
