@@ -73,6 +73,7 @@ describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    delete (Element.prototype as Partial<Element>).scrollIntoView
   })
 
   it('reports the output_path the backend returned, not "undefined"', async () => {
@@ -88,21 +89,37 @@ describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
   it('keeps a failed-columns error in the dialog, one column per line', async () => {
     // Would catch: export_bag's 422 (columns the format can't store) reaching
     // the user only as an 8-second toast with the column lines run together,
-    // or as "[object Object]"; and the error outliving a retry that works.
-    exportBag.mockRejectedValueOnce(
-      new ApiError(422, EXPORT_COLUMN_FAILURES_BODY, 'POST /api/bags/7/export failed (422)'),
-    )
+    // or as "[object Object]"; a stale "Exported to" line from the previous
+    // export sitting next to the error; the error read out twice (dialog +
+    // toast); the error left below the dialog's fold; and the error outliving
+    // a retry that works.
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView  // jsdom has none
+    exportBag
+      .mockResolvedValueOnce(BACKEND_EXPORT_RESPONSE)
+      .mockRejectedValueOnce(
+        new ApiError(422, EXPORT_COLUMN_FAILURES_BODY, 'POST /api/bags/7/export failed (422)'),
+      )
+      .mockResolvedValueOnce(BACKEND_EXPORT_RESPONSE)
     renderDialog(Dialog)
-    fireEvent.click(exportButton())
 
+    fireEvent.click(exportButton())
+    expect(await within(dialogBox()).findByRole('status')).toHaveTextContent('Exported to /data/exports/run_7')
+
+    fireEvent.click(exportButton())
     const expected = `Export failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`
     const inDialog = await within(dialogBox()).findByRole('alert')
     // textContent keeps the newlines the dialog's pre-wrap shows.
     expect(inDialog.textContent).toBe(expected)
-    const all = screen.getAllByRole('alert').map(a => a.textContent)
-    expect(all.filter(t => t === expected)).toHaveLength(2)  // + the toast
-    expect(all.join('\n')).not.toContain('[object Object]')
+    expect(inDialog.style.whiteSpace).toBe('pre-wrap')
     expect(within(dialogBox()).queryByRole('status')).toBeNull()
+    // Announced once, by the dialog; the toast shows it silently.
+    const alerts = screen.getAllByRole('alert').map(a => a.textContent)
+    expect(alerts.filter(t => t === expected)).toHaveLength(1)
+    expect(screen.getAllByTestId('toast').map(t => t.textContent)).toContain(expected)
+    expect(document.body.textContent).not.toContain('[object Object]')
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(scrollIntoView.mock.contexts).toContain(inDialog)
 
     fireEvent.click(exportButton())
     expect(await within(dialogBox()).findByRole('status')).toHaveTextContent('Exported to /data/exports/run_7')

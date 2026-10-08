@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test'
+import { test, expect, type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test'
 import {
   ALL_EXPORTS_CMD,
   ALL_EXPORTS_NO_WHEEL_DESCRIPTION,
@@ -1029,57 +1029,167 @@ test.describe('Export dialog success message', () => {
   })
 })
 
-// export_bag's 422 when the format can't store some columns, as
-// _export_error_handler sends it (src/exportPresetFixtures.ts). Mocked:
-// which columns a format can't store changes as the writers improve, and
-// what's under test is the dialog showing the explanation.
-async function expectFailedColumnsExplained(page: Page, modal: Locator) {
-  let fail = true
-  await page.route(/\/api\/bags\/\d+\/export\?/, route => fail
-    ? route.fulfill({ status: 422, json: EXPORT_COLUMN_FAILURES_BODY })
-    : route.fulfill({ json: { status: 'completed', output_path: '/tmp/e2e-retry' } }))
-  const exportButton = modal.getByRole('button', { name: 'Export', exact: true })
+// The 422 that export, trim and dataset-version export send when the chosen
+// format can't store some columns, as _export_error_handler sends it
+// (src/exportPresetFixtures.ts). Mocked: which columns a format can't store
+// changes as the writers improve, and what's under test is how the page
+// shows the explanation. Requests are answered in turn: success, the 422,
+// success, so a stale success line and a stale error both show up.
+function successThenFailureThenSuccess(first: object, last: object = first) {
+  let calls = 0
+  return (route: Route) => {
+    calls += 1
+    if (calls === 2) return route.fulfill({ status: 422, json: EXPORT_COLUMN_FAILURES_BODY })
+    return route.fulfill({ json: calls === 1 ? first : last })
+  }
+}
 
-  await modal.locator('select:has(option[value="hdf5"])').selectOption('hdf5')
-  await exportButton.click()
-
-  // The dialog keeps the whole explanation after the toast has gone.
-  const inline = modal.getByRole('alert')
+// The failed-columns error is on screen in full, announced once, one
+// column per line, wrapped, and its toast says the same thing silently.
+async function expectFailureShownOnce(page: Page, inline: Locator, text: string, toastText: string) {
   await expect(inline).toBeVisible()
-  await expect(inline).toContainText('Export failed: 2 column(s) could not be written to')
-  await expect(inline).toContainText('That file is partial')
-  await expect(inline).toContainText('export to Parquet')
-  // One failed column per line, as the message lays them out.
-  const lines = (await inline.innerText()).split('\n').map(l => l.trim())
-  for (const line of EXPORT_FAILED_COLUMN_LINES) expect(lines).toContain(line.trim())
-  // The same text as the toast, and never an unreadable stand-in.
+  expect(await inline.textContent()).toBe(text)
+  // The whole block, not just its first lines above a scrolling box's fold.
+  await expect(inline).toBeInViewport({ ratio: 1 })
+  const toast = page.getByTestId('toast').filter({ hasText: toastText.slice(0, 40) })
+  await expect(toast).toHaveCount(1)
+  expect(await toast.textContent()).toBe(toastText)
+  for (const box of [inline, toast]) {
+    const lines = (await box.innerText()).split('\n').map(l => l.trim())
+    for (const line of EXPORT_FAILED_COLUMN_LINES) expect(lines).toContain(line.trim())
+    // The long path wraps instead of running out of the box.
+    expect(await box.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+  }
+  const alerts = await page.getByRole('alert').allTextContents()
+  expect(alerts.filter(a => a === text || a === toastText)).toEqual([text])
+  expect(alerts.join('\n')).not.toContain('[object Object]')
+  expect(alerts.join('\n')).not.toMatch(/Internal Server Error/i)
+}
+
+async function expectFailedColumnsExplained(page: Page, modal: Locator) {
+  await page.route(
+    /\/api\/bags\/\d+\/export\?/,
+    successThenFailureThenSuccess({ status: 'completed', output_path: '/tmp/e2e-retry' }),
+  )
+  const exportButton = modal.getByRole('button', { name: 'Export', exact: true })
+  await modal.locator('select:has(option[value="csv"])').selectOption('csv')
+
+  await exportButton.click()
+  await expect(modal.getByRole('status')).toHaveText('Exported to /tmp/e2e-retry')
+
+  await exportButton.click()
   const expected = `Export failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`
-  await expect(page.getByRole('alert').filter({ hasText: 'Export failed: 2 column(s)' })).toHaveCount(2)
-  const alerts = (await page.getByRole('alert').allTextContents()).join('\n')
-  expect(alerts).toContain(expected)
-  expect(alerts).not.toContain('[object Object]')
-  expect(alerts).not.toMatch(/Internal Server Error/i)
+  await expectFailureShownOnce(page, modal.getByRole('alert'), expected, expected)
+  // So are the buttons under it, to retry or close.
+  await expect(exportButton).toBeInViewport({ ratio: 1 })
+  // The last export's "Exported to" line went when this one started.
   await expect(modal.getByRole('status')).toHaveCount(0)
 
-  // A retry that works clears the error.
-  fail = false
   await exportButton.click()
   await expect(modal.getByRole('status')).toHaveText('Exported to /tmp/e2e-retry')
   await expect(modal.getByRole('alert')).toHaveCount(0)
 }
 
 test.describe('Export dialog when columns fail to serialize', () => {
-  test('notebook dialog keeps each failed column, its reason and the fix on screen', async ({ page }) => {
+  test('notebook dialog keeps each failed column and its reason on screen', async ({ page }) => {
     // Would catch: export_bag's failed-columns error reaching the user only
     // as an 8-second toast with the column lines run together (in
     // v0.8.5 it was a bare 500, "Export failed: Internal Server Error"), a
-    // structured detail rendered as "[object Object]", and the error
-    // sticking around after a retry that works.
+    // structured detail rendered as "[object Object]", the error opening
+    // below the dialog's scroll fold, a screen reader reading it twice
+    // (dialog + toast), the previous export's "Exported to" line staying
+    // next to it, and the error sticking around after a retry that works.
     await expectFailedColumnsExplained(page, await openNotebookExportDialog(page))
   })
 
-  test('classic dialog keeps each failed column, its reason and the fix on screen', async ({ page }) => {
+  test('classic dialog keeps each failed column and its reason on screen', async ({ page }) => {
     // Would catch: the same in the classic Explorer export dialog.
     await expectFailedColumnsExplained(page, await openClassicExportDialog(page))
+  })
+})
+
+test.describe('Trim popover when columns fail to serialize', () => {
+  test('keeps each failed column on screen until an export works', async ({ page }) => {
+    // Would catch: /trim's failed-columns 422 reaching the user only as an
+    // 8-second toast with its lines run together (v0.8.5's popover had no
+    // inline error), the error opening below the popover's fold, the last
+    // export's "✓ path" line staying next to it, and the error outliving a
+    // retry that works.
+    await page.setViewportSize({ width: 1280, height: 600 })
+    await page.goto('/classic')
+    await page.getByText(/scene_demo\.mcap/).first().click()
+    await page.waitForURL(/\/classic\/bag\/\d+/)
+    await page.getByText('sensor_msgs/msg/PointCloud2 | 80 msgs').click()
+    await page.getByRole('button', { name: /^Trim (manually|current zoom)…$/ }).click()
+    const popover = page.locator('div:has(> h2:text-is("Trim & export"))')
+    await expect(popover).toBeVisible()
+    await page.route(/\/api\/bags\/\d+\/trim$/, successThenFailureThenSuccess({
+      bag_id: 1, format: 'csv', start_sec: 0, end_sec: 1, output: '/tmp/e2e-trim',
+    }))
+    await popover.locator('select:has(option[value="csv"])').selectOption('csv')
+    const exportButton = popover.getByRole('button', { name: 'Export', exact: true })
+    const done = popover.getByText('✓ /tmp/e2e-trim')
+
+    await exportButton.click()
+    await expect(done).toBeVisible()
+
+    await exportButton.click()
+    await expectFailureShownOnce(
+      page, popover.getByRole('alert'),
+      `Export failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`,
+      `Trim export: ${EXPORT_COLUMN_FAILURES_MESSAGE}`,
+    )
+    await expect(exportButton).toBeInViewport({ ratio: 1 })
+    await expect(done).toHaveCount(0)
+
+    await exportButton.click()
+    await expect(done).toBeVisible()
+    await expect(popover.getByRole('alert')).toHaveCount(0)
+  })
+})
+
+test.describe('Datasets page when columns fail to serialize', () => {
+  test('notebook page keeps each failed column on screen until an export works', async ({ page, request }) => {
+    // Would catch: a dataset-version export's failed-columns 422 reaching
+    // the user only as an 8-second toast with its lines run together (the
+    // v0.8.5 page had no inline error), the error rendering below the fold
+    // under a long version list, and the error outliving a retry that works.
+    await page.setViewportSize({ width: 1280, height: 600 })
+    const bags = await (await request.get('/api/bags')).json()
+    const name = `e2e-fail-${Date.now()}`
+    expect((await request.post('/api/datasets', { data: { name } })).ok()).toBe(true)
+    for (let i = 1; i <= 8; i++) {
+      const created = await request.post(`/api/datasets/${name}/versions`, {
+        data: { version: `v${i}`, bag_refs: [{ path: bags[0].path }], export_format: 'csv' },
+      })
+      expect(created.ok()).toBe(true)
+    }
+    await page.route(
+      new RegExp(`/api/datasets/${name}/versions/v1/export$`),
+      successThenFailureThenSuccess(
+        { name, version: 'v1', output: '/tmp/e2e-ds-first' },
+        { name, version: 'v1', output: '/tmp/e2e-ds-retry' },
+      ),
+    )
+    await page.goto('/n/datasets')
+    await page.locator('.nb-ds-item', { hasText: name }).click()
+    const exportButton = page
+      .getByRole('row').filter({ has: page.getByRole('cell', { name: 'v1', exact: true }) })
+      .getByRole('button', { name: 'Export', exact: true })
+    const inline = page.locator('.nb-page').getByRole('alert')
+
+    await exportButton.click()
+    await expect(page.getByTestId('toast').filter({ hasText: 'Exported to /tmp/e2e-ds-first' })).toHaveCount(1)
+
+    await exportButton.click()
+    await expectFailureShownOnce(
+      page, inline,
+      `Export of ${name}@v1 failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`,
+      `Export: ${EXPORT_COLUMN_FAILURES_MESSAGE}`,
+    )
+
+    await exportButton.click()
+    await expect(page.getByTestId('toast').filter({ hasText: 'Exported to /tmp/e2e-ds-retry' })).toHaveCount(1)
+    await expect(inline).toHaveCount(0)
   })
 })

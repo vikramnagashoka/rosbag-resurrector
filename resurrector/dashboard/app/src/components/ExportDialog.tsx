@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
 import { InstallBanner, useCapabilities } from './InstallBanner'
+import ExportFailure, { CLASSIC_EXPORT_FAILURE_STYLE } from './ExportFailure'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 import {
   LEROBOT_DEFAULT_FPS,
@@ -129,8 +130,8 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           // even when manual is fine — user-supplied values still win.
           preset: selectedPreset || undefined,
         }),
-      // Kept in the dialog too: a failed-columns error lists each column
-      // and the fix, more than an 8-second toast can show.
+      // Kept in the dialog too (ExportFailure): a failed-columns error
+      // lists each column and what to do.
       { errorPrefix: 'Export failed', onError: setError },
     )
     if (r) {
@@ -375,23 +376,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
         )}
 
         {error && (
-          <div
-            role="alert"
-            style={{
-              background: 'rgba(248,81,73,0.1)',
-              border: '1px solid #f85149',
-              borderRadius: 6,
-              padding: '8px 12px',
-              color: '#ffa198',
-              fontSize: 13,
-              marginBottom: 16,
-              // The message puts each failed column on its own line.
-              whiteSpace: 'pre-wrap',
-              overflowWrap: 'anywhere',
-            }}
-          >
-            Export failed: {error}
-          </div>
+          <ExportFailure message={`Export failed: ${error}`} style={CLASSIC_EXPORT_FAILURE_STYLE} />
         )}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
