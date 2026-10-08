@@ -8,6 +8,7 @@ Covers:
 - Per-bag offset staggers start times
 - Pause / resume keeps offsets served exactly once per session
 - Offset bookkeeping across pause / set_speed / stop / seek, on state alone
+- Offset waits sleep until their recorded deadline; repeated play() keeps one wait
 - Concurrent pause() + play() leave one coherent session
 """
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -80,6 +82,10 @@ _FLOAT_EPS = 1e-6
 # An offset no state-based test can see fire: even at the 20x speed cap it
 # is a 3-minute wait, against at most a 0.05 s sleep inside those tests.
 _FAR_OFFSET_SEC = 3600.0
+
+# A deliberate event-loop stall (a blocking time.sleep) standing in for a
+# starved runner. Only a lower bound matters: the stall lasts at least this.
+_STALL_SEC = 0.05
 
 
 async def _wait_until(
@@ -491,11 +497,13 @@ class TestPauseResume:
 class TestOffsetBookkeeping:
     """Offsets are bag-time seconds, waited out at ``offset / speed`` wall s.
 
-    Every test here brackets a control call between two ``loop.time()``
-    reads and checks the recorded remainder / deadline against bounds that
-    hold however long the runner stalls. Offsets are ``_FAR_OFFSET_SEC``
-    (except the one test that waits for a rescheduled offset to fire), so
-    no wait can fire mid-test.
+    Tests here check the recorded remainder / deadline against bounds
+    from ``loop.time()`` reads taken around a control call, or check which
+    wait task is running. Either holds however long the runner stalls.
+    The wait sleeps until the deadline, so checking the deadline checks
+    when the bag starts. Offsets are ``_FAR_OFFSET_SEC`` (except the one
+    test that waits for a rescheduled offset to fire), so no wait can fire
+    mid-test.
     """
 
     @pytest.mark.asyncio
@@ -701,6 +709,147 @@ class TestOffsetBookkeeping:
                 f"deadline {pending.deadline - t0:.6f}s after play(); expected "
                 f"{wait}s ({_FAR_OFFSET_SEC} bag-s at the engines' {engine_speed}x)"
             )
+        finally:
+            await mp.stop()
+
+    @pytest.mark.asyncio
+    async def test_offset_wait_sleeps_until_the_deadline(self, bag_a, bag_b, monkeypatch):
+        """b's wait sleeps until ``pending.deadline``, however long the loop
+        stalls before the wait begins.
+
+        Would catch: the wait sleeping ``offset / speed`` from its own first
+        step instead of from when it was scheduled, so a loop stall between
+        play() and that step started bag b late by the stall; and any wake
+        time not read off the deadline the tests above check (twice the
+        wait, ten times it, a second past it).
+
+        The sleep request is recorded, not timed: the wait reads the clock
+        after the stall and before the request is recorded, so the bounds
+        hold however starved the runner is.
+        """
+        speed = 2.0
+        loop = asyncio.get_running_loop()
+        real_sleep = asyncio.sleep
+        requests: list[tuple[asyncio.Task | None, float, float]] = []
+
+        async def recording_sleep(delay, *args, **kwargs):
+            requests.append((asyncio.current_task(), delay, loop.time()))
+            return await real_sleep(delay, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+        mp = _two_bags(bag_a, bag_b, _FAR_OFFSET_SEC, speed=speed)
+        await mp.play()
+        try:
+            pending = mp._pending[1]
+            wait_task = pending.task
+
+            def b_requests() -> list[tuple[float, float]]:
+                return [(d, t) for owner, d, t in requests if owner is wait_task]
+
+            # play() doesn't yield after scheduling b's wait, so the wait
+            # hasn't taken its first step yet. Stall the loop before it does.
+            assert b_requests() == []
+            time.sleep(_STALL_SEC)
+            t_stalled = loop.time()
+            await _wait_until(lambda: bool(b_requests()), "bag b's offset wait never slept")
+
+            requested, t_requested = b_requests()[0]
+            assert (
+                pending.deadline - t_requested - _FLOAT_EPS
+                <= requested
+                <= pending.deadline - t_stalled + _FLOAT_EPS
+            ), (
+                f"bag b's wait asked to sleep {requested:.6f}s; its deadline was "
+                f"{pending.deadline - t_requested:.6f}-"
+                f"{pending.deadline - t_stalled:.6f}s away when it began, "
+                f"after a {_STALL_SEC}s stall"
+            )
+            assert mp._engines[1].state == PlaybackState.STOPPED
+        finally:
+            await mp.stop()
+
+    @pytest.mark.asyncio
+    async def test_play_after_pause_with_every_bag_inside_its_offset_resumes_the_waits(
+        self, bag_a, bag_b,
+    ):
+        """With every bag still inside its offset, pause() -> play() resumes
+        each wait from its remainder.
+
+        Would catch: play() treating the session as fresh because every
+        engine is STOPPED, ignoring the offsets still pending, so each
+        pause() -> play() restarted every bag's full offset (and a play()
+        during the waits orphaned the running ones).
+        """
+        mp = MultiBagPlayback(
+            configs=[
+                BagPlaybackConfig(bag_path=bag_a, bag_id="a", offset_sec=_FAR_OFFSET_SEC),
+                BagPlaybackConfig(bag_path=bag_b, bag_id="b", offset_sec=_FAR_OFFSET_SEC),
+            ],
+            loop=True,
+        )
+        await mp.play()
+        try:
+            # Serve a slice of both offsets, so a restarted full offset can't
+            # pass for the held remainder.
+            await asyncio.sleep(0.05)
+            await mp.pause()
+            held = dict(mp._pending)
+            remaining = {i: p.remaining_sec for i, p in held.items()}
+            assert sorted(held) == [0, 1]
+            assert all(p.task is None for p in held.values())
+            assert all(r < _FAR_OFFSET_SEC for r in remaining.values()), remaining
+
+            await mp.play()
+            assert sorted(mp._pending) == [0, 1]
+            for i, p in mp._pending.items():
+                assert p is held[i] and p.remaining_sec == remaining[i], (
+                    f"bag {i}: play() after pause() set the offset left to "
+                    f"{p.remaining_sec!r} bag-s; pause() held {remaining[i]!r}"
+                )
+                assert p.task is not None and not p.task.done(), (
+                    f"bag {i}: offset wait not running after play()"
+                )
+            assert [e.state for e in mp._engines] == [PlaybackState.STOPPED] * 2
+        finally:
+            await mp.stop()
+
+    @pytest.mark.asyncio
+    async def test_repeated_play_inside_an_offset_keeps_one_wait(self, bag_a, bag_b):
+        """A second play() while bag b waits out its offset leaves that wait
+        alone, so the next pause() holds the only one.
+
+        Would catch: play() scheduling a new wait over a running one and
+        orphaning the first; pause() then held only the new wait, and the
+        orphan went on to start bag b in the middle of the pause.
+        """
+        def running_waits() -> set[asyncio.Task]:
+            return {
+                t for t in asyncio.all_tasks()
+                if getattr(t.get_coro(), "__qualname__", None)
+                == "MultiBagPlayback._delayed_play"
+            }
+
+        mp = _two_bags(bag_a, bag_b, _FAR_OFFSET_SEC, speed=1.0)
+        await mp.play()
+        try:
+            pending = mp._pending[1]
+            first_wait, deadline = pending.task, pending.deadline
+            assert running_waits() == {first_wait}
+
+            await mp.play()
+            assert mp._pending[1] is pending
+            assert pending.task is first_wait and pending.deadline == deadline, (
+                "a second play() replaced bag b's running offset wait"
+            )
+            assert running_waits() == {first_wait}
+
+            await mp.pause()
+            assert pending.task is None
+            assert first_wait.cancelled(), "bag b's first offset wait survived pause()"
+            assert running_waits() == set(), "an offset wait is still running after pause()"
+            assert [e.state for e in mp._engines] == [
+                PlaybackState.PAUSED, PlaybackState.STOPPED,
+            ]
         finally:
             await mp.stop()
 

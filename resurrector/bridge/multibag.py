@@ -76,6 +76,8 @@ class _PendingStart:
             scheduled; updated whenever a running delay is cancelled.
         task: The running delay, or None while pause() holds the bag.
         deadline: ``loop.time()`` at which ``task`` starts the engine.
+            ``task`` sleeps until this time rather than for a fixed delay,
+            so it is the one record of when the bag starts.
         speed: Speed ``task`` was scheduled at, so the unserved wall-clock
             wait can be converted back to bag-time.
     """
@@ -355,11 +357,10 @@ class MultiBagPlayback:
         # The engine's speed, not self._speed: the engine clamps it, and the
         # offset must elapse at the rate the bags actually play.
         pending.speed = engine.speed
-        delay = pending.remaining_sec / pending.speed
-        pending.deadline = asyncio.get_running_loop().time() + delay
-        pending.task = asyncio.create_task(
-            self._delayed_play(index, engine, pending, delay)
+        pending.deadline = (
+            asyncio.get_running_loop().time() + pending.remaining_sec / pending.speed
         )
+        pending.task = asyncio.create_task(self._delayed_play(index, engine, pending))
 
     @staticmethod
     def _hold_start(pending: _PendingStart) -> asyncio.Task | None:
@@ -378,15 +379,18 @@ class MultiBagPlayback:
         return task
 
     async def _delayed_play(
-        self, index: int, engine: PlaybackEngine, pending: _PendingStart, delay_sec: float,
+        self, index: int, engine: PlaybackEngine, pending: _PendingStart,
     ) -> None:
-        """Sleep out a bag's offset, then start its engine.
+        """Sleep until ``pending.deadline``, then start the bag's engine.
 
-        pause(), set_speed(), stop() and seek() cancel this task. pause()
-        keeps ``pending`` so the next play() reschedules what's left of the
-        offset; set_speed() reschedules it at once.
+        The sleep is measured to the deadline from when it begins, so a loop
+        stall between scheduling and this task's first step doesn't push the
+        start back. pause(), set_speed(), stop() and seek() cancel this task.
+        pause() keeps ``pending`` so the next play() reschedules what's left
+        of the offset; set_speed() reschedules it at once.
         """
-        await asyncio.sleep(delay_sec)
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(max(0.0, pending.deadline - loop.time()))
         if self._pending.get(index) is pending:
             del self._pending[index]
         if not self._stopped:
