@@ -22,14 +22,17 @@ Our job is the mapping from a bag to LeRobot frames:
   ``observation.images.<topic>`` = one video stream per image topic.
 
 Memory: the resampler streams ``iter_chunks()`` and holds one chunk plus the
-grid-shaped output; images stream one frame at a time (LeRobot spills frames
-to disk before encoding). The output itself is grid-sized by definition.
+grid-shaped output; images stream one frame at a time (LeRobot spills each
+frame to a PNG, then encodes the episode's PNGs to MP4 or embeds them in the
+data parquet and deletes them; the emptied spill directories are removed
+after ``finalize()``). The output itself is grid-sized by definition.
 """
 
 from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -48,6 +51,9 @@ INSTALL_HINT = (
     "LeRobot export needs the [lerobot] extra (Python 3.12+): "
     "pip install 'rosbag-resurrector[lerobot]'"
 )
+# LeRobot's own floor; pyproject's [lerobot] marker installs nothing below
+# it (tests/test_rlds_capability.py checks the two agree).
+LEROBOT_MIN_PYTHON = (3, 12)
 
 DEFAULT_FPS = 30
 
@@ -60,13 +66,27 @@ _NUMERIC = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
             pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Boolean)
 
 
-def lerobot_available() -> bool:
-    """True when LeRobot's dataset writer is importable."""
+def import_lerobot_dataset():
+    """Import and return LeRobot's ``LeRobotDataset`` writer class.
+
+    Pulls in torch, so it costs seconds the first time. Raises
+    ``ImportError(INSTALL_HINT)`` chained to the real failure, which may
+    be a missing package or lerobot's own ``require_package`` check.
+    """
     try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset  # noqa: F401
-        return True
-    except Exception:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except Exception as e:
+        raise ImportError(INSTALL_HINT) from e
+    return LeRobotDataset
+
+
+def lerobot_available() -> bool:
+    """True when LeRobot's dataset writer is importable (imports it)."""
+    try:
+        import_lerobot_dataset()
+    except ImportError:
         return False
+    return True
 
 
 @dataclass
@@ -335,6 +355,28 @@ def _features(ep: _Episode, cam_shapes: dict[str, tuple[int, int, int]], use_vid
     return feats
 
 
+def _remove_empty_image_dirs(root: Path) -> None:
+    """Remove the empty ``images/`` spill directories LeRobot leaves behind.
+
+    LeRobot (0.6.x) writes each camera frame as a PNG under
+    ``images/<camera>/episode-NNNNNN/``. In ``save_episode()`` it then either
+    encodes those PNGs to MP4 (video mode) or embeds their bytes into
+    ``data/*.parquet`` (image mode, ``use_videos=False``), and deletes each
+    ``episode-NNNNNN`` directory. Either way ``images/<camera>/`` and
+    ``images/`` stay behind, empty. Only empty directories are removed
+    (``os.rmdir`` refuses anything else), so if a LeRobot version ever keeps
+    frames on disk under ``images/``, they stay.
+    """
+    images = root / "images"
+    if not images.is_dir():
+        return
+    for dirpath, _dirs, _files in os.walk(images, topdown=False):
+        try:
+            os.rmdir(dirpath)
+        except OSError:
+            pass  # not empty
+
+
 def _prepare_root(root: Path) -> None:
     """LeRobot's create() requires a non-existent root. Allow an empty dir."""
     if root.exists():
@@ -380,10 +422,7 @@ def export_lerobot(
         FileExistsError: ``output_dir`` exists and is non-empty.
         ValueError: No overlapping data, or episodes disagree on features.
     """
-    try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    except Exception as e:  # ImportError, or lerobot's own require_package
-        raise ImportError(INSTALL_HINT) from e
+    LeRobotDataset = import_lerobot_dataset()
 
     if not bags:
         raise ValueError("export_lerobot needs at least one bag")
@@ -450,6 +489,7 @@ def export_lerobot(
         shutil.rmtree(root, ignore_errors=True)
         raise
     dataset.finalize()
+    _remove_empty_image_dirs(root)
 
     logger.info("Wrote LeRobot dataset: %d episode(s), %d frames @ %d fps -> %s",
                 len(bags), total_frames, fps, root)

@@ -201,7 +201,7 @@ pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search 
 pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
 pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
 pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
-pip install 'rosbag-resurrector[all-exports]'   # Zarr + tensorflow-datasets (RLDS also needs: pip install tensorflow)
+pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13, 3.10-3.12 on Intel macOS)
 pip install 'rosbag-resurrector[lerobot]'       # LeRobot v3 export (Python 3.12+, pulls torch)
 pip install 'rosbag-resurrector[ros1]'          # ROS 1 .bag support via rosbags
 ```
@@ -210,7 +210,7 @@ Run `resurrector doctor` any time to see which extras are active.
 
 ## Try every feature in 30 seconds
 
-The repo ships with **17 standalone exploration scripts** under [examples/](examples/) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
+The repo ships with **25 standalone exploration scripts** under [examples/](https://github.com/vikramnagashoka/rosbag-resurrector/tree/main/examples) — one per major feature. They use a synthetic sample bag (auto-generated on first run) so you don't need your own data:
 
 ```bash
 python examples/01_bag_frame_basics.py        # the pandas-like API
@@ -224,15 +224,15 @@ python examples/08_datasets_versioning.py     # versioned dataset collections
 python examples/09_plotjuggler_bridge.py      # WebSocket bridge for live viz
 ```
 
-Plus the v0.3.1 power features (`11_density_ribbon.py` through `18_polars_lazy_filter.py`) — bookmarks, math/transform editor, brush-to-trim export, cross-bag overlay, "Open in Jupyter", lazy Polars filter pushdown.
+Plus the v0.3.1 power features (`11_density_ribbon.py` through `18_polars_lazy_filter.py`) — bookmarks, math/transform editor, brush-to-trim export, cross-bag overlay, "Open in Jupyter", lazy Polars filter pushdown. Then `19_export_presets_and_splits.py` through `26_bag_qc_fleet.py` cover export presets and splits, multi-bag playback, recording while streaming, bridge events and filters, TF + point clouds, custom message decoders, bag concatenation, and fleet QC.
 
 Each script:
-- Runs in **under 10 seconds** end-to-end
+- Finishes in seconds: most in under 2, `01` in about 10 on first run (it generates the demo bag), `09` in about 11 (it streams for 10). `15` runs the dashboard until Ctrl+C.
 - Auto-generates the demo bag on first run
 - Auto-skips with install instructions when an optional extra (CLIP, OpenCV, etc.) isn't installed
 - Has a one-line "what this is and why" header so you can decide whether to keep reading
 
-Full index in [examples/README.md](examples/README.md). Running them in sequence also serves as a smoke-test suite — if all 17 pass on a fresh install, the toolkit is healthy.
+Full index in [examples/README.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/examples/README.md). Running them in sequence also serves as a smoke test. On a fresh install with no extras, all 25 exit 0: `04`, `05` and `07` print what to install and skip the parts that need `[vision-lite]`, `[lerobot]`, tensorflow (RLDS) or a CLIP backend, and `15_dashboard_walkthrough.py` keeps the dashboard running until you press Ctrl+C.
 
 ## Features
 
@@ -420,6 +420,8 @@ synced = bf.sync(["/imu/data", "/joint_states"], method="interpolate")
 synced = bf.sync(["/imu/data", "/camera/rgb"], method="sample_and_hold")
 ```
 
+The anchor topic's columns keep their dtypes. Every other topic's integer and float columns come back as Float64, with NaN where a row has no match; booleans, strings and lists keep their dtype, null where unmatched (`interpolate` makes booleans Float64 too). Topics over 1 M messages go through the streaming sync engine; where it differs from the eager one (mostly `interpolate` at a topic's edges) is listed in the [`sync.py`](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/resurrector/core/sync.py) module docstring. For a sync too big to hold, `resurrector.core.sync.iter_synchronize` yields the same rows a chunk at a time.
+
 ### Reproducible Datasets
 
 Create named, versioned dataset collections with full provenance tracking — the bridge between raw bags and ML training pipelines:
@@ -493,7 +495,7 @@ bf.export(topics=["/imu/data", "/joint_states"],
           downsample_hz=10)
 ```
 
-Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Unsynced exports to Parquet, HDF5, CSV, Zarr, and RLDS are chunk-streamed (memory bounded by `chunk_size`, independent of topic size); with `--sync` (and the `rlds` / `training-tabular` / `multimodal` presets) the synced table is built in memory first. NumPy `.npz` accumulates per-topic and is hard-capped at 1 M rows; for very large topics, prefer Parquet. LeRobot streams its input but holds one episode's frame grid (duration × fps × numeric fields) in memory, because LeRobot's own writer buffers an episode before saving it; camera frames are spilled to disk.
+Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Exports to Parquet, HDF5, CSV, Zarr, and RLDS are chunk-streamed (memory bounded by `chunk_size`, independent of topic size), with or without `--sync`: the synced table (also used by the `rlds` / `training-tabular` / `multimodal` presets) is written a chunk at a time. As in `bf.sync()`, topics under 1 M messages go through the eager sync engine, which loads them first; bigger ones stream. NumPy `.npz` accumulates per-topic and is hard-capped at 1 M rows; for very large topics, prefer Parquet. LeRobot streams its input but holds one episode's frame grid (duration × fps × numeric fields) in memory, because LeRobot's own writer buffers an episode before saving it; camera frames are spilled to disk.
 
 | Format | Best For | Streaming |
 |--------|----------|-----------|
@@ -505,7 +507,9 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | NumPy (.npz) | Jupyter notebook workflows | Bounded by total topic size — hard-capped at 1 M rows |
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
-LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). RLDS needs `tensorflow`: `pip install 'rosbag-resurrector[all-exports]'`.
+HDF5, Zarr and NumPy have no missing value for integers or booleans, so those columns are written as float64 with NaN marking a missing value (booleans as 1.0 / 0.0); `timestamp_ns` stays int64. Integers beyond ±2^53 lose precision there (a warning says so); Parquet writes each column's dtype unchanged, nulls included.
+
+LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). Zarr and RLDS need `pip install 'rosbag-resurrector[all-exports]'`. RLDS writes TFRecords with tensorflow, which the extra installs only where tensorflow publishes stable wheels: Python 3.10-3.13 on Linux (x86_64, aarch64), Apple-silicon macOS, and Windows x64, and Python 3.10-3.12 on Intel macOS, where it installs tensorflow 2.16 (the last Intel-macOS release, which needs numpy below 2). Elsewhere (Python 3.14, for one) the extra installs Zarr only, and `resurrector doctor` says why RLDS is unavailable.
 
 **How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips test exports through `LeRobotDataset` and checks frame values against the source bag.
 
@@ -679,7 +683,7 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 
 ## Architecture
 
-**Deep-dive: [ARCHITECTURE.md](ARCHITECTURE.md)** — the system shape, the
+**Deep-dive: [ARCHITECTURE.md](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/ARCHITECTURE.md)** — the system shape, the
 load-bearing design decisions and their tradeoffs, and what I'd do differently.
 The short version:
 
@@ -703,11 +707,11 @@ resurrector/
 
 > **Memory is bounded by the configured chunk size, not by bag size, topic size, or export size.**
 
-That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and unsynced exports to the chunk-streaming formats (Parquet, HDF5, CSV, Zarr, RLDS; `--sync` builds the synced table in memory). LeRobot export streams its input but holds one episode's frame grid, because LeRobot's writer buffers an episode before saving it.
+That rule applies to: dashboard plotting, sync, health checks, density, cross-bag overlay, `iter_chunks()`, `materialize_ipc_cache()`, and exports to the chunk-streaming formats (Parquet, HDF5, CSV, Zarr, RLDS), synced or not. LeRobot export streams its input but holds one episode's frame grid, because LeRobot's writer buffers an episode before saving it.
 
 Two formats are explicit exceptions: **NumPy `.npz`** is bounded by total converted-array size and hard-capped at 1 M rows (use Parquet for larger topics — clear `LargeTopicError` is raised). The eager **`bf["/topic"].to_polars()`** path materializes the full topic and refuses topics > 1 M messages unless the user passes `force=True`.
 
-The contract is verified by [tests/test_streaming_oom.py](tests/test_streaming_oom.py), which builds a 10 M-message synthetic bag and asserts peak RSS deltas across every workflow. Run it locally with `pytest -m slow`.
+The contract is verified by [tests/test_streaming_oom.py](https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/tests/test_streaming_oom.py), which builds a 10 M-message synthetic bag and asserts peak RSS deltas across every workflow. Run it locally with `pytest -m slow`.
 
 ### Tuning the bounds
 
@@ -716,7 +720,7 @@ Every knob below has a sensible default. Override per-call when you need to — 
 | Knob | Default | Where it applies | When to change it |
 |---|---|---|---|
 | `chunk_size=` | `50_000` | `iter_chunks()`, `materialize_ipc_cache()`, `stream_bucketed_minmax()`, all chunk-streaming exporters | Lower for tighter RSS budgets on small machines; raise to reduce per-chunk overhead on fast NVMe |
-| `max_buffer_messages=` | `100_000` | `bf.sync(engine="streaming")` per-topic lookahead buffer | Raise if a genuine rate mismatch trips `SyncBufferOverflowError`; lower to fail faster on misconfigured topics |
+| `max_buffer_messages=` | `100_000` | `bf.sync(engine="streaming")` per-topic lookahead buffer | Raise if a genuine rate mismatch trips `SyncBufferExceededError`; lower to fail faster on misconfigured topics |
 | `max_lateness_ms=` | `0.0` | `bf.sync(out_of_order="reorder")` watermark window | Set > 0 to admit late samples within the window when reordering. Ignored unless `out_of_order="reorder"` |
 | `tolerance_ms=` | required arg | `bf.sync()` match window | Per-call — depends on your sensor rates |
 | `engine=` | `"auto"` | `bf.sync()` engine selector | `"auto"` picks eager when every topic is < 1 M messages, streaming otherwise. Force one explicitly to override |

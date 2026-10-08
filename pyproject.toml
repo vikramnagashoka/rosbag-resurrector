@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "rosbag-resurrector"
 version = "0.8.4"
 description = "Stop letting your rosbag data rot. A pandas-like analysis tool for robotics bag files — no ROS install required."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     {name = "RosBag Resurrector Contributors"},
@@ -20,7 +21,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -40,7 +40,10 @@ dependencies = [
     "pandas>=2.0.0",
     "numpy>=1.24.0",
     "duckdb>=0.10.0",
-    "typer[all]>=0.9.0",
+    # No [all] extra: typer removed it in 0.12.0, when rich + shellingham
+    # became default dependencies (0.11.1 is the last release that has it).
+    # 0.16.0 is the first release whose --help works with click 8.2+.
+    "typer>=0.16.0",
     "rich>=13.0.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.27.0",
@@ -58,7 +61,23 @@ Changelog = "https://github.com/vikramnagashoka/rosbag-resurrector/blob/main/CHA
 
 [project.optional-dependencies]
 ros1 = ["rosbags>=0.9.0"]
-all-exports = ["zarr>=2.16.0", "tensorflow-datasets>=4.9.0"]
+# RLDS writes TFRecords with tensorflow, so the extra installs it wherever
+# tensorflow publishes a stable wheel: 2.18+ (2.21 ships cp310-cp313) on
+# Linux x86_64/aarch64, Apple-silicon macOS and Windows x64, and 2.16 on
+# Intel macOS (cp310-cp312; its last Intel release, which pins numpy<2).
+# Elsewhere (Python 3.14, Linux ppc64le, Windows ARM64, ...) the markers
+# skip tensorflow, the extra installs zarr only, and RLDS reports why it's
+# unavailable. That keeps the extra resolvable on glibc Linux, macOS and
+# Windows; markers can't tell musl from glibc, so on musl Linux (Alpine)
+# pip finds no tensorflow wheel and the install fails.
+# Keep these markers in sync with TENSORFLOW_PLATFORMS in
+# resurrector/core/export.py (a test checks). The writer needs tensorflow
+# only (tf.io / tf.train), so tensorflow-datasets stays out of the extra.
+all-exports = [
+    "zarr>=2.16.0",
+    "tensorflow>=2.18; python_version < '3.14' and ((platform_system == 'Linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (platform_system == 'Darwin' and platform_machine == 'arm64') or (platform_system == 'Windows' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')))",
+    "tensorflow>=2.16,<2.17; python_version < '3.13' and platform_system == 'Darwin' and platform_machine == 'x86_64'",
+]
 vision-lite = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0"]
 vision = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0", "sentence-transformers>=2.2.0"]
 vision-openai = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0", "openai>=1.0.0"]

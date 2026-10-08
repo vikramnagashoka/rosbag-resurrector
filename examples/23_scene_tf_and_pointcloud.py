@@ -11,9 +11,8 @@ Demonstrates the building blocks behind the dashboard's new Scene tab:
     with decimation and NaN filtering
 
 The default sample bag has TF + PointCloud2 schemas registered but
-no actual messages — the test fixture generator in
-``tests/fixtures/scene_bag.py`` writes a tiny scene-rich bag, which
-this example reuses.
+no actual messages, so this example writes a tiny scene-rich bag with
+``resurrector.demo.scene_bag.generate_scene_bag()``.
 
 Run:
     python examples/23_scene_tf_and_pointcloud.py
@@ -25,15 +24,9 @@ decoded + decimated to 25 points.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
 from _common import ensure_output_dir, header, section
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
 
 from resurrector.core.scene import (
     TFTree,
@@ -41,6 +34,7 @@ from resurrector.core.scene import (
     parse_pointcloud2_meta,
     parse_tf_message,
 )
+from resurrector.demo.scene_bag import generate_scene_bag
 from resurrector.ingest.parser import parse_bag
 
 
@@ -51,7 +45,6 @@ def main() -> None:
     scene_bag = out / "v05_scene_demo.mcap"
     if not scene_bag.exists():
         print(f"  Generating scene bag at {scene_bag}...")
-        from tests.fixtures.scene_bag import generate_scene_bag
         generate_scene_bag(scene_bag)
         print(f"  [OK] Wrote {scene_bag.stat().st_size // 1024} KB scene bag\n")
     else:

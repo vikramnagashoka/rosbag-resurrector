@@ -959,7 +959,7 @@
   box-shadow: 0 16px 44px rgba(60, 50, 30, 0.2);
 }
 .nb-modal-field { display: block; margin: 12px 0; }
-.nb-modal-field > span { font-size: 12.5px; color: var(--nb-text-faint); display: block; margin-bottom: 5px; }
+.nb-modal-field > span, .nb-modal-field > label { font-size: 12.5px; color: var(--nb-text-faint); display: block; margin-bottom: 5px; }
 .nb-modal-field input, .nb-modal-field textarea {
   width: 100%; box-sizing: border-box;
   background: var(--nb-field-bg); color: var(--nb-text);
@@ -991,6 +991,8 @@
 .nb-export { width: 560px; max-height: 82vh; overflow-y: auto; }
 .nb-export-row { display: flex; gap: 12px; }
 .nb-export-hint { font-size: 11.5px; color: var(--nb-text-faintest); margin-top: 6px; }
+.nb-export-hint.is-error { color: var(--nb-health-bad); }
+.nb-modal-field input[aria-invalid="true"] { border-color: var(--nb-health-bad); }
 .nb-export-topics {
   max-height: 168px; overflow-y: auto;
   border: 1px solid var(--nb-border-control); border-radius: 8px;
@@ -1007,6 +1009,7 @@
   display: flex; align-items: center; gap: 8px;
   font-size: 12.5px; color: var(--nb-text-2); margin: 12px 0 4px; cursor: pointer;
 }
+.nb-export-sync.is-disabled { color: var(--nb-text-faint); cursor: not-allowed; }
 .nb-export-result {
   background: var(--nb-health-good-bg); border: 1px solid var(--nb-health-good);
   color: var(--nb-health-good); border-radius: 7px; padding: 8px 12px;

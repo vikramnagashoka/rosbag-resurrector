@@ -74,7 +74,7 @@ def main() -> None:
         if len(files) > 8:
             print(f"    ... and {len(files) - 8} more")
     except (ImportError, Exception) as e:
-        print(f"  [INFO] RLDS export needs the optional [rlds] extra: {e}")
+        print(f"  [INFO] RLDS export skipped: {e}")
 
     print(
         "\n  ✓ Synced exports collapse multi-topic streams into one row per\n"

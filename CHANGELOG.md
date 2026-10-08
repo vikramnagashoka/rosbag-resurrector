@@ -8,6 +8,135 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+### What's new
+
+The follow-ups from the v0.8.4 release audit. Synced exports now stream
+instead of building the whole synced table in memory, `[all-exports]`
+actually enables RLDS, a dashboard-launched bridge no longer freezes, and
+multi-bag playback keeps its start offsets straight across pause, resume,
+speed changes and seek.
+
+### Fixed
+
+**Exports**
+- **Synced exports stream.** `--sync` and the `rlds` / `training-tabular` /
+  `multimodal` presets used to build the whole synced table with
+  `bf.sync()` and write it as one chunk; they now write a chunk at a time.
+  On a 100K-row synced export through the streaming engine, peak RSS fell
+  from about 540 MB to under 100 MB and no longer grows with the bag (a
+  memory-regression test covers Parquet, HDF5 and Zarr). Topics under 1 M
+  messages still go through the eager engine, which loads them first.
+- Synced + downsampled exports pick exactly the rows
+  `downsample_temporal(bf.sync(...))` would; the grid carries across chunks.
+- RLDS `is_last` now lands on the last step actually written. It was keyed
+  to the topic's message count, so downsampled and time-sliced exports never
+  marked a last step.
+- HDF5, Zarr and NumPy column dtypes no longer depend on which chunk holds
+  the first missing value. An integer null after the first chunk was stored
+  as 0 (HDF5, Zarr); a Boolean null after the first chunk failed the export
+  or produced a pickled `.npz` array `np.load` refuses; synced Booleans with
+  unmatched rows came out as strings (HDF5) or were dropped (Zarr).
+- **RLDS works after `pip install 'rosbag-resurrector[all-exports]'`.** The
+  extra installed zarr and tensorflow-datasets but not tensorflow, while the
+  capability, the dashboard preset and `doctor` all reported RLDS available.
+- Zarr, RLDS and LeRobot exports check their dependency before writing
+  anything: a missing extra raises `ImportError` naming it, and no output
+  directory is created — for `bf.export`, split exports and dataset-version
+  exports.
+
+**Dashboard**
+- Export dialogs no longer say "Exported to undefined"; the success message
+  names the directory written.
+- For LeRobot, the dialogs disable the ignored "Synchronize topics" checkbox
+  (with a note), label the rate field "Frame rate (fps)", and block rates
+  that round below 1 fps, which used to be sent as 0 and silently became 30.
+- Presets are gated per format (`rlds` needs tensorflow, `multimodal` needs
+  zarr), and `/api/export-presets` returns `unavailable_reason`. Where the
+  extra can't install tensorflow (Python 3.14, Intel macOS on 3.13, Windows
+  ARM64) the dialogs explain why instead of offering a pip command that
+  can't help.
+
+**Bridge**
+- A bridge started from the dashboard no longer freezes after about 9
+  minutes: its output went to a pipe nobody read, and once uvicorn's access
+  log filled it the bridge's event loop blocked. stdout is now discarded and
+  stderr goes to `~/.resurrector/logs/bridge-<port>.log`
+  (`RESURRECTOR_BRIDGE_LOG_DIR` overrides; falls back to the temp dir).
+- Startup crashes report the exit code, the exception line and the log
+  path; the "Live mode requires rclpy" error goes to stderr so it's shown.
+- Stop no longer blocks every other dashboard request for up to 5 s, and a
+  bridge that served a WebSocket client now exits on SIGTERM instead of
+  waiting out the grace period and being killed.
+
+**Multi-bag playback**
+- Each bag's start offset is served once per session: resume no longer
+  re-applies offsets (a started bag fell another `offset_sec` behind on
+  every pause/resume), `pause()` holds bags still inside their offset, and
+  `set_speed()` rescales a running offset wait. Offset waits use the
+  engines' clamped speed, and count from a fixed deadline so an event-loop
+  stall can't push a start back.
+- `seek()` now ends the session: every bag stops at the target and the next
+  `play()` applies full offsets from there.
+- `offset_sec` is documented as bag time (it starts after
+  `offset_sec / speed` wall seconds), which is what the code always did.
+
+**LeRobot and publishing**
+- `resurrector publish` reads `dataset_config.json` in the shape `dataset
+  export` writes it, so cards show the real format, bags, topics and
+  description, and QC runs on the source bags instead of always being
+  skipped. Card topics reflect per-bag filters; files are read and written
+  as UTF-8 (Windows descriptions outside cp1252 used to crash publishing).
+- Published LeRobot datasets load with `LeRobotDataset(repo_id)`: the card
+  gives that snippet, and publishing tags the Hub repo with the codebase
+  version LeRobot requires. A bare `export --preset lerobot` directory's card
+  lists episodes, frames, fps and features from `meta/info.json`.
+- Dataset READMEs for LeRobot list frame rate, episodes and the causal grid
+  instead of sync settings LeRobot never applies; quick-start snippets use
+  the absolute export path.
+- LeRobot exports no longer leave empty `images/` directories behind.
+
+**Packaging and examples**
+- No more warning about typer's removed `all` extra; the license is a PEP 639
+  SPDX expression (`License-Expression: MIT`); the `.deb` says MIT instead of
+  "Proprietary"; README links work on the PyPI page.
+- `examples/26_bag_qc_fleet.py` no longer calls a hard-coded dev path, 04
+  degrades cleanly without Pillow, and 23 works without a repo checkout (its
+  scene-bag generator moved to `resurrector.demo.scene_bag`). All 25 examples
+  exit 0 on a fresh install with no extras.
+- `resurrector doctor` reports LeRobot (with its Python floor) and RLDS's
+  tensorflow from the same platform table the install markers use.
+
+### Changed
+
+- **`[all-exports]` installs tensorflow where it ships stable wheels**
+  (Python 3.10-3.13 on Linux x86_64/aarch64, Apple-silicon macOS and Windows
+  x64; tensorflow 2.16 on Intel macOS with Python 3.10-3.12, which needs
+  numpy < 2) and no longer installs tensorflow-datasets. Elsewhere it
+  installs Zarr only, and `doctor`, the export error and the capability
+  description say why. The `all_exports` capability now needs zarr and
+  tensorflow, checked without importing either.
+- **HDF5, Zarr and NumPy exports write integer and Boolean columns as
+  float64** (NaN for missing, Booleans as 1.0 / 0.0), synced or not; floats
+  keep their width, `timestamp_ns` stays int64, and integers beyond ±2^53 are
+  rounded with a warning. These formats have no missing value for integers
+  or Booleans. Parquet and CSV are unchanged.
+- **The streaming sync engine's output now matches the eager engine's
+  dtypes and column order** (`engine="streaming"`, or `"auto"` with a topic
+  over 1 M messages): non-anchor integers become Float64 with NaN where
+  unmatched, anchor columns keep their source dtype, columns come in topic
+  order, and a topic with no match still gets its columns. Dtypes are fixed
+  from each topic's first chunk; a later chunk the output can't hold raises
+  the new `SyncSchemaDriftError` naming the topic, column and both dtypes.
+  The eager engine's unsigned-integer columns now follow the same Float64
+  rule. Remaining differences are listed in the `sync.py` module docstring.
+- New: `resurrector.core.sync.iter_synchronize()` (the chunked form of
+  `bf.sync()`), `resurrector.core.transforms.iter_downsample_temporal()`,
+  and `SyncSchemaDriftError`.
+- Proxied bridge calls return 504 when the bridge doesn't respond and 502
+  when the connection drops, instead of an opaque 500.
+- Dependencies: `typer>=0.16.0` (the first release whose `--help` works with
+  click 8.2+); building from source needs `setuptools>=77.0.3`.
+
 ## [0.8.4] — 2026-10-04
 
 ### What's new

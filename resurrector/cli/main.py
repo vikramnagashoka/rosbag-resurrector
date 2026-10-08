@@ -10,6 +10,8 @@ import typer
 from rich.console import Console
 from rich.markup import escape as rich_escape
 
+from resurrector.core.export import TENSORFLOW_WHERE
+
 app = typer.Typer(
     name="resurrector",
     help="RosBag Resurrector — Stop letting your rosbag data rot.",
@@ -23,6 +25,11 @@ app = typer.Typer(
     rich_markup_mode="markdown",
 )
 console = Console()
+# Fatal errors go to stderr. A bridge launched from the dashboard has its
+# stdout discarded and its stderr written to a log, and the dashboard
+# quotes that log when the bridge dies during startup. soft_wrap keeps a
+# long message on one line, since only the last line gets quoted.
+err_console = Console(stderr=True, soft_wrap=True)
 
 
 def _print_version_and_exit(value: bool) -> None:
@@ -456,7 +463,11 @@ def list_bags(
     index.close()
 
 
-@app.command()
+@app.command(epilog=(
+    "Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds "
+    "need `pip install 'rosbag-resurrector[all-exports]'`. rlds also needs "
+    f"tensorflow, which the extra installs on {TENSORFLOW_WHERE}."
+))
 def export(
     path: Annotated[Optional[Path], typer.Argument(
         help="Path to a bag file (.mcap). Not needed with --list-presets. "
@@ -471,7 +482,8 @@ def export(
     format: Annotated[Optional[str], typer.Option("--format", "-f",
         help="Output format. parquet (default), hdf5, csv, numpy "
              "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
-             "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports]). "
+             "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports], "
+             f"whose tensorflow installs on {TENSORFLOW_WHERE}). "
              "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
     )] = None,
@@ -530,12 +542,14 @@ def export(
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
-    Unsynced exports to Parquet, HDF5, CSV, Zarr, and RLDS are
-    memory-bounded by chunk size, not topic size — open a 100 GB bag without
-    OOMing. With --sync (and the rlds / training-tabular / multimodal
-    presets) the synced table is built in memory first. NumPy `.npz` materializes the full topic and refuses topics over
-    1 M messages. LeRobot streams its input but holds one episode's frame
-    grid (duration x fps x numeric fields) in memory, because LeRobot's own
+    Exports to Parquet, HDF5, CSV, Zarr, and RLDS are memory-bounded by
+    chunk size, not topic size — open a 100 GB bag without OOMing. With
+    --sync (and the rlds / training-tabular / multimodal presets) the
+    synced table is written a chunk at a time too; topics under 1 M
+    messages are loaded by the eager sync engine first. NumPy `.npz`
+    materializes the full topic and refuses topics over 1 M messages.
+    LeRobot streams its input but holds one episode's frame grid
+    (duration x fps x numeric fields) in memory, because LeRobot's own
     writer buffers an episode before saving it; camera frames go to disk.
 
     **Presets** (--preset NAME) bundle format/sync/downsample for common
@@ -553,9 +567,6 @@ def export(
       Preset with override (LeRobot defaults but at 60 Hz):
           resurrector export bag.mcap --preset lerobot --downsample 60 \\
               -o ./lerobot_60hz
-
-    Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds need
-    `pip install 'rosbag-resurrector[all-exports]'`.
     """
     from resurrector.core.export import PRESETS
 
@@ -584,7 +595,9 @@ def export(
                 "\n[dim]Extras required for some presets: "
                 "`pip install 'rosbag-resurrector\\[lerobot]'` (Python 3.12+) "
                 "for lerobot; `pip install 'rosbag-resurrector\\[all-exports]'` "
-                "for multimodal and rlds (rlds also needs `pip install tensorflow`).[/dim]"
+                "for multimodal and rlds (rlds needs tensorflow, which the extra "
+                f"installs on {TENSORFLOW_WHERE}; "
+                "`resurrector doctor` checks this machine).[/dim]"
             )
         raise typer.Exit()
 
@@ -701,7 +714,7 @@ def publish(
       Publish for real:
           resurrector publish ./datasets/pick-place/1.0 --repo-id me/pick-place
     """
-    from resurrector.core.publish import publish_dataset
+    from resurrector.core.publish import publish_dataset, read_dataset_config
 
     if not dataset_dir.is_dir():
         console.print(f"[red]Not a directory: {dataset_dir}[/red]")
@@ -710,22 +723,19 @@ def publish(
     # Optional QC pass over the source bags, if the config records them.
     qc_summary = None
     if qc:
-        import json as _json
-        cfg_path = dataset_dir / "dataset_config.json"
         bag_paths = []
-        if cfg_path.exists():
-            try:
-                cfg = _json.loads(cfg_path.read_text())
-                # bag_refs may be plain path strings (resurrector export) or
-                # {path: ...} dicts (dataset export) — handle both.
-                raw_refs = cfg.get("bag_refs") or []
-                candidates = [
-                    r["path"] if isinstance(r, dict) else r
-                    for r in raw_refs
-                ]
-                bag_paths = [c for c in candidates if c and Path(c).exists()]
-            except Exception:
-                bag_paths = []
+        try:
+            cfg, _ = read_dataset_config(dataset_dir)
+            # bag_refs are {path: ...} dicts (dataset export); plain path
+            # strings are accepted for hand-written configs.
+            raw_refs = cfg.get("bag_refs") or []
+            candidates = [
+                r.get("path") if isinstance(r, dict) else r
+                for r in raw_refs
+            ]
+            bag_paths = [c for c in candidates if c and Path(c).exists()]
+        except Exception:
+            bag_paths = []
         if bag_paths:
             from resurrector.core.qc import run_qc
             report = run_qc(bag_paths)
@@ -1991,7 +2001,7 @@ def bridge_live(
     from resurrector.bridge.live import is_rclpy_available
 
     if not is_rclpy_available():
-        console.print("[red]Live mode requires rclpy (ROS2). Use 'bridge playback' instead.[/red]")
+        err_console.print("[red]Live mode requires rclpy (ROS2). Use 'bridge playback' instead.[/red]")
         raise typer.Exit(1)
 
     import uvicorn
@@ -2061,7 +2071,8 @@ def doctor():
     Two tables: "Core install" (Python version, MCAP parser, DuckDB
     index, Polars, FastAPI — all required and bundled) and "Optional
     extras" (image parsing, video export, CLIP local + OpenAI search,
-    live ROS 2 bridge, watch mode, Zarr export, mcap CLI, ros2 CLI).
+    live ROS 2 bridge, watch mode, Zarr / LeRobot / RLDS export, mcap CLI,
+    ros2 CLI).
     Each row tells you exactly what to install if missing — for example:
 
       pip install 'rosbag-resurrector[vision]'

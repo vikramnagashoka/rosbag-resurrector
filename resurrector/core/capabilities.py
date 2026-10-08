@@ -59,13 +59,31 @@ def _bridge_live_available() -> bool:
 
 
 def _all_exports_available() -> bool:
-    """Available means both zarr AND tensorflow-datasets are importable."""
-    try:
-        import zarr  # noqa: F401
-        import tensorflow_datasets  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Both formats the extra unlocks can run: zarr, and tensorflow for RLDS.
+
+    Presence-only (``find_spec``): importing tensorflow costs seconds and
+    this runs on every capabilities request.
+    """
+    from resurrector.core.export import export_dependency_problem
+    return all(export_dependency_problem(f) is None for f in ("zarr", "rlds"))
+
+
+def _all_exports_description() -> str:
+    """What the extra unlocks, plus why RLDS stays off where pip can't
+    deliver tensorflow (Python 3.14, Intel macOS on 3.13, ...).
+
+    The explanation lives here because the dashboard pastes
+    ``install_command`` into a copy block: it must stay a runnable command,
+    and the extra's pip command still installs Zarr on these platforms.
+    """
+    from resurrector.core import export
+    base = "Zarr and RLDS (TFRecord) export formats"
+    if export.tensorflow_wheels_available() or export.export_dependency_problem("rlds") is None:
+        return base
+    return (
+        f"{base}. On this interpreter the extra installs Zarr only: "
+        f"{export.tensorflow_missing_detail()}. For RLDS, use {export.TENSORFLOW_WHERE}."
+    )
 
 
 def _ros1_convert_available() -> bool:
@@ -92,13 +110,18 @@ def _copilot_available() -> bool:
 
 
 def _lerobot_available() -> bool:
-    """LeRobot export drives LeRobot's own dataset writer (Python 3.12+)."""
-    from resurrector.core.lerobot_export import lerobot_available
-    return lerobot_available()
+    """LeRobot export drives LeRobot's own dataset writer (Python 3.12+).
+
+    Presence-only, like ``_all_exports_available``: importing the writer
+    pulls in torch, and this runs on every capabilities request.
+    """
+    from resurrector.core.export import export_dependency_problem
+    return export_dependency_problem("lerobot") is None
 
 
 def get_capabilities() -> dict[str, Capability]:
     """Return the runtime-detected capability map keyed by name."""
+    from resurrector.core.export import ALL_EXPORTS_INSTALL
     caps = [
         Capability(
             name="vision",
@@ -128,8 +151,8 @@ def get_capabilities() -> dict[str, Capability]:
         Capability(
             name="all_exports",
             available=_all_exports_available(),
-            install_command="pip install 'rosbag-resurrector[all-exports]'",
-            description="Zarr and TensorFlow Datasets (RLDS) export formats",
+            install_command=ALL_EXPORTS_INSTALL,
+            description=_all_exports_description(),
         ),
         Capability(
             name="lerobot",

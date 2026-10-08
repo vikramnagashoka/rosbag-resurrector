@@ -728,6 +728,14 @@ class BagFrame:
 
         Returns:
             A unified Polars DataFrame with columns prefixed by topic name.
+            Non-anchor numeric columns are Float64, NaN where unmatched;
+            the full dtype rules, and where the streaming engine differs
+            from eager, are in the :mod:`resurrector.core.sync` docstring.
+
+        Raises:
+            SyncOutOfOrderError, SyncBufferExceededError,
+                SyncBoundaryError, SyncSchemaDriftError: streaming engine
+                only; see :func:`resurrector.core.sync.synchronize`.
         """
         from resurrector.core.sync import synchronize
         topic_views = {name: self[name] for name in topics}
@@ -759,11 +767,13 @@ class BagFrame:
     ) -> Path:
         """Export bag data to ML-friendly formats — the main bulk-export entry point.
 
-        Streams topic data through the chosen format writer; unsynced
-        exports to Parquet, HDF5, CSV, Zarr, and RLDS are bounded by chunk
-        size, not topic size (``sync=True`` builds the synced table in
-        memory first). NumPy ``.npz`` materializes per-topic and refuses
-        topics over 1 M messages with a clear :class:`LargeTopicError`.
+        Streams topic data through the chosen format writer; exports to
+        Parquet, HDF5, CSV, Zarr, and RLDS are bounded by chunk size, not
+        topic size. ``sync=True`` writes the synced table a chunk at a
+        time too (topics under ``LARGE_TOPIC_THRESHOLD`` go through the
+        eager sync engine, which loads them first). NumPy ``.npz``
+        materializes per-topic and refuses topics over 1 M messages with
+        a clear :class:`LargeTopicError`.
         ``lerobot`` streams its input but holds one episode's frame grid
         (duration x fps x numeric fields) in memory, because LeRobot's own
         writer buffers an episode before saving; camera frames go to disk.
@@ -810,8 +820,10 @@ class BagFrame:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
             ValueError: If ``preset`` is not known, or ``split`` ratios don't
                 sum to ~1.0, or ``split_strategy`` is unknown.
-            ImportError: ``lerobot`` without the ``[lerobot]`` extra
-                (Python 3.12+).
+            ImportError: The format's optional dependency is missing
+                (``[all-exports]`` for zarr / rlds, ``[lerobot]`` on
+                Python 3.12+ for lerobot). Raised before anything is
+                written, split or not.
             FileExistsError: ``lerobot`` into a non-empty directory.
 
         Example::

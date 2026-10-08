@@ -86,7 +86,7 @@ the streaming health checker and sync engine are the hardest code in the repo.
 The compensation is that "works on the demo bag" and "works on the 100GB
 field-test bag" are the same claim.
 
-### 2. Two sync engines, proven equivalent
+### 2. Two sync engines, tested against each other
 
 Time-aligning topics recorded at different rates is the workhorse operation
 behind cross-topic analysis and ML export. There are two implementations
@@ -96,10 +96,13 @@ when topics fit the 1M-message threshold) and a **streaming** engine
 default tolerance 50ms). `engine="auto"` picks per-bag.
 
 Two engines invite drift, so the test suite runs both against the same nine
-edge-case fixture bags and asserts identical output — including the subtle
-cases (tie-breaking prefers the later sample to match `searchsorted`
-semantics; out-of-order handling is tested at the row-iterator level because
-MCAP readers re-sort on read).
+edge-case fixture bags and asserts identical `nearest` and `sample_and_hold`
+output, dtypes included — covering the subtle cases (tie-breaking prefers
+the later sample to match `searchsorted` semantics; out-of-order handling is
+tested at the row-iterator level because MCAP readers re-sort on read). The
+differences that remain (mainly `interpolate` at a topic's edges, and dtypes
+fixed from each topic's first chunk) are listed in `sync.py`'s module
+docstring.
 
 *Tradeoff:* double maintenance. Accepted because each engine wins its regime
 by a wide margin, and the equivalence tests turn "two implementations" from a
@@ -153,7 +156,7 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
 - CI matrix: Python 3.10–3.13 · 8 optional-extra installs (LeRobot
   exports round-tripped through the real library) · wheel-install
   smoke test · frontend build · e2e
-- 16 releases on PyPI; exporters to 7 formats (5 chunk-streamed when unsynced)
+- 16 releases on PyPI; exporters to 7 formats (5 chunk-streamed, synced or not)
 - 5 streaming health dimensions: rate stability, size anomalies, time gaps,
   timestamp ordering, topic completeness
 

@@ -5,13 +5,17 @@
 #   brew install create-dmg
 #
 # Usage:
-#   bash packaging/macos/create_dmg.sh [version]
+#   bash packaging/macos/create_dmg.sh [version]   # default: pyproject.toml's
 
 set -euo pipefail
 
-VERSION="${1:-0.2.0}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+VERSION="${1:-$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT_DIR/pyproject.toml" | head -n 1)}"
+if [ -z "$VERSION" ]; then
+    echo "Error: no version in $ROOT_DIR/pyproject.toml; pass one as the first argument."
+    exit 1
+fi
 DIST_DIR="$ROOT_DIR/dist/macos"
 DMG_NAME="RosBag-Resurrector-v${VERSION}-macos"
 

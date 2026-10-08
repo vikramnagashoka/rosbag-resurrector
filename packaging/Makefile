@@ -14,9 +14,10 @@
 
 .PHONY: all build-base macos ubuntu obfuscate clean
 
-VERSION ?= 0.2.0
 MKFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(MKFILE_DIR)/..)
+# Package version defaults to pyproject.toml's; CI passes VERSION=<tag>.
+VERSION ?= $(shell sed -n 's/^version = "\(.*\)"$$/\1/p' "$(ROOT)/pyproject.toml" | head -n 1)
 DIST := $(ROOT)/dist
 SRC := $(ROOT)/resurrector
 PKG := $(ROOT)/packaging

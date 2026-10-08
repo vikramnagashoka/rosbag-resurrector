@@ -107,7 +107,12 @@ def split_export(
     Raises:
         ValueError: For unknown strategies.
         NotImplementedError: For ``"stratified"``.
+        ImportError: The format's optional dependency is missing (raised
+            before ``output`` is created).
     """
+    from resurrector.core.export import require_export_dependencies
+
+    require_export_dependencies(format)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
 

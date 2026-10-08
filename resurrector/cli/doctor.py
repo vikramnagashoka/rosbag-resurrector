@@ -131,16 +131,33 @@ def _check_spec(name: str, feature: str, fix: str, missing_detail: str = "") -> 
 def _check_lerobot() -> CheckResult:
     """LeRobot needs Python 3.12+; on older interpreters the [lerobot]
     extra installs nothing, so say why instead of a bare 'not installed'."""
+    from resurrector.core.lerobot_export import LEROBOT_MIN_PYTHON
+
     feature = "LeRobot export"
     v = sys.version_info
-    if tuple(v[:2]) < (3, 12):
+    floor = ".".join(map(str, LEROBOT_MIN_PYTHON))
+    if tuple(v[:2]) < LEROBOT_MIN_PYTHON:
         return CheckResult(
             feature, "warn",
-            f"needs Python 3.12+ (this is {v[0]}.{v[1]})",
-            "Use Python 3.12+, then: pip install 'rosbag-resurrector[lerobot]'",
+            f"needs Python {floor}+ (this is {v[0]}.{v[1]})",
+            f"Use Python {floor}+, then: pip install 'rosbag-resurrector[lerobot]'",
             tier="optional",
         )
     return _check_spec("lerobot", feature, "pip install 'rosbag-resurrector[lerobot]'")
+
+
+def _check_rlds() -> CheckResult:
+    """RLDS writes TFRecords with tensorflow, which [all-exports] installs
+    only where tensorflow ships wheels; elsewhere say why instead of
+    pointing at an extra that can't deliver it."""
+    from resurrector.core import export
+    feature = "RLDS export (tensorflow)"
+    if export.export_dependency_problem("rlds") is None:
+        return CheckResult(feature, "pass", "tensorflow available", tier="optional")
+    return CheckResult(
+        feature, "warn", export.tensorflow_missing_detail(),
+        export.tensorflow_install_hint(), tier="optional",
+    )
 
 
 def run_all_checks() -> list[CheckResult]:
@@ -194,10 +211,7 @@ def run_all_checks() -> list[CheckResult]:
             tier="optional",
         ),
         _check_lerobot(),
-        _check_spec(
-            "tensorflow", "RLDS export (tensorflow)", "pip install tensorflow",
-            missing_detail="tensorflow not installed; [all-exports] doesn't include it",
-        ),
+        _check_rlds(),
         _check_converter("mcap", "mcap CLI (.bag -> .mcap conversion)"),
         _check_converter("ros2", "ros2 CLI (.db3 -> .mcap conversion)"),
     ]

@@ -2,8 +2,9 @@
 
 Demonstrates ``resurrector.bridge.multibag.MultiBagPlayback`` — N
 playback engines sharing one play/pause/stop/seek/set_speed control
-surface. Each bag can be staggered by a wall-clock offset so you can
-align "trial A" against "trial B + 2.5s lag" without rewriting bags.
+surface. Each bag can be staggered by an offset in bag time (waited out
+at ``offset / speed`` wall seconds) so you can align "trial A" against
+"trial B + 2.5s lag" without rewriting bags.
 
 Topics are namespaced as ``<bag_id>:<original_topic>`` so PlotJuggler
 and the cross-bag overlay UI handle multi-bag streams without any
@@ -12,9 +13,9 @@ WS protocol changes.
 Run:
     python examples/20_multi_bag_playback.py
 
-What you'll see: two synthetic bags played at high speed; bag "a"
-starts immediately, bag "b" starts ~0.3s later. Their messages
-interleave through one callback in real time.
+What you'll see: two synthetic bags played at 20x; bag "a" starts
+immediately, bag "b" 0.3 s of bag time (~15 ms of wall time) later.
+Their messages interleave through one callback in real time.
 """
 
 from __future__ import annotations

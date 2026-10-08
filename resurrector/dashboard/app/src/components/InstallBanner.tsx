@@ -5,13 +5,16 @@ interface InstallBannerProps {
   capability: Capability
   title?: string
   helperText?: React.ReactNode
+  // False when running capability.install_command can't fix the gap on this
+  // interpreter: the banner then explains without offering the command.
+  installable?: boolean
 }
 
 // Reusable warning banner for optional capabilities. Each surface that
 // gates on `vision`, `bridge_live`, `ros1_convert`, `all_exports`, or `lerobot`
 // renders this when the capability is missing — uniform copy, single
 // place to maintain the look.
-export function InstallBanner({ capability, title, helperText }: InstallBannerProps) {
+export function InstallBanner({ capability, title, helperText, installable = true }: InstallBannerProps) {
   return (
     <div style={{
       background: '#1c1c0e',
@@ -29,12 +32,16 @@ export function InstallBanner({ capability, title, helperText }: InstallBannerPr
           {helperText}
         </div>
       )}
-      <div style={{ marginTop: 12 }}>
-        <CopyBlock text={capability.install_command} />
-      </div>
-      <div style={{ marginTop: 8, fontSize: 12, color: '#8b949e' }}>
-        Restart <code>resurrector dashboard</code> after installing.
-      </div>
+      {installable && (
+        <>
+          <div style={{ marginTop: 12 }}>
+            <CopyBlock text={capability.install_command} />
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: '#8b949e' }}>
+            Restart <code>resurrector dashboard</code> after installing.
+          </div>
+        </>
+      )}
     </div>
   )
 }

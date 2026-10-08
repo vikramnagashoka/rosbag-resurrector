@@ -2,11 +2,18 @@
 
 Creates a self-documenting directory with bag sources, topic list,
 sync config, health scores, and a Python snippet to load the data.
+
+LeRobot exports are described on their own terms: they ignore
+``sync_config`` and per-bag topic filters, write one episode per bag, and
+put every frame on a causal uniform grid whose fps is ``downsample_hz``
+(default 30). Their README says that instead of listing tabular-export
+settings that were never applied.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +45,7 @@ def generate_dataset_readme(
     sync_cfg = config.get("sync_config")
     export_format = config.get("export_format", "parquet")
     downsample_hz = config.get("downsample_hz")
+    is_lerobot = export_format == "lerobot"
 
     # Determine file listing
     data_files = [f for f in manifest.keys() if not f.endswith(".json")]
@@ -79,12 +87,13 @@ def generate_dataset_readme(
 
     # Source bags
     lines.extend(["## Source Bags", ""])
-    for ref in bag_refs:
+    for i, ref in enumerate(bag_refs):
         path = ref.get("path", "?")
-        line = f"- `{path}`"
+        line = f"- Episode {i}: `{path}`" if is_lerobot else f"- `{path}`"
         if ref.get("start_time") or ref.get("end_time"):
             line += f" (slice: {ref.get('start_time', '0')} → {ref.get('end_time', 'end')})"
-        if ref.get("topics"):
+        # LeRobot applies the dataset-level topic list to every episode.
+        if ref.get("topics") and not is_lerobot:
             line += f" — topics: {', '.join(ref['topics'])}"
         lines.append(line)
     lines.append("")
@@ -103,13 +112,16 @@ def generate_dataset_readme(
     # Configuration
     lines.extend(["## Configuration", ""])
     lines.append(f"- **Export format**: `{export_format}`")
-    if sync_cfg:
-        lines.append(f"- **Sync method**: `{sync_cfg['method']}`")
-        lines.append(f"- **Sync tolerance**: `{sync_cfg['tolerance_ms']}ms`")
-        if sync_cfg.get("anchor"):
-            lines.append(f"- **Anchor topic**: `{sync_cfg['anchor']}`")
-    if downsample_hz:
-        lines.append(f"- **Downsampled to**: `{downsample_hz}Hz`")
+    if is_lerobot:
+        lines.extend(_lerobot_config_lines(output_path, downsample_hz))
+    else:
+        if sync_cfg:
+            lines.append(f"- **Sync method**: `{sync_cfg['method']}`")
+            lines.append(f"- **Sync tolerance**: `{sync_cfg['tolerance_ms']}ms`")
+            if sync_cfg.get("anchor"):
+                lines.append(f"- **Anchor topic**: `{sync_cfg['anchor']}`")
+        if downsample_hz:
+            lines.append(f"- **Downsampled to**: `{downsample_hz}Hz`")
     lines.append("")
 
     # Files
@@ -139,19 +151,38 @@ def generate_dataset_readme(
         "```python",
     ])
 
-    if export_format == "parquet":
+    # Absolute paths: export_version's default output dir is relative
+    # ("./datasets"), and a relative path in the snippet only resolves from
+    # the directory the export ran in. repr() keeps quotes and Windows
+    # backslashes in the path from breaking the string literal.
+    root = output_path.resolve()
+    first_file = data_files[0] if data_files else None
+
+    def _path_literal(*parts: str) -> str:
+        return repr(str(root.joinpath(*parts)))
+
+    if is_lerobot:
+        repo_id = "local/" + (re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset_name) or "dataset")
+        lines.extend([
+            "from lerobot.datasets.lerobot_dataset import LeRobotDataset",
+            "",
+            f"ds = LeRobotDataset({repo_id!r}, root={_path_literal()})",
+            'print(f"episodes: {ds.num_episodes}, frames: {ds.num_frames}, fps: {ds.fps}")',
+            "print(ds[0].keys())",
+        ])
+    elif export_format == "parquet":
         lines.extend([
             "import polars as pl",
             "",
             "# Load all parquet files",
-            f'df = pl.read_parquet("{output_path}/*.parquet")',
+            f"df = pl.read_parquet({_path_literal('*.parquet')})",
             "print(df.head())",
         ])
     elif export_format == "hdf5":
         lines.extend([
             "import h5py",
             "",
-            f'with h5py.File("{output_path}/{data_files[0] if data_files else "data.h5"}", "r") as f:',
+            f'with h5py.File({_path_literal(first_file or "data.h5")}, "r") as f:',
             '    for key in f.keys():',
             '        print(key, f[key].shape)',
         ])
@@ -159,14 +190,14 @@ def generate_dataset_readme(
         lines.extend([
             "import polars as pl",
             "",
-            f'df = pl.read_csv("{output_path}/{data_files[0] if data_files else "data.csv"}")',
+            f'df = pl.read_csv({_path_literal(first_file or "data.csv")})',
             "print(df.head())",
         ])
     elif export_format == "numpy":
         lines.extend([
             "import numpy as np",
             "",
-            f'data = np.load("{output_path}/{data_files[0] if data_files else "data.npz"}")',
+            f'data = np.load({_path_literal(first_file or "data.npz")})',
             "print(list(data.keys()))",
         ])
     else:
@@ -185,6 +216,36 @@ def generate_dataset_readme(
     # dataset export crash hard on Windows.
     readme_path.write_text("\n".join(lines), encoding="utf-8")
     return readme_path
+
+
+def _lerobot_config_lines(output_path: Path, downsample_hz: float | None) -> list[str]:
+    """Configuration bullets for a LeRobot export.
+
+    ``meta/info.json`` is what LeRobot actually wrote, so its fps and
+    totals win; ``downsample_hz`` (the fps the export was asked for) is the
+    fallback when the file is missing.
+    """
+    from resurrector.core.lerobot_export import DEFAULT_FPS
+
+    try:
+        info = json.loads((output_path / "meta" / "info.json").read_text(encoding="utf-8"))
+    except Exception:
+        info = {}
+    fps = info.get("fps") or int(round(downsample_hz or DEFAULT_FPS))
+    lines = [f"- **Frame rate**: `{fps} fps`"]
+    if info.get("total_episodes") is not None and info.get("total_frames") is not None:
+        lines.append(
+            f"- **Episodes**: {info['total_episodes']} ({info['total_frames']} frames), "
+            "one per source bag"
+        )
+    else:
+        lines.append("- **Episodes**: one per source bag")
+    lines.append(
+        "- **Resampling**: every topic is sampled onto a uniform 1/fps grid; "
+        "each frame holds the latest sample at or before its timestamp "
+        "(causal, no look-ahead)"
+    )
+    return lines
 
 
 def _format_size(size_bytes: int) -> str:
