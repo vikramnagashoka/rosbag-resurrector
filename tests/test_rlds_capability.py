@@ -468,6 +468,22 @@ class TestExportPresetsEndpoint:
         assert presets["multimodal"]["available"] is True
         assert presets["multimodal"]["unavailable_reason"] is None
 
+    @pytest.mark.parametrize("supported", [True, False])
+    def test_reason_tells_the_dashboard_whether_pip_fixes_it(
+        self, deps, tf_platform, supported,
+    ):
+        """Would catch: rewording the rlds reason so the export dialogs
+        (installWontFix in dashboard/app/src/exportOptions.ts) can no
+        longer tell "run the extra's command" from "switch interpreter,
+        then run it", and go back to offering pip on Python 3.14."""
+        from resurrector.core.capabilities import get_capabilities
+        deps(installed=("zarr",), missing=("tensorflow",))
+        tf_platform(supported)
+        reason = self._presets()["rlds"]["unavailable_reason"]
+        command = get_capabilities()["all_exports"].install_command
+        assert command in reason
+        assert ("then: " in reason) is (not supported)
+
     def test_rlds_preset_available_without_importing_tensorflow(self, deps):
         deps(installed=("zarr",), no_import=("tensorflow",))
         assert self._presets()["rlds"]["available"] is True

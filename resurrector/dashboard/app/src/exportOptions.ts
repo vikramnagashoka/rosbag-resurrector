@@ -4,6 +4,8 @@
 // `downsample_hz` as the dataset fps, rounded to an integer (default 30).
 // Mirrors Exporter.export in resurrector/core/export.py.
 
+import type { Capability, CapabilityMap, ExportPreset } from './api'
+
 export const LEROBOT_DEFAULT_FPS = 30
 
 export const LEROBOT_SYNC_NOTE =
@@ -62,4 +64,67 @@ export function fpsRoundingHint(format: string, rate: string): string | null {
   if (!isLerobot(format) || n === undefined || rateError(format, rate)) return null
   if (Number.isInteger(n)) return null
   return `Rounded to ${Math.round(n)} fps.`
+}
+
+// ---- Preset availability --------------------------------------------------
+// /api/export-presets says why each unavailable preset can't run, and the
+// reason names the fix. Usually that is the extra's pip command ("Install
+// with: pip install 'rosbag-resurrector[all-exports]'"). Where pip can't
+// deliver the dependency on this interpreter (tensorflow has no wheel for
+// Python 3.14, Intel macOS on 3.13 or Windows ARM64), the reason puts a step
+// before it: "Use Python 3.10-3.13 on ..., then: pip install ..."
+// (tensorflow_install_hint in resurrector/core/export.py). The dialogs must
+// not offer the command as the fix there.
+
+function installCommandFor(preset: ExportPreset, caps: CapabilityMap | null): string | undefined {
+  const byName: Record<string, Capability | undefined> = caps ?? {}
+  for (const extra of preset.extras_required) {
+    // The [all-exports] extra is the `all_exports` capability.
+    const cap = byName[extra.replace(/-/g, '_')]
+    if (cap) return cap.install_command
+  }
+  return undefined
+}
+
+/**
+ * True when `preset` is unavailable and installing its extra on this
+ * interpreter would not change that: the reason asks for another step
+ * first, or doesn't name the extra's install command at all. A preset
+ * without a reason reads the old way, with the missing extra as the only
+ * gate.
+ */
+export function installWontFix(preset: ExportPreset, caps: CapabilityMap | null): boolean {
+  const reason = preset.unavailable_reason
+  if (preset.available || !reason) return false
+  if (/\bthen: /.test(reason)) return true
+  const command = installCommandFor(preset, caps)
+  return command !== undefined && !reason.includes(command)
+}
+
+export interface ExtraGap {
+  /** Unavailable presets that installing the extra unlocks. */
+  fixable: ExportPreset[]
+  /** Unavailable presets the extra can't unlock on this interpreter. */
+  stuck: ExportPreset[]
+}
+
+/** The unavailable presets `extra` gates, split by whether installing it fixes them. */
+export function extraGap(presets: ExportPreset[], extra: string, caps: CapabilityMap | null): ExtraGap {
+  const blocked = presets.filter(p => !p.available && p.extras_required.includes(extra))
+  return {
+    fixable: blocked.filter(p => !installWontFix(p, caps)),
+    stuck: blocked.filter(p => installWontFix(p, caps)),
+  }
+}
+
+export function hasGap(gap: ExtraGap): boolean {
+  return gap.fixable.length + gap.stuck.length > 0
+}
+
+/** Preset dropdown label: "(extras not installed)" only where installing them helps. */
+export function presetOptionLabel(preset: ExportPreset, caps: CapabilityMap | null): string {
+  if (preset.available) return preset.name
+  return installWontFix(preset, caps)
+    ? `${preset.name} (unavailable here, see below)`
+    : `${preset.name} (extras not installed)`
 }

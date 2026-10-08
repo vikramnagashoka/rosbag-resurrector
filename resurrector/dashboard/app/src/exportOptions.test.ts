@@ -1,11 +1,65 @@
 import { describe, expect, it } from 'vitest'
+import type { CapabilityMap, ExportPreset } from './api'
 import {
   LEROBOT_FPS_NOT_A_NUMBER,
   LEROBOT_MIN_FPS_ERROR,
+  extraGap,
   fpsRoundingHint,
+  installWontFix,
+  presetOptionLabel,
   rateError,
   syncAndRateParams,
 } from './exportOptions'
+import {
+  RLDS_NOT_INSTALLED_REASON,
+  RLDS_NO_WHEEL_REASON,
+  ZARR_NOT_INSTALLED_REASON,
+  capabilitiesFor,
+  exportPresetsFor,
+} from './exportPresetFixtures'
+
+describe('installWontFix', () => {
+  const caps = capabilitiesFor('no-wheel') as CapabilityMap
+  const presets = exportPresetsFor('no-wheel-no-zarr')
+  const byName = (name: string) => presets.find(p => p.name === name) as ExportPreset
+  const withReason = (name: string, reason: string | null): ExportPreset =>
+    ({ ...byName(name), available: false, unavailable_reason: reason })
+
+  it('is false where the reason names the extra as the whole fix', () => {
+    expect(installWontFix(withReason('multimodal', ZARR_NOT_INSTALLED_REASON), caps)).toBe(false)
+    expect(installWontFix(withReason('rlds', RLDS_NOT_INSTALLED_REASON), caps)).toBe(false)
+    // lerobot_export.INSTALL_HINT: no "Install with:", still just the command.
+    const lerobotHint =
+      "LeRobot export needs the [lerobot] extra (Python 3.12+): pip install 'rosbag-resurrector[lerobot]'"
+    expect(installWontFix(withReason('lerobot', lerobotHint), caps)).toBe(false)
+  })
+
+  it('is true where the reason puts another step before the command', () => {
+    expect(installWontFix(byName('rlds'), caps)).toBe(true)
+    // Holds before capabilities load, too.
+    expect(installWontFix(byName('rlds'), null)).toBe(true)
+  })
+
+  it('is true where the reason does not name the extra install command', () => {
+    expect(installWontFix(withReason('rlds', 'RLDS export is not supported on Windows ARM64.'), caps)).toBe(true)
+  })
+
+  it('reads a preset without a reason the old way: the extra is the fix', () => {
+    expect(installWontFix(withReason('rlds', null), caps)).toBe(false)
+    expect(installWontFix(byName('camera-only'), caps)).toBe(false)
+  })
+
+  it('splits an extra\'s blocked presets and labels them to match', () => {
+    const gap = extraGap(presets, 'all-exports', caps)
+    expect(gap.fixable.map(p => p.name)).toEqual(['multimodal'])
+    expect(gap.stuck.map(p => p.name)).toEqual(['rlds'])
+    expect(extraGap(presets, 'lerobot', caps)).toEqual({ fixable: [], stuck: [] })
+    expect(presetOptionLabel(byName('multimodal'), caps)).toBe('multimodal (extras not installed)')
+    expect(presetOptionLabel(byName('rlds'), caps)).toBe('rlds (unavailable here, see below)')
+    expect(presetOptionLabel(byName('camera-only'), caps)).toBe('camera-only')
+    expect(byName('rlds').unavailable_reason).toBe(RLDS_NO_WHEEL_REASON)
+  })
+})
 
 describe('syncAndRateParams', () => {
   it('passes sync and the raw rate through for chunk-streaming formats', () => {

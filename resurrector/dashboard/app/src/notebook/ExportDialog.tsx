@@ -1,12 +1,16 @@
 import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
-import { useCapability } from '../components/InstallBanner'
+import { useCapabilities } from '../components/InstallBanner'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 import {
   LEROBOT_DEFAULT_FPS,
   LEROBOT_SYNC_NOTE,
+  extraGap,
   fpsRoundingHint,
+  hasGap,
+  installWontFix,
   isLerobot,
+  presetOptionLabel,
   rateError,
   syncAndRateParams,
 } from '../exportOptions'
@@ -34,8 +38,9 @@ export default function ExportDialog({
   onClose: () => void
 }) {
   const [presets, setPresets] = useState<ExportPreset[]>([])
-  const allExportsCap = useCapability('all_exports')
-  const lerobotCap = useCapability('lerobot')
+  const caps = useCapabilities()
+  const allExportsCap = caps?.all_exports ?? null
+  const lerobotCap = caps?.lerobot ?? null
   const [selectedPreset, setSelectedPreset] = useState('')
   const [selectedTopics, setSelectedTopics] = useState<string[]>(availableTopics)
   const [format, setFormat] = useState('parquet')
@@ -45,6 +50,8 @@ export default function ExportDialog({
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
+  const presetId = useId()
+  const stuckNoteId = useId()
   const rateId = useId()
   const rateNoteId = useId()
   const syncNoteId = useId()
@@ -89,50 +96,89 @@ export default function ExportDialog({
   }
 
   const presetMeta = selectedPreset ? presets.find(p => p.name === selectedPreset) : null
-  // Count unavailable presets per missing extra so each banner names the
-  // install command that actually unlocks them.
-  const blockedBy = (extra: string) =>
-    presets.filter(p => !p.available && p.extras_required.includes(extra)).length
-  const needAllExports = blockedBy('all-exports')
-  const needLerobot = blockedBy('lerobot')
+  // Split unavailable presets per extra so each banner names the install
+  // command that actually unlocks them, and offers it only where it does.
+  // Presets it can't unlock on this interpreter get their reason under the
+  // preset picker instead.
+  const allExportsGap = extraGap(presets, 'all-exports', caps)
+  const lerobotGap = extraGap(presets, 'lerobot', caps)
+  const stuckPresets = presets.filter(p => installWontFix(p, caps))
+  const nAllExports = allExportsGap.fixable.length
+  const nAllExportsStuck = allExportsGap.stuck.length
 
   return (
     <div className="nb-modal-backdrop" onClick={onClose}>
       <div className="nb-modal nb-export" onClick={e => e.stopPropagation()}>
         <h2 className="nb-panel-title">Export data</h2>
 
-        {lerobotCap && !lerobotCap.available && needLerobot > 0 && (
+        {lerobotCap && !lerobotCap.available && hasGap(lerobotGap) && (
           <div className="nb-bridge-banner">
-            <div className="nb-bridge-banner-title">The LeRobot preset needs the LeRobot extra.</div>
-            <div className="nb-bridge-banner-body">
-              Writes a LeRobot v3 dataset (state, camera video) that loads directly in LeRobot. Needs Python 3.12+.
+            <div className="nb-bridge-banner-title">
+              {lerobotGap.fixable.length > 0
+                ? 'The LeRobot preset needs the LeRobot extra.'
+                : 'The LeRobot preset is unavailable on this interpreter.'}
             </div>
-            <code>{lerobotCap.install_command}</code>
+            <div className="nb-bridge-banner-body">
+              {lerobotGap.stuck.length > 0
+                ? lerobotCap.description
+                : 'Writes a LeRobot v3 dataset (state, camera video) that loads directly in LeRobot. Needs Python 3.12+.'}
+            </div>
+            {lerobotGap.fixable.length > 0 && <code>{lerobotCap.install_command}</code>}
           </div>
         )}
-        {allExportsCap && !allExportsCap.available && needAllExports > 0 && (
+        {allExportsCap && !allExportsCap.available && hasGap(allExportsGap) && (
           <div className="nb-bridge-banner">
-            <div className="nb-bridge-banner-title">{needAllExports} preset(s) need the Zarr / RLDS extras.</div>
-            <div className="nb-bridge-banner-body">
-              Parquet, HDF5, and CSV work without them. Install for Zarr or RLDS output.
+            <div className="nb-bridge-banner-title">
+              {nAllExportsStuck === 0
+                ? `${nAllExports} preset(s) need the Zarr / RLDS extras.`
+                : nAllExports === 0
+                  ? `${nAllExportsStuck} preset(s) unavailable on this interpreter.`
+                  : `${nAllExports} preset(s) need the [all-exports] extra; ${nAllExportsStuck} more can't run on this interpreter.`}
             </div>
-            <code>{allExportsCap.install_command}</code>
+            <div className="nb-bridge-banner-body">
+              {nAllExportsStuck > 0
+                // The backend's explanation of what the extra can't install here.
+                ? allExportsCap.description
+                : 'Parquet, HDF5, and CSV work without them. Install for Zarr or RLDS output.'}
+            </div>
+            {nAllExports > 0 && <code>{allExportsCap.install_command}</code>}
           </div>
         )}
 
         {presets.length > 0 && (
-          <label className="nb-modal-field">
-            <span>Preset</span>
-            <select value={selectedPreset} onChange={e => applyPreset(e.target.value)}>
+          // A div, not a wrapping <label>: the notes below must not become
+          // part of the select's name.
+          <div className="nb-modal-field">
+            <label htmlFor={presetId}>Preset</label>
+            <select
+              id={presetId}
+              value={selectedPreset}
+              onChange={e => applyPreset(e.target.value)}
+              aria-describedby={stuckPresets.length > 0 ? stuckNoteId : undefined}
+            >
               <option value="">— Manual configuration —</option>
               {presets.map(p => (
-                <option key={p.name} value={p.name} disabled={!p.available}>
-                  {p.name}{!p.available ? ' (extras not installed)' : ''}
+                <option
+                  key={p.name}
+                  value={p.name}
+                  disabled={!p.available}
+                  title={p.unavailable_reason ?? undefined}
+                >
+                  {presetOptionLabel(p, caps)}
                 </option>
               ))}
             </select>
             {presetMeta && <div className="nb-export-hint">{presetMeta.description}</div>}
-          </label>
+            {stuckPresets.length > 0 && (
+              <div id={stuckNoteId}>
+                {stuckPresets.map(p => (
+                  <div key={p.name} className="nb-export-hint">
+                    <strong>{p.name}</strong>: {p.unavailable_reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="nb-export-row">
