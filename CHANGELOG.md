@@ -8,6 +8,8 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-10-07
+
 ### What's new
 
 The follow-ups from the v0.8.4 release audit. Synced exports now stream
@@ -136,6 +138,15 @@ speed changes and seek.
   when the connection drops, instead of an opaque 500.
 - Dependencies: `typer>=0.16.0` (the first release whose `--help` works with
   click 8.2+); building from source needs `setuptools>=77.0.3`.
+
+### Test counts
+
+- Backend: **1289 passed** (was 841), plus a memory-regression tier of 16
+  (was 12). The `Extras (all-exports)` CI job now runs the RLDS tests
+  against real tensorflow and fails if they skip; `Extras (lerobot)` does the
+  same for LeRobot.
+- Frontend unit: **80 passed** (was 48)
+- E2E: **47 behavioural** (was 39) plus 7 visual
 
 ## [0.8.4] — 2026-10-04
 

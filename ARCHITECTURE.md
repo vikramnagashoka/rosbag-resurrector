@@ -2,7 +2,7 @@
 
 *How RosBag Resurrector is built, and why it's built that way. A five-minute
 read covering the system shape, the decisions that carry load, and what I'd do
-differently. Last updated for v0.8.4 (October 2026).*
+differently. Last updated for v0.8.5 (October 2026).*
 
 ## The problem and its constraints
 
@@ -151,12 +151,12 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
 
 ## Numbers that keep it honest
 
-- 841 backend tests · 48 frontend unit tests · 46 Playwright e2e (including
+- 1289 backend tests · 80 frontend unit tests · 54 Playwright e2e (including
   visual baselines), plus the dedicated memory-regression CI job
 - CI matrix: Python 3.10–3.13 · 8 optional-extra installs (LeRobot
   exports round-tripped through the real library) · wheel-install
   smoke test · frontend build · e2e
-- 16 releases on PyPI; exporters to 7 formats (5 chunk-streamed, synced or not)
+- 17 releases on PyPI; exporters to 7 formats (5 chunk-streamed, synced or not)
 - 5 streaming health dimensions: rate stability, size anomalies, time gaps,
   timestamp ordering, topic completeness
 
