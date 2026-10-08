@@ -216,20 +216,26 @@ try:
         output_dir=out, sync=True,
         downsample_hz=float(downsample) if downsample != "none" else None,
     )
-except ExportError as e:  # Zarr can't store the header.frame_id strings
+except ExportError as e:
     failed = sorted(f.column for f in e.failures)
 delta_mb = (peak_bytes() - before) / 2**20
+strings = "joint_states__header.frame_id"
 if fmt == "parquet":
     import pyarrow.parquet as pq
-    rows = pq.read_metadata(f"{out}/synced.parquet").num_rows
+    rows = string_rows = pq.read_metadata(f"{out}/synced.parquet").num_rows
 elif fmt == "hdf5":
     import h5py
     with h5py.File(f"{out}/synced.h5", "r") as f:
         rows = f["synced/timestamp_ns"].shape[0]
+        string_rows = f["synced"][strings].shape[0]
 else:
     import zarr
-    rows = zarr.open_group(f"{out}/synced.zarr", mode="r")["timestamp_ns"].shape[0]
-print(json.dumps({"delta_mb": delta_mb, "rows": rows, "failed": failed}))
+    group = zarr.open_group(f"{out}/synced.zarr", mode="r")
+    rows = group["timestamp_ns"].shape[0]
+    string_rows = group[strings].shape[0]
+print(json.dumps({
+    "delta_mb": delta_mb, "rows": rows, "string_rows": string_rows, "failed": failed,
+}))
 """
 
 
@@ -252,7 +258,7 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, fmt, downsample):
     this bag that path peaked around 500 MB (and grows with the bag);
     the streamed path stays near 70 MB, the same at 3x the rows. HDF5
     and Zarr (the multimodal preset) go through the same stream plus a
-    per-chunk dtype conversion.
+    per-chunk dtype conversion, the header.frame_id strings included.
     """
     import resurrector
 
@@ -274,10 +280,8 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, fmt, downsample):
 
     expected_rows = 100_000 if downsample == "none" else 5_000
     assert abs(result["rows"] - expected_rows) <= 1
-    if fmt == "zarr":
-        assert all(c.endswith("header.frame_id") for c in result["failed"])
-    else:
-        assert result["failed"] == []
+    assert result["failed"] == []
+    assert result["string_rows"] == result["rows"]
     assert result["delta_mb"] < 200, (
         f"synced export peak RSS delta {result['delta_mb']:.1f} MB > 200 MB"
     )
@@ -314,29 +318,22 @@ def test_hdf5_export_bounded(large_bag):
 
 
 def test_zarr_export_bounded(large_bag):
-    """Streaming Zarr export appends to chunked arrays per chunk.
+    """Streaming Zarr export appends to chunked arrays per chunk, the
+    header.frame_id strings (variable-length UTF-8) included.
 
     Skips if zarr (in [all-exports]) isn't installed in this venv.
-    Zarr can't store variable-length strings (e.g. header.frame_id) so
-    we expect ExportError listing those columns — but the streaming
-    write itself must still be memory-bounded for the numeric ones.
     """
-    pytest.importorskip("zarr")
-    from resurrector.core.export import ExportError
+    zarr = pytest.importorskip("zarr")
     bf = BagFrame(large_bag)
-    def _do_zarr_export(d):
-        try:
-            Exporter().export(
+    with tempfile.TemporaryDirectory() as d:
+        delta_mb, _ = _peak_rss_delta_mb(
+            lambda: Exporter().export(
                 bag_frame=bf, topics=["/imu/data"], format="zarr",
                 output_dir=str(d),
-            )
-        except ExportError:
-            # Expected — string columns can't go into zarr; the streaming
-            # writer correctly catches this per-column. Memory budget is
-            # the load-bearing assertion here.
-            pass
-    with tempfile.TemporaryDirectory() as d:
-        delta_mb, _ = _peak_rss_delta_mb(lambda: _do_zarr_export(d))
+            ),
+        )
+        frame_ids = zarr.open(f"{d}/imu_data.zarr", mode="r")["header.frame_id"]
+        assert frame_ids.shape[0] == bf["/imu/data"].message_count
     assert delta_mb < 150, f"zarr export RSS delta {delta_mb:.1f} MB > 150 MB"
 
 

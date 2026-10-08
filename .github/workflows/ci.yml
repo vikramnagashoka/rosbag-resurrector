@@ -128,6 +128,16 @@ jobs:
           pytest tests/test_export_ml.py tests/test_export_v040.py tests/test_rlds_capability.py -q -rs | tee rlds.log
           ! grep -q "SKIPPED" rlds.log
 
+      - name: Assert Zarr string tests actually ran
+        # The Zarr cases skip without zarr; this job is the only one that
+        # installs it, so a skip here would leave Zarr strings untested.
+        if: matrix.extra == 'all-exports'
+        run: |
+          set -o pipefail
+          python -c "import zarr"
+          pytest tests/test_export_strings.py -q -rs | tee zarr.log
+          ! grep -q "SKIPPED" zarr.log
+
       - name: Run pytest
         run: pytest tests/ -q
 
