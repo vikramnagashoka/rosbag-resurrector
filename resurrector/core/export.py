@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import polars as pl
@@ -818,8 +818,18 @@ class _NumpyColumns:
       null -> NaN. Integers beyond +/-2**53 are rounded, with a warning.
     - ``timestamp_ns`` stays int64: every row has one, and float64 would
       round nanosecond timestamps.
-    - Anything else (strings, lists, ...) converts as polars does; the
-      writer decides whether it can store it.
+    - String, Categorical and Enum columns -> text (an object array of
+      ``str``; each writer stores it as its own string type); null ->
+      ``""``. None of the three formats has a missing string, so a null
+      and an empty string read back the same; Parquet keeps them apart.
+    - A chunk where the column is all null (polars dtype Null) says
+      nothing about its dtype, so those rows are held back until a chunk
+      does, then written first as that dtype's missing value. A column
+      that is null in every chunk is written as float64 NaN.
+    - Anything else converts as polars does, and the writer decides
+      whether it can store it. A column that converts to an object array
+      (lists, structs, binary, ...) fails rather than being written as
+      Python reprs or pickled objects.
 
     A later chunk whose column can't be cast to the chosen dtype fails
     that column instead of being stored wrong.
@@ -827,43 +837,161 @@ class _NumpyColumns:
 
     def __init__(self) -> None:
         self._targets: dict[str, "pl.DataType | None"] = {}
+        self._first_dtypes: dict[str, pl.DataType] = {}
+        self._held: dict[str, int] = {}
         self._warned: set[str] = set()
+
+    def is_text(self, col: str) -> bool:
+        """True if ``col`` is written as strings."""
+        return self._targets.get(col) == pl.String
 
     def convert(
         self, chunk, col: str,
-    ) -> tuple[np.ndarray | None, ExportColumnFailure | None]:
-        """Convert one column of ``chunk``, or return a failure record."""
+    ) -> tuple[Iterator[np.ndarray], ExportColumnFailure | None]:
+        """Arrays to append for one column of ``chunk``, rows held back
+        for it first, or a failure record."""
         series = chunk[col]
         if col not in self._targets:
+            if series.dtype == pl.Null:
+                self._held[col] = self._held.get(col, 0) + len(series)
+                return iter(()), None
             self._targets[col] = _numpy_target(col, series.dtype)
+            self._first_dtypes[col] = series.dtype
         target = self._targets[col]
+        held = self._held.pop(col, 0)
         try:
-            if target is None:
-                return series.to_numpy(), None
-            dtype = series.dtype
-            if not (dtype.is_numeric() or dtype == pl.Boolean or dtype == pl.Null):
+            arr = self._to_numpy(series, col, target)
+            if not held:
+                return iter((arr,)), None
+            missing = _missing_value(target)
+            if missing is None:
+                raise ValueError(
+                    f"{col} is null in its first {held} rows and "
+                    f"{self._first_dtypes[col]} has no missing value here"
+                )
+            return _held_then(_repeat_rows(missing, held, arr.dtype), arr), None
+        except Exception as e:
+            return iter(()), ExportColumnFailure(
+                column=col, error_type=type(e).__name__, message=str(e),
+            )
+
+    def never_typed(self) -> Iterator[tuple[str, Iterator[np.ndarray]]]:
+        """Columns that were null in every chunk, as float64 NaN."""
+        for col, held in self._held.items():
+            yield col, _repeat_rows(np.nan, held, np.dtype(np.float64))
+
+    def _to_numpy(self, series: "pl.Series", col: str, target) -> np.ndarray:
+        dtype = series.dtype
+        if target is None:
+            first = self._first_dtypes[col]
+            if dtype != first:
+                raise TypeError(
+                    f"column is {dtype} in this chunk but was {first} in an "
+                    f"earlier one"
+                )
+            arr = series.to_numpy()
+            if arr.dtype == object:
+                raise TypeError(
+                    f"{dtype} columns can't be written as a numeric or string "
+                    f"array; export to Parquet to keep them"
+                )
+            return arr
+        if target == pl.String:
+            if not (_is_text(dtype) or dtype == pl.Null):
                 raise TypeError(
                     f"column is {dtype} in this chunk but was written as "
                     f"{target} from an earlier one"
                 )
-            if target == pl.Int64 and series.null_count():
-                raise ValueError(f"{col} has missing values")
-            if (
-                dtype.is_integer() and target == pl.Float64
-                and col not in self._warned
-                and _beyond_float64_exact(series)
-            ):
-                logger.warning(
-                    "Column %r has integers beyond +/-2**53; they are written "
-                    "as float64 and rounded. Export to Parquet to keep them "
-                    "exact.", col,
-                )
-                self._warned.add(col)
-            return series.cast(target, strict=True).to_numpy(), None
-        except Exception as e:
-            return None, ExportColumnFailure(
-                column=col, error_type=type(e).__name__, message=str(e),
+            return series.cast(pl.String).fill_null("").to_numpy()
+        if not (dtype.is_numeric() or dtype == pl.Boolean or dtype == pl.Null):
+            raise TypeError(
+                f"column is {dtype} in this chunk but was written as "
+                f"{target} from an earlier one"
             )
+        if target == pl.Int64 and series.null_count():
+            raise ValueError(f"{col} has missing values")
+        if (
+            dtype.is_integer() and target == pl.Float64
+            and col not in self._warned
+            and _beyond_float64_exact(series)
+        ):
+            logger.warning(
+                "Column %r has integers beyond +/-2**53; they are written "
+                "as float64 and rounded. Export to Parquet to keep them "
+                "exact.", col,
+            )
+            self._warned.add(col)
+        return series.cast(target, strict=True).to_numpy()
+
+
+def _write_numpy_columns(
+    chunks: Iterable,
+    append: Callable[[str, np.ndarray, bool, int], None],
+) -> tuple[int, list[ExportColumnFailure]]:
+    """Convert every column of every chunk with :class:`_NumpyColumns` and
+    pass it to ``append(col, array, is_text, chunk_rows)``, which creates
+    the column's array on its first call and appends to it after that.
+
+    A column that fails to convert or append is recorded once and skipped
+    from then on. Returns ``(rows_written, failures)``.
+    """
+    columns = _NumpyColumns()
+    failures: list[ExportColumnFailure] = []
+    failed: set[str] = set()
+    rows_written = 0
+
+    def write(col: str, arrays: Iterator[np.ndarray], chunk_rows: int) -> None:
+        try:
+            for arr in arrays:
+                append(col, arr, columns.is_text(col), chunk_rows)
+        except Exception as e:
+            failures.append(ExportColumnFailure(
+                column=col, error_type=type(e).__name__, message=str(e),
+            ))
+            failed.add(col)
+
+    for chunk in chunks:
+        for col in chunk.columns:
+            if col in failed:
+                continue
+            arrays, failure = columns.convert(chunk, col)
+            if failure is not None:
+                failures.append(failure)
+                failed.add(col)
+                continue
+            write(col, arrays, chunk.height)
+        rows_written += chunk.height
+    for col, arrays in columns.never_typed():
+        write(col, arrays, rows_written)
+    return rows_written, failures
+
+
+def _is_text(dtype) -> bool:
+    return dtype == pl.String or isinstance(dtype, (pl.Categorical, pl.Enum))
+
+
+def _missing_value(target) -> object | None:
+    """What a missing value is written as for ``target``, or None if it
+    has none."""
+    if target == pl.String:
+        return ""
+    if target == pl.Float32 or target == pl.Float64:
+        return np.nan
+    return None
+
+
+def _repeat_rows(value, rows: int, dtype: np.dtype) -> Iterator[np.ndarray]:
+    """``rows`` copies of ``value``, at most ``CHUNK_SIZE`` at a time, so
+    a long all-null run doesn't become one big array."""
+    while rows > 0:
+        size = min(rows, CHUNK_SIZE)
+        yield np.full(size, value, dtype=dtype)
+        rows -= size
+
+
+def _held_then(held: Iterator[np.ndarray], arr: np.ndarray) -> Iterator[np.ndarray]:
+    yield from held
+    yield arr
 
 
 def _beyond_float64_exact(series: "pl.Series") -> bool:
@@ -885,6 +1013,8 @@ def _numpy_target(col: str, dtype) -> "pl.DataType | None":
         return pl.Float32
     if dtype.is_integer() or dtype.is_float() or dtype == pl.Boolean:
         return pl.Float64
+    if _is_text(dtype):
+        return pl.String
     return None
 
 
@@ -929,69 +1059,39 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     Each column becomes a resizable dataset; each chunk extends it.
     Dataset dtypes come from the polars schema (see
     :class:`_NumpyColumns`: integers and Booleans as float64 with NaN for
-    a missing value). Columns that fail to serialize are collected and
-    reported.
+    a missing value). String columns are variable-length UTF-8, with a
+    missing string written as ``""`` (h5py reads them back as ``bytes``;
+    ``dataset.asstr()[:]`` gives ``str``). Columns that fail to serialize
+    are collected and reported.
     """
     import h5py
 
     filepath = output_path / f"{name}.h5"
-    rows_written = 0
-    failures: list[ExportColumnFailure] = []
-    failed_cols: set[str] = set()
-
-    columns = _NumpyColumns()
 
     with h5py.File(filepath, "w") as f:
         group = f.create_group(name)
         datasets: dict[str, h5py.Dataset] = {}
 
-        for chunk in chunks:
-            chunk_rows = chunk.height
-            for col in chunk.columns:
-                if col in failed_cols:
-                    continue
-                arr, failure = columns.convert(chunk, col)
-                if failure is not None:
-                    failures.append(failure)
-                    failed_cols.add(col)
-                    continue
+        def append(col: str, arr: np.ndarray, text: bool, chunk_rows: int) -> None:
+            if col not in datasets:
+                if text:
+                    datasets[col] = group.create_dataset(
+                        col, shape=(0,), maxshape=(None,),
+                        dtype=h5py.string_dtype(),
+                    )
+                else:
+                    datasets[col] = group.create_dataset(
+                        col, shape=(0,), maxshape=(None,),
+                        dtype=arr.dtype, compression="gzip",
+                    )
+            if len(arr) == 0:
+                return
+            ds = datasets[col]
+            start = ds.shape[0]
+            ds.resize((start + len(arr),))
+            ds[start:] = arr
 
-                try:
-                    if arr.dtype.kind in ("U", "S", "O"):
-                        # String-ish column. Validate it's actually string-like;
-                        # object dtype can hide nested lists which can't be
-                        # represented in HDF5. Probe the first element.
-                        if arr.dtype.kind == "O" and len(arr) > 0:
-                            sample = arr[0]
-                            if isinstance(sample, (list, tuple, np.ndarray)):
-                                raise TypeError(
-                                    f"HDF5 does not support dtype {arr.dtype} "
-                                    f"containing sequences (e.g. variable-length lists)"
-                                )
-                        if col not in datasets:
-                            dt = h5py.string_dtype()
-                            datasets[col] = group.create_dataset(
-                                col, shape=(0,), maxshape=(None,), dtype=dt,
-                            )
-                        arr = arr.astype(str)
-                    else:
-                        if col not in datasets:
-                            datasets[col] = group.create_dataset(
-                                col, shape=(0,), maxshape=(None,),
-                                dtype=arr.dtype, compression="gzip",
-                            )
-                    ds = datasets[col]
-                    new_size = ds.shape[0] + arr.shape[0]
-                    ds.resize((new_size,))
-                    ds[-arr.shape[0]:] = arr
-                except Exception as e:
-                    failures.append(ExportColumnFailure(
-                        column=col,
-                        error_type=type(e).__name__,
-                        message=str(e),
-                    ))
-                    failed_cols.add(col)
-            rows_written += chunk_rows
+        rows_written, failures = _write_numpy_columns(chunks, append)
 
     logger.info("Streamed %d rows to %s", rows_written, filepath)
     if failures:
@@ -1011,31 +1111,25 @@ def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResul
     The cap exists because past ~1 M rows the materialized arrays
     plus ``savez_compressed`` buffers easily exceed 1 GB. Column dtypes
     follow :class:`_NumpyColumns`, as for HDF5 and Zarr.
+
+    String columns are fixed-width unicode (``<U``, every row as wide as
+    the longest value), a missing string written as ``""``. Unlike an
+    object array, that loads with ``np.load``'s default
+    ``allow_pickle=False``.
     """
     filepath = output_path / f"{name}.npz"
-    rows_written = 0
-    failures: list[ExportColumnFailure] = []
-    failed_cols: set[str] = set()
     col_chunks: dict[str, list[np.ndarray]] = {}
-    columns = _NumpyColumns()
 
-    for chunk in chunks:
-        chunk_rows = chunk.height
-        for col in chunk.columns:
-            if col in failed_cols:
-                continue
-            arr, failure = columns.convert(chunk, col)
-            if failure is not None:
-                failures.append(failure)
-                failed_cols.add(col)
-                col_chunks.pop(col, None)
-                continue
-            col_chunks.setdefault(col, []).append(arr)
-        rows_written += chunk_rows
+    def append(col: str, arr: np.ndarray, text: bool, chunk_rows: int) -> None:
+        col_chunks.setdefault(col, []).append(arr.astype(str) if text else arr)
+
+    rows_written, failures = _write_numpy_columns(chunks, append)
+    failed_cols = {failure.column for failure in failures}
 
     arrays = {
         col: np.concatenate(parts) if len(parts) > 1 else parts[0]
         for col, parts in col_chunks.items()
+        if col not in failed_cols
     }
     np.savez_compressed(filepath, **arrays)
 
@@ -1133,7 +1227,10 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     Compatible with both zarr 2.x (DirectoryStore + create_dataset) and
     zarr 3.x (LocalStore + create_array). Detected at import time.
     Either way: peak memory bounded by chunk size, not topic size.
-    Array dtypes follow :class:`_NumpyColumns`, as for HDF5.
+    Array dtypes follow :class:`_NumpyColumns`, as for HDF5. String
+    columns are variable-length UTF-8 arrays (zarr 3's string dtype, or
+    zarr 2's ``VLenUTF8`` object codec), with a missing string written as
+    ``""``; ``zarr.open(path)[col][:]`` reads them back as text.
     """
     try:
         import zarr
@@ -1144,9 +1241,6 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
 
     filepath = output_path / f"{name}.zarr"
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    rows_written = 0
-    failures: list[ExportColumnFailure] = []
-    failed_cols: set[str] = set()
 
     # Zarr 2.x → 3.x renamed DirectoryStore → LocalStore and create_dataset →
     # create_array. Detect via attribute presence to support both.
@@ -1159,44 +1253,32 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         root = zarr.group(store, overwrite=True)
 
     arrays: dict = {}
-    columns = _NumpyColumns()
 
-    for chunk in chunks:
-        chunk_rows = chunk.height
-        for col in chunk.columns:
-            if col in failed_cols:
-                continue
-            arr, failure = columns.convert(chunk, col)
-            if failure is not None:
-                failures.append(failure)
-                failed_cols.add(col)
-                continue
-            if arr.dtype.kind in ("U", "O"):
-                # Zarr doesn't cleanly support variable-length strings
-                failures.append(ExportColumnFailure(
-                    column=col,
-                    error_type="UnsupportedDtype",
-                    message=f"zarr export does not support dtype {arr.dtype}",
-                ))
-                failed_cols.add(col)
-                continue
-            if col not in arrays:
-                if zarr_v3:
-                    arrays[col] = root.create_array(
-                        name=col,
-                        shape=(0,),
-                        chunks=(min(chunk_rows, CHUNK_SIZE),),
-                        dtype=arr.dtype,
-                    )
-                else:
-                    arrays[col] = root.create_dataset(  # type: ignore[attr-defined]
-                        col,
-                        shape=(0,),
-                        chunks=(min(chunk_rows, CHUNK_SIZE),),
-                        dtype=arr.dtype,
-                    )
+    def append(col: str, arr: np.ndarray, text: bool, chunk_rows: int) -> None:
+        if col not in arrays:
+            chunk_shape = (max(1, min(chunk_rows, CHUNK_SIZE)),)
+            if zarr_v3:
+                # For dtype=str, zarr 3.0 to 3.1.0 warn that the string
+                # dtype isn't in the v3 spec yet. Left visible: other v3
+                # readers of that era may not open these arrays.
+                arrays[col] = root.create_array(
+                    name=col, shape=(0,), chunks=chunk_shape,
+                    dtype=str if text else arr.dtype,
+                )
+            elif text:
+                import numcodecs
+                arrays[col] = root.create_dataset(  # type: ignore[attr-defined]
+                    col, shape=(0,), chunks=chunk_shape,
+                    dtype=object, object_codec=numcodecs.VLenUTF8(),
+                )
+            else:
+                arrays[col] = root.create_dataset(  # type: ignore[attr-defined]
+                    col, shape=(0,), chunks=chunk_shape, dtype=arr.dtype,
+                )
+        if len(arr):
             arrays[col].append(arr)
-        rows_written += chunk_rows
+
+    rows_written, failures = _write_numpy_columns(chunks, append)
 
     logger.info("Streamed %d rows to %s", rows_written, filepath)
     if failures:
