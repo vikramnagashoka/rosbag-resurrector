@@ -198,7 +198,7 @@ Install only what you need:
 ```bash
 pip install 'rosbag-resurrector[vision]'        # local CLIP semantic search (~2GB model)
 pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search (lighter)
-pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
+pip install 'rosbag-resurrector[vision-lite]'   # MP4 video export via OpenCV (image decoding needs no extra)
 pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
 pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
 pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13, 3.10-3.12 on Intel macOS, not Windows ARM64)
@@ -297,7 +297,7 @@ bf  # Renders interactive HTML table with health badges and topic groups
 
 ### Video & Image Support
 
-Full support for both raw and compressed image topics:
+Raw and compressed (JPEG/PNG) image topics decode on the base install, no extra needed:
 
 ```python
 # Iterate frames from any image topic
@@ -318,7 +318,7 @@ bf["/camera/rgb"].is_image_topic  # True
 # Export as numbered PNG files
 resurrector export-frames experiment.mcap --topic /camera/rgb --output ./frames
 
-# Export as MP4 video
+# Export as MP4 video (needs OpenCV: pip install 'rosbag-resurrector[vision-lite]')
 resurrector export-frames experiment.mcap --topic /camera/rgb --video --output video.mp4 --fps 30
 ```
 
@@ -346,9 +346,6 @@ pip install 'rosbag-resurrector[vision]'
 
 # Option 2: OpenAI API (lighter install, requires API key)
 pip install 'rosbag-resurrector[vision-openai]'
-
-# Option 3: Just image parsing + video export, no ML
-pip install 'rosbag-resurrector[vision-lite]'
 ```
 
 **Python API:**

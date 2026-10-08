@@ -99,18 +99,17 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude heavy optional deps from base package
+        # Exclude heavy optional deps from base package. PIL and httpx are
+        # base dependencies (camera frames, bridge proxy), so they stay in.
         'torch',
         'torchvision',
         'sentence_transformers',
         'transformers',
         'openai',
         'cv2',
-        'PIL',
         'rclpy',
         # Exclude test infrastructure
         'pytest',
-        'httpx',
         '_pytest',
     ],
     win_no_prefer_redirects=False,
