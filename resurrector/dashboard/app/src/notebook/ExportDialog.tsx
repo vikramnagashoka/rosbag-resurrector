@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
 import { useCapabilities } from '../components/InstallBanner'
+import ExportFailure from '../components/ExportFailure'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 import {
   LEROBOT_DEFAULT_FPS,
@@ -92,8 +93,8 @@ export default function ExportDialog({
         topics: selectedTopics, format, output_dir: outputDir,
         ...syncAndRateParams(format, sync, downsampleHz), preset: selectedPreset || undefined,
       }),
-      // Kept in the dialog too: a failed-columns error lists each column
-      // and the fix, more than an 8-second toast can show.
+      // Kept in the dialog too (ExportFailure): a failed-columns error
+      // lists each column and what to do.
       { errorPrefix: 'Export failed', onError: setError },
     )
     if (r) { setResult(r.output_path); toast.push('info', `Exported to ${r.output_path}`) }
@@ -249,7 +250,7 @@ export default function ExportDialog({
         {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
         {result && <div className="nb-export-result" role="status">Exported to {result}</div>}
-        {error && <div className="nb-export-error" role="alert">Export failed: {error}</div>}
+        {error && <ExportFailure className="nb-export-error" message={`Export failed: ${error}`} />}
 
         <div className="nb-modal-actions">
           <button className="nb-btn" onClick={onClose}>Close</button>

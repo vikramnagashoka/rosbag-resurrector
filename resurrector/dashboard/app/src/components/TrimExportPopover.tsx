@@ -10,6 +10,7 @@
 import React, { useState } from 'react'
 import { api, TrimResponse } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
+import ExportFailure, { CLASSIC_EXPORT_FAILURE_STYLE } from './ExportFailure'
 
 interface Props {
   bagId: number
@@ -68,6 +69,7 @@ export default function TrimExportPopover({
   )
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<TrimResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
   // Editable start/end seeded from props so the user can fine-tune
   // after picking via select-drag, current-zoom, or manual open.
   const [start, setStart] = useState<number>(startSec)
@@ -104,6 +106,8 @@ export default function TrimExportPopover({
       return
     }
     setBusy(true)
+    setResult(null)
+    setError(null)
     const r = await runWithToast(
       toast,
       () =>
@@ -114,7 +118,9 @@ export default function TrimExportPopover({
           format,
           output_path: outputPath,
         }),
-      { errorPrefix: 'Trim export' },
+      // Kept in the popover too (ExportFailure): a failed-columns error
+      // lists each column and what to do.
+      { errorPrefix: 'Trim export', onError: setError },
     )
     if (r) {
       setResult(r)
@@ -311,6 +317,10 @@ export default function TrimExportPopover({
           >
             ✓ {result.output}
           </div>
+        )}
+
+        {error && (
+          <ExportFailure message={`Export failed: ${error}`} style={CLASSIC_EXPORT_FAILURE_STYLE} />
         )}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>

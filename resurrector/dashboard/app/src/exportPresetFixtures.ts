@@ -131,32 +131,34 @@ export function capabilitiesFor(env: ExportEnv): Record<string, Capability> {
   return Object.fromEntries(caps.map(c => [c.name, c]))
 }
 
-// POST /api/bags/{id}/export when a writer can't store some columns: the
-// 422 body _export_error_handler (resurrector/dashboard/api.py) returns,
-// carrying the message ExportError (resurrector/core/export.py) formats,
-// here for HDF5 and two list columns. tests/test_export_error_surfacing.py
-// pins the body's shape and this exact message on the Python side.
-export const EXPORT_FAILED_FILE = '/data/exports/run_7/lidar_scan.h5'
-const LIST_REASON =
-  'HDF5 does not support dtype object containing sequences (e.g. variable-length lists)'
+// POST /api/bags/{id}/export (and /trim, and dataset-version export) when
+// the chosen format can't store some columns: the 422 body
+// _export_error_handler (resurrector/dashboard/api.py) returns, carrying the
+// message ExportError (resurrector/core/export.py) formats. The per-column
+// reason is illustrative (each writer words its own). The path's directory
+// has no break opportunity and is wider than a toast, to check it wraps.
+// tests/test_export_error_surfacing.py pins this exact message on the
+// Python side.
+export const EXPORT_FAILED_FILE =
+  '/data/exports/pick_and_place_session_2026_10_08_with_the_new_gripper_calibration_and_long_arm/joint_states.csv'
+const LATE_COLUMN_REASON =
+  'first appears after row 50000, but the CSV header was written from the first chunk'
 export const EXPORT_FAILED_COLUMN_LINES = [
-  `  - ranges: TypeError: ${LIST_REASON}`,
-  `  - intensities: TypeError: ${LIST_REASON}`,
+  `  - position.6: ValueError: ${LATE_COLUMN_REASON}`,
+  `  - velocity.6: ValueError: ${LATE_COLUMN_REASON}`,
 ]
 export const EXPORT_COLUMN_FAILURES_MESSAGE =
   `2 column(s) could not be written to ${EXPORT_FAILED_FILE}:\n` +
   `${EXPORT_FAILED_COLUMN_LINES.join('\n')}\n` +
-  'That file is partial: the columns above are missing or incomplete; every ' +
-  'other column is complete. The export stopped there, so any later topics, ' +
-  'splits or bags were not exported. To keep these columns, export to ' +
-  'Parquet, which stores every column type.'
+  'These columns are not in that file; every other column is complete. ' +
+  'The export stopped there, so any later topics, splits or bags were not exported.'
 export const EXPORT_COLUMN_FAILURES_BODY = {
   detail: {
     kind: 'export_column_failures',
     message: EXPORT_COLUMN_FAILURES_MESSAGE,
     output: EXPORT_FAILED_FILE,
-    failures: ['ranges', 'intensities'].map(column => ({
-      column, error_type: 'TypeError', message: LIST_REASON,
+    failures: ['position.6', 'velocity.6'].map(column => ({
+      column, error_type: 'ValueError', message: LATE_COLUMN_REASON,
     })),
   },
 }

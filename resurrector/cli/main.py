@@ -647,7 +647,12 @@ def export(
             task=task,
             action_topics=action_topic,
         )
-    except (ValueError, FileExistsError, ExportError) as e:
+    except ExportError as e:
+        # stderr, unwrapped: the message has one failed column per line,
+        # which hard wrapping at 80 columns would break up.
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    except (ValueError, FileExistsError) as e:
         console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except ImportError as e:
@@ -1457,6 +1462,15 @@ def dataset_add_version(
     mgr.close()
 
 
+def _dataset_parquet_hint(name: str) -> str:
+    return (
+        "A dataset version's format is set when the version is added. To get "
+        "Parquet, add a version with the same bags and settings and -f parquet, "
+        f"then export that version: resurrector dataset add-version {name} "
+        "<new-version> -b <bag> ... -f parquet"
+    )
+
+
 @dataset_app.command("export")
 def dataset_export(
     name: Annotated[str, typer.Argument(
@@ -1489,7 +1503,17 @@ def dataset_export(
     try:
         result = mgr.export_version(name, version, str(output))
     except ExportError as e:
-        console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        if e.suggests_parquet:
+            # This command has no --format: the version pins it.
+            err_console.print(rich_escape(_dataset_parquet_hint(name)))
+        raise typer.Exit(1)
+    except KeyError as e:
+        # Unknown dataset or version. str(KeyError) would quote the message.
+        err_console.print(f"[red]Export failed: {rich_escape(str(e.args[0] if e.args else e))}[/red]")
+        raise typer.Exit(1)
+    except ImportError as e:
+        err_console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
         raise typer.Exit(1)
     finally:
         mgr.close()

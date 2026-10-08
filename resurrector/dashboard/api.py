@@ -677,27 +677,32 @@ async def list_export_presets() -> list[dict[str, Any]]:
     return out
 
 
+def _export_error_detail(exc: ExportError, message: str | None = None) -> dict[str, Any]:
+    """The 422 ``detail`` for an :class:`ExportError`. ``message``
+    defaults to the exception's own text."""
+    return {
+        "kind": "export_column_failures",
+        "message": str(exc) if message is None else message,
+        "output": str(exc.output),
+        "failures": [
+            {"column": f.column, "error_type": f.error_type, "message": f.message}
+            for f in exc.failures
+        ],
+    }
+
+
 @app.exception_handler(ExportError)
 async def _export_error_handler(request: Request, exc: ExportError) -> JSONResponse:
-    """Columns that failed to serialize: 422 with the reasons, not a bare 500.
+    """The chosen format couldn't store some columns: 422 with the
+    reasons, not a bare 500.
 
-    Bag export, trim and dataset-version export can all raise it. The
-    dashboard's ApiError shows ``detail.message`` (the exception's own
-    message: each column with its reason, that the file is partial, and
-    the fix); ``output`` and ``failures`` are for API callers.
+    Bag export and trim raise it; dataset-version export adds a hint of
+    its own (see ``export_dataset_version_api``). The dashboard's
+    ApiError shows ``detail.message`` (the exception's own message: each
+    column with its reason, that those columns are not in the file, and
+    what to do); ``output`` and ``failures`` are for API callers.
     """
-    return JSONResponse(
-        status_code=422,
-        content={"detail": {
-            "kind": "export_column_failures",
-            "message": str(exc),
-            "output": str(exc.output),
-            "failures": [
-                {"column": f.column, "error_type": f.error_type, "message": f.message}
-                for f in exc.failures
-            ],
-        }},
-    )
+    return JSONResponse(status_code=422, content={"detail": _export_error_detail(exc)})
 
 
 @app.post("/api/bags/{bag_id}/export")
@@ -718,8 +723,8 @@ async def export_bag(
     frame grid and ignores ``sync``. Returns 503 (``capability_unavailable``)
     when an export's extra is missing, 409 when a lerobot target
     directory isn't empty, and 422 (``export_column_failures``, see
-    ``_export_error_handler``) when columns fail to serialize, e.g.
-    variable-length lists in HDF5. ``output_dir`` is validated against
+    ``_export_error_handler``) when the chosen format can't store some
+    columns. ``output_dir`` is validated against
     ``RESURRECTOR_ALLOWED_ROOTS`` to prevent writing outside trusted
     locations.
 
@@ -1666,8 +1671,10 @@ async def export_dataset_version_api(
     downsample / format settings, and writes data + manifest +
     auto-README + reproducibility config under
     ``<output_dir>/<dataset>/<version>/``. Synchronous; large datasets
-    block the request. Columns that fail to serialize return 422 (see
-    ``_export_error_handler``).
+    block the request. Returns 404 for an unknown dataset or version, and
+    422 (``export_column_failures``, see ``_export_error_handler``) when
+    the version's format can't store some columns; that message also says
+    how to get the version as Parquet, since its format is fixed.
     """
     payload = payload or {}
     output_dir = payload.get("output_dir", "./datasets")
@@ -1675,13 +1682,30 @@ async def export_dataset_version_api(
     validated = _validate_path(str(Path(output_dir).resolve().parent))  # dir may not exist yet
     mgr = _get_dataset_manager()
     try:
+        # Checked up front: export_version raises KeyError for these, but
+        # so can the export itself (a topic missing from a bag), which
+        # stays a 500.
+        ds = mgr.get_dataset(name)
+        if ds is None:
+            raise HTTPException(404, f"Dataset '{name}' not found")
+        if not any(v["version"] == version for v in ds["versions"]):
+            raise HTTPException(404, f"Version '{version}' not found for dataset '{name}'")
         try:
             path = mgr.export_version(name, version, output_dir=output_dir)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        except ExportError:
-            # _export_error_handler's 422 already names the partial file.
-            raise
+        except ExportError as e:
+            message = str(e)
+            if e.suggests_parquet:
+                # The version pins the format; this route can't change it.
+                message += (
+                    "\nA dataset version's format is set when the version is "
+                    "added. To get Parquet, add a version with the same bags "
+                    "and settings and format parquet, then export that "
+                    f"version: resurrector dataset add-version {name} "
+                    "<new-version> -b <bag> ... -f parquet"
+                )
+            raise HTTPException(422, _export_error_detail(e, message))
         except Exception as e:
             # Transactional cleanup: user sees the error; partial files may exist
             # but live under a dataset-named subdir that we don't remove to avoid

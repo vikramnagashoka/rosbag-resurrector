@@ -15,10 +15,17 @@ interface Toast {
   id: number
   level: Level
   message: string
+  announce: boolean
+}
+
+interface PushOptions {
+  // false: the caller shows the same message on the page with its own
+  // role="alert", so a screen reader would read it twice.
+  announce?: boolean
 }
 
 interface Ctx {
-  push: (level: Level, message: string) => void
+  push: (level: Level, message: string, opts?: PushOptions) => void
 }
 
 const ErrorToastContext = createContext<Ctx | null>(null)
@@ -27,10 +34,11 @@ let idCounter = 0
 export function ErrorToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([])
 
-  const push = useCallback((level: Level, message: string) => {
+  const push = useCallback((level: Level, message: string, opts?: PushOptions) => {
     const id = ++idCounter
+    const announce = opts?.announce ?? true
     setToasts(prev => {
-      const next = [...prev, { id, level, message }]
+      const next = [...prev, { id, level, message, announce }]
       return next.slice(-3)
     })
     setTimeout(() => {
@@ -56,7 +64,8 @@ export function ErrorToastProvider({ children }: { children: React.ReactNode }) 
         {toasts.map(t => (
           <div
             key={t.id}
-            role="alert"
+            role={t.announce ? 'alert' : undefined}
+            data-testid="toast"
             style={{
               background: t.level === 'error' ? '#f85149' : t.level === 'warn' ? '#d29922' : '#388bfd',
               color: '#fff',
@@ -68,6 +77,9 @@ export function ErrorToastProvider({ children }: { children: React.ReactNode }) 
               fontSize: 13,
               lineHeight: 1.4,
               pointerEvents: 'auto',
+              // Keep a multi-line message's line breaks; wrap long paths.
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
             }}
           >
             {t.message}
@@ -88,7 +100,8 @@ export function useErrorToast() {
 // the toast. Returns the resolved value or null on failure, so callers
 // can do `const data = await runWithToast(toast, () => api.listBags())`.
 // `onError` gets the same message (without the prefix) for callers that
-// also keep it on screen: a toast is gone after 8 seconds.
+// also keep it on screen, since a toast is gone after 8 seconds. Those
+// callers announce it themselves, so the toast is then silent.
 import { ApiError } from './api'
 
 export async function runWithToast<T>(
@@ -103,7 +116,7 @@ export async function runWithToast<T>(
   } catch (e) {
     const message = e instanceof ApiError ? e.message : String(e)
     const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
-    toast.push('error', `${prefix}${message}`)
+    toast.push('error', `${prefix}${message}`, { announce: !opts?.onError })
     opts?.onError?.(message)
     return null
   }

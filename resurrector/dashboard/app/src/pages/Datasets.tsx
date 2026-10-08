@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api, Dataset } from '../api'
 import { runWithToast, useErrorToast } from '../ErrorToast'
+import ExportFailure, { CLASSIC_EXPORT_FAILURE_STYLE } from '../components/ExportFailure'
 
 export default function Datasets() {
   const [datasets, setDatasets] = useState<Dataset[]>([])
@@ -9,6 +10,7 @@ export default function Datasets() {
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
   const [exportPath, setExportPath] = useState('./datasets')
+  const [exportError, setExportError] = useState<{ name: string; message: string } | null>(null)
   const toast = useErrorToast()
 
   async function refresh() {
@@ -66,10 +68,16 @@ export default function Datasets() {
   }
 
   async function handleExport(name: string, version: string) {
+    setExportError(null)
     const r = await runWithToast(
       toast,
       () => api.exportDatasetVersion(name, version, exportPath),
-      { errorPrefix: 'Export' },
+      // Kept on the page too (ExportFailure): a failed-columns error lists
+      // each column and what to do.
+      {
+        errorPrefix: 'Export',
+        onError: m => setExportError({ name, message: `Export of ${name}@${version} failed: ${m}` }),
+      },
     )
     if (r) toast.push('info', `Exported to ${r.output}`)
   }
@@ -279,6 +287,12 @@ export default function Datasets() {
                     ))}
                   </tbody>
                 </table>
+              )}
+              {exportError?.name === selected.name && (
+                <ExportFailure
+                  message={exportError.message}
+                  style={{ ...CLASSIC_EXPORT_FAILURE_STYLE, marginTop: 16, marginBottom: 0 }}
+                />
               )}
             </div>
           ) : (

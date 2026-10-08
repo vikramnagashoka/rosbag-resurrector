@@ -431,15 +431,14 @@ class ExportColumnFailure:
 
 
 class ExportError(Exception):
-    """Raised when one or more columns fail to serialize during export.
+    """Raised when the chosen format can't store some columns.
 
-    The output file is partial: the failed columns are missing from it or
-    stop early, and every other column is complete. Inspect ``failures``
-    to see which columns failed and why.
+    The failed columns are not in the output file; every other column is
+    complete. Inspect ``failures`` to see which columns failed and why.
 
-    The message names each column with its reason, says the file is
-    partial and gives the fix, so the CLI and the dashboard show
-    ``str(error)`` as it is.
+    The message names each column with its reason, says those columns
+    are not in the file and, for HDF5, Zarr and ``.npz``, points at
+    Parquet, so the CLI and the dashboard show ``str(error)`` as it is.
     """
 
     def __init__(self, failures: list[ExportColumnFailure], output: Path):
@@ -450,15 +449,30 @@ class ExportError(Exception):
         )
         # Every caller (Exporter.export, splits, dataset versions, trim)
         # lets this propagate, so nothing after this file gets written.
-        super().__init__(
+        message = (
             f"{len(failures)} column(s) could not be written to {output}:\n"
             f"{reasons}\n"
-            "That file is partial: the columns above are missing or "
-            "incomplete; every other column is complete. The export stopped "
-            "there, so any later topics, splits or bags were not exported. "
-            "To keep these columns, export to Parquet, which stores every "
-            "column type."
+            "These columns are not in that file; every other column is "
+            "complete. The export stopped there, so any later topics, splits "
+            "or bags were not exported."
         )
+        if self.suggests_parquet:
+            message += (
+                " To keep a column this format can't store, export to "
+                "Parquet, which stores every column type."
+            )
+        super().__init__(message)
+
+    @property
+    def suggests_parquet(self) -> bool:
+        """True when the message suggests Parquet: the failed file is
+        HDF5, Zarr or ``.npz``, which can't store every column type.
+
+        CSV and Parquet fix their columns from the first chunk, so their
+        failures are columns that appear or change type later, which
+        exporting to Parquet doesn't fix.
+        """
+        return Path(self.output).suffix in (".h5", ".zarr", ".npz")
 
 
 @dataclass
