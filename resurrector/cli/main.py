@@ -2099,10 +2099,10 @@ def doctor():
     """Verify the install: prints a pass/warn/fail grid for every dependency.
 
     Two tables: "Core install" (Python version, MCAP parser, DuckDB
-    index, Polars, FastAPI — all required and bundled) and "Optional
-    extras" (image parsing, video export, CLIP local + OpenAI search,
-    live ROS 2 bridge, watch mode, Zarr / LeRobot / RLDS export, mcap CLI,
-    ros2 CLI).
+    index, Polars, FastAPI, image decoding via Pillow — all required and
+    bundled) and "Optional extras" (MP4 video export, CLIP local + OpenAI
+    search, live ROS 2 bridge, watch mode, Zarr / LeRobot / RLDS export,
+    mcap CLI, ros2 CLI).
     Each row tells you exactly what to install if missing — for example:
 
       pip install 'rosbag-resurrector[vision]'
@@ -2158,10 +2158,14 @@ def demo(
 ):
     """Generate or download a sample bag and walk through the basic workflow.
 
-    Default: generates a 5-second synthetic bag (fast, good for smoke tests
-    but cameras contain colored noise — bad for visual demos like CLIP
-    search). Pass --download to fetch a real-data MCAP bag with actual
-    camera footage instead.
+    Default: generates a 5-second synthetic bag (fast, good for smoke tests,
+    but the camera frames are solid colours that change over time — bad
+    for visual demos like CLIP search). Pass --download to fetch a
+    real-data MCAP bag with actual camera footage instead.
+
+    An existing sample is reused unless --force is given, or it is broken
+    (cut off mid-write, or the 1x1 placeholder frames an install without
+    Pillow used to write), in which case it is regenerated.
 
     Examples:
       resurrector demo --full                          # synthetic + walkthrough
@@ -2174,16 +2178,29 @@ def demo(
         return
 
     # Default path: generate synthetic bag
-    from resurrector.demo.sample_bag import generate_bag, BagConfig
+    from resurrector.demo.sample_bag import (
+        BagConfig, generate_bag, stale_sample_reason,
+    )
 
     output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if output.exists() and not force:
+    reuse = output.exists() and not force
+    stale = reuse and stale_sample_reason(output)
+    if reuse and not stale:
         console.print(f"[dim]Sample already exists at {output} (use --force to regenerate)[/dim]")
     else:
+        if stale:
+            console.print(
+                f"[yellow]Regenerating {rich_escape(str(output))}: {stale}.[/yellow]",
+                soft_wrap=True,
+            )
         console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
-        generate_bag(output, BagConfig(duration_sec=5.0))
+        try:
+            generate_bag(output, BagConfig(duration_sec=5.0))
+        except ImportError as e:
+            console.print(f"[red]{rich_escape(str(e))}[/red]", soft_wrap=True)
+            raise typer.Exit(code=1)
         console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
 
     console.print("[cyan]Opening with BagFrame...[/cyan]")

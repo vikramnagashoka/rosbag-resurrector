@@ -197,8 +197,26 @@ jobs:
         # installed wheel. The test imports from `resurrector.demo`
         # (which IS in the wheel) — never from `tests.fixtures` (which
         # isn't). That's the whole point.
+        #
+        # It runs on a copy, outside the checkout: from the repo root,
+        # `python -m pytest` puts the cwd first on sys.path, so the source
+        # tree's resurrector/ shadowed the wheel's and a module missing
+        # from the wheel went unnoticed. The import check fails the job if
+        # anything but the venv's site-packages provides the package.
         run: |
-          ./smoke_venv/bin/python -m pytest tests/test_python_api_smoke.py -v -m smoke
+          SMOKE_DIR="$RUNNER_TEMP/wheel-smoke"
+          SMOKE_PY="$GITHUB_WORKSPACE/smoke_venv/bin/python"
+          mkdir -p "$SMOKE_DIR"
+          cp tests/test_python_api_smoke.py "$SMOKE_DIR/"
+          cd "$SMOKE_DIR"
+          "$SMOKE_PY" -c "
+          import pathlib, site, resurrector
+          pkg = pathlib.Path(resurrector.__file__).resolve()
+          roots = [pathlib.Path(p).resolve() for p in site.getsitepackages()]
+          print('resurrector imported from', pkg)
+          assert any(r in pkg.parents for r in roots), f'not the installed wheel: {pkg}; site-packages: {roots}'
+          "
+          "$SMOKE_PY" -m pytest test_python_api_smoke.py -v -m smoke -o markers=smoke
 
   memory-regression:
     name: Memory regression (slow tests)

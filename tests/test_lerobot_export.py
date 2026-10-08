@@ -20,11 +20,15 @@ import polars as pl
 import pytest
 
 from resurrector.core.bag_frame import BagFrame
+from resurrector.core.exceptions import ResurrectorError
 from resurrector.core.lerobot_export import (
     INSTALL_HINT,
+    MIN_VIDEO_WIDTH,
+    LeRobotFrameShapeError,
     _prepare_root,
     asof_on_grid,
     build_grid,
+    check_frame_shape,
     numeric_columns,
     to_rgb,
 )
@@ -112,6 +116,51 @@ class TestToRgb:
         px = np.array([[[10, 20, 30, 255]]], np.uint8)
         assert to_rgb(px, "bgra8")[0, 0].tolist() == [30, 20, 10]
         assert to_rgb(px, "rgba8").shape == (1, 1, 3)
+
+
+class TestFrameShapeGuard:
+    """Which decoded (H, W, 3) frames are refused before LeRobot sees them.
+
+    Each refused shape is one LeRobot 0.6.1 was seen to mishandle: height 1
+    crashes (FileNotFoundError), height 3 is transposed as channels-first,
+    and the AV1 encoder rejects sides under 4 px and hangs on narrow
+    frames. The accepted shapes keep the guard from refusing frames LeRobot
+    stores correctly.
+    """
+
+    @pytest.mark.parametrize("shape,use_videos", [
+        ((1, 1, 3), True), ((1, 1, 3), False), ((1, 64, 3), False),
+        ((3, 64, 3), False), ((3, 3, 3), True),
+        ((48, 2, 3), True), ((2, 64, 3), True),
+        ((48, 4, 3), True), ((48, 24, 3), True), ((4, 24, 3), True),
+    ])
+    def test_refused(self, shape, use_videos):
+        with pytest.raises(LeRobotFrameShapeError) as exc:
+            check_frame_shape("/cam", shape, use_videos)
+        msg = str(exc.value)
+        assert "'/cam'" in msg and f"{shape[0]}x{shape[1]} (height x width)" in msg
+        assert isinstance(exc.value, ResurrectorError) and isinstance(exc.value, ValueError)
+
+    @pytest.mark.parametrize("shape,use_videos", [
+        ((48, 64, 3), True), ((48, 25, 3), True), ((4, 25, 3), True),
+        ((48, 2, 3), False), ((2, 2, 3), False), ((8, 1, 3), False),
+    ])
+    def test_accepted(self, shape, use_videos):
+        check_frame_shape("/cam", shape, use_videos)
+
+    def test_messages_name_what_lerobot_needs(self):
+        def msg(shape, use_videos=True):
+            with pytest.raises(LeRobotFrameShapeError) as exc:
+                check_frame_shape("/cam", shape, use_videos)
+            return str(exc.value)
+
+        assert "at least 2 pixels high" in msg((1, 64, 3))
+        assert "resurrector demo --force" in msg((1, 1, 3))
+        assert "resurrector demo --force" not in msg((1, 64, 3))
+        assert "other than 1 or 3" in msg((3, 64, 3), use_videos=False)
+        narrow = msg((48, 8, 3))
+        assert f"at least {MIN_VIDEO_WIDTH} pixels wide" in narrow
+        assert "use_videos=False" in narrow
 
 
 class TestStartMethodProbe:
@@ -407,6 +456,70 @@ class TestLeRobotRoundTrip:
         ds = _load(out)
         assert ds.meta.features["observation.images.camera_rgb"]["dtype"] == "image"
         assert ds[0]["observation.images.camera_rgb"].shape[0] == 3
+
+    def test_one_pixel_high_camera_refused_before_writing(self, tmp_dir):
+        """Would catch: 1x1 placeholder demo frames (and any 1-pixel-high
+        camera) ending the export in a raw FileNotFoundError from LeRobot's
+        image writer instead of a message naming the topic."""
+        _lerobot()
+        bag = generate_bag(tmp_dir / "flat.mcap",
+                           BagConfig(duration_sec=1.0, image_height=1, image_width=8))
+        out = tmp_dir / "lr"
+        with pytest.raises(LeRobotFrameShapeError, match=r"1x8 \(height x width\)"):
+            BagFrame(bag).export(preset="lerobot", output=str(out))
+        assert not out.exists()
+
+    def test_cli_reports_bad_frame_shape_in_one_line(self, tmp_dir):
+        from typer.testing import CliRunner
+        from resurrector.cli.main import app
+
+        _lerobot()
+        bag = generate_bag(tmp_dir / "flat.mcap",
+                           BagConfig(duration_sec=1.0, image_height=1, image_width=1))
+        result = CliRunner().invoke(
+            app, ["export", str(bag), "--preset", "lerobot", "-o", str(tmp_dir / "out")],
+            env={"COLUMNS": "400"},
+        )
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert "Export failed" in result.output and "resurrector demo --force" in result.output
+        assert not (tmp_dir / "out").exists()
+
+    def test_three_pixel_high_image_mode_refused(self, tmp_dir):
+        """Would catch: image mode quietly storing 3-pixel-high frames
+        transposed (LeRobot treats them as channels-first)."""
+        _lerobot()
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = generate_bag(tmp_dir / "strip.mcap",
+                           BagConfig(duration_sec=1.0, image_height=3, image_width=16))
+        out = tmp_dir / "lr_img"
+        with pytest.raises(LeRobotFrameShapeError, match="channels-first"):
+            export_lerobot([BagFrame(bag)], ["/camera/rgb"], out, use_videos=False)
+        assert not out.exists()
+
+    def test_narrow_camera_refused_for_video_but_kept_as_images(self, tmp_dir):
+        """Video mode refuses a frame its encoder can't take (without the
+        guard: an encoder error for widths under 4, a hang for narrow
+        frames); image mode stores the same frames exactly, so the guard
+        doesn't refuse what LeRobot handles."""
+        _lerobot()
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = generate_bag(tmp_dir / "narrow.mcap",
+                           BagConfig(duration_sec=1.0, image_height=48, image_width=2))
+        bf = BagFrame(bag)
+        with pytest.raises(LeRobotFrameShapeError, match="use_videos=False"):
+            export_lerobot([bf], ["/camera/rgb"], tmp_dir / "lr_vid")
+        assert not (tmp_dir / "lr_vid").exists()
+
+        out = tmp_dir / "lr_img"
+        export_lerobot([bf], ["/camera/rgb"], out, use_videos=False)
+        ds = _load(out)
+        _, src = next(iter(bf["/camera/rgb"].iter_images()))
+        got = (ds[0]["observation.images.camera_rgb"].permute(1, 2, 0).numpy() * 255).round()
+        assert got.shape == src.shape == (48, 2, 3)
+        assert np.array_equal(got.astype(np.uint8), src)
 
     def test_dataset_readme_quick_start_runs(self, tmp_dir, monkeypatch):
         """The README's quick start must actually load the dataset, from any
