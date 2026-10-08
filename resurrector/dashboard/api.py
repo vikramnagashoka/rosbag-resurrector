@@ -21,6 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
+from resurrector.core.export import ExportError
+
 app = FastAPI(
     title="RosBag Resurrector",
     description="Interactive dashboard for rosbag analysis",
@@ -675,6 +677,29 @@ async def list_export_presets() -> list[dict[str, Any]]:
     return out
 
 
+@app.exception_handler(ExportError)
+async def _export_error_handler(request: Request, exc: ExportError) -> JSONResponse:
+    """Columns that failed to serialize: 422 with the reasons, not a bare 500.
+
+    Bag export, trim and dataset-version export can all raise it. The
+    dashboard's ApiError shows ``detail.message`` (the exception's own
+    message: each column with its reason, that the file is partial, and
+    the fix); ``output`` and ``failures`` are for API callers.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={"detail": {
+            "kind": "export_column_failures",
+            "message": str(exc),
+            "output": str(exc.output),
+            "failures": [
+                {"column": f.column, "error_type": f.error_type, "message": f.message}
+                for f in exc.failures
+            ],
+        }},
+    )
+
+
 @app.post("/api/bags/{bag_id}/export")
 async def export_bag(
     bag_id: int,
@@ -691,8 +716,10 @@ async def export_bag(
     (parquet / hdf5 / csv / numpy / zarr / lerobot / rlds); chunk-streaming
     formats stay bounded by chunk size, while lerobot holds one episode's
     frame grid and ignores ``sync``. Returns 503 (``capability_unavailable``)
-    when an export's extra is missing and 409 when a lerobot target
-    directory isn't empty. ``output_dir`` is validated against
+    when an export's extra is missing, 409 when a lerobot target
+    directory isn't empty, and 422 (``export_column_failures``, see
+    ``_export_error_handler``) when columns fail to serialize, e.g.
+    variable-length lists in HDF5. ``output_dir`` is validated against
     ``RESURRECTOR_ALLOWED_ROOTS`` to prevent writing outside trusted
     locations.
 
@@ -1639,7 +1666,8 @@ async def export_dataset_version_api(
     downsample / format settings, and writes data + manifest +
     auto-README + reproducibility config under
     ``<output_dir>/<dataset>/<version>/``. Synchronous; large datasets
-    block the request.
+    block the request. Columns that fail to serialize return 422 (see
+    ``_export_error_handler``).
     """
     payload = payload or {}
     output_dir = payload.get("output_dir", "./datasets")
@@ -1651,6 +1679,9 @@ async def export_dataset_version_api(
             path = mgr.export_version(name, version, output_dir=output_dir)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        except ExportError:
+            # _export_error_handler's 422 already names the partial file.
+            raise
         except Exception as e:
             # Transactional cleanup: user sees the error; partial files may exist
             # but live under a dataset-named subdir that we don't remove to avoid
@@ -2133,6 +2164,8 @@ async def trim_bag_api(bag_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         "format": "mcap" | "parquet" | "csv" | "hdf5" | "numpy" | "zarr" | "mp4",
         "output_path": "/path/to/output"
       }
+
+    Columns that fail to serialize return 422 (see ``_export_error_handler``).
     """
     from resurrector.core.trim import trim_to_format
 

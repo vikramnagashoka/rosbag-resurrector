@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { ApiError } from './api'
+import { EXPORT_COLUMN_FAILURES_BODY, EXPORT_COLUMN_FAILURES_MESSAGE } from './exportPresetFixtures'
 
 // ApiError used to render "[object Object]" whenever the server returned
 // a nested-detail body, e.g. our structured 503/409 responses or
@@ -22,6 +23,13 @@ describe('ApiError message extraction', () => {
       },
     }, 'fallback')
     expect(e.message).toBe('Live mode requires rclpy.')
+  })
+
+  it('extracts the failed-columns message from an export 422', () => {
+    // export_bag's 422 for columns a format can't store: detail.message is
+    // the whole explanation; output and failures ride along for API callers.
+    const e = new ApiError(422, EXPORT_COLUMN_FAILURES_BODY, 'fallback')
+    expect(e.message).toBe(EXPORT_COLUMN_FAILURES_MESSAGE)
   })
 
   it('extracts top-level error (bridge subprocess shape)', () => {

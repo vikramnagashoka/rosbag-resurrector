@@ -4,6 +4,9 @@ import { test, expect, type APIRequestContext, type Locator, type Page } from '@
 import {
   ALL_EXPORTS_CMD,
   ALL_EXPORTS_NO_WHEEL_DESCRIPTION,
+  EXPORT_COLUMN_FAILURES_BODY,
+  EXPORT_COLUMN_FAILURES_MESSAGE,
+  EXPORT_FAILED_COLUMN_LINES,
   RLDS_NO_WHEEL_REASON,
   capabilitiesFor,
   exportPresetsFor,
@@ -1023,5 +1026,60 @@ test.describe('Export dialog success message', () => {
     // classic Explorer export dialog.
     const modal = await openClassicExportDialog(page)
     await expectRealExportReportsPath(page, request, modal, 'classic')
+  })
+})
+
+// export_bag's 422 when the format can't store some columns, as
+// _export_error_handler sends it (src/exportPresetFixtures.ts). Mocked:
+// which columns a format can't store changes as the writers improve, and
+// what's under test is the dialog showing the explanation.
+async function expectFailedColumnsExplained(page: Page, modal: Locator) {
+  let fail = true
+  await page.route(/\/api\/bags\/\d+\/export\?/, route => fail
+    ? route.fulfill({ status: 422, json: EXPORT_COLUMN_FAILURES_BODY })
+    : route.fulfill({ json: { status: 'completed', output_path: '/tmp/e2e-retry' } }))
+  const exportButton = modal.getByRole('button', { name: 'Export', exact: true })
+
+  await modal.locator('select:has(option[value="hdf5"])').selectOption('hdf5')
+  await exportButton.click()
+
+  // The dialog keeps the whole explanation after the toast has gone.
+  const inline = modal.getByRole('alert')
+  await expect(inline).toBeVisible()
+  await expect(inline).toContainText('Export failed: 2 column(s) could not be written to')
+  await expect(inline).toContainText('That file is partial')
+  await expect(inline).toContainText('export to Parquet')
+  // One failed column per line, as the message lays them out.
+  const lines = (await inline.innerText()).split('\n').map(l => l.trim())
+  for (const line of EXPORT_FAILED_COLUMN_LINES) expect(lines).toContain(line.trim())
+  // The same text as the toast, and never an unreadable stand-in.
+  const expected = `Export failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`
+  await expect(page.getByRole('alert').filter({ hasText: 'Export failed: 2 column(s)' })).toHaveCount(2)
+  const alerts = (await page.getByRole('alert').allTextContents()).join('\n')
+  expect(alerts).toContain(expected)
+  expect(alerts).not.toContain('[object Object]')
+  expect(alerts).not.toMatch(/Internal Server Error/i)
+  await expect(modal.getByRole('status')).toHaveCount(0)
+
+  // A retry that works clears the error.
+  fail = false
+  await exportButton.click()
+  await expect(modal.getByRole('status')).toHaveText('Exported to /tmp/e2e-retry')
+  await expect(modal.getByRole('alert')).toHaveCount(0)
+}
+
+test.describe('Export dialog when columns fail to serialize', () => {
+  test('notebook dialog keeps each failed column, its reason and the fix on screen', async ({ page }) => {
+    // Would catch: export_bag's failed-columns error reaching the user only
+    // as an 8-second toast with the column lines run together (in
+    // v0.8.5 it was a bare 500, "Export failed: Internal Server Error"), a
+    // structured detail rendered as "[object Object]", and the error
+    // sticking around after a retry that works.
+    await expectFailedColumnsExplained(page, await openNotebookExportDialog(page))
+  })
+
+  test('classic dialog keeps each failed column, its reason and the fix on screen', async ({ page }) => {
+    // Would catch: the same in the classic Explorer export dialog.
+    await expectFailedColumnsExplained(page, await openClassicExportDialog(page))
   })
 })
