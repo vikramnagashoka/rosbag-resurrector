@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 import numpy as np
 import polars as pl
 
+from resurrector.core.exceptions import ResurrectorError
+
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import BagFrame, TopicView
 
@@ -87,6 +89,72 @@ def lerobot_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+# Smallest frames LeRobot's default AV1 encoder (libsvtav1) handles,
+# measured with LeRobot 0.6.1 / PyAV 15.1 (SVT-AV1 3.0.0): it refuses
+# (avcodec_open2 error) a height or width under 4, and for widths 4-24 it
+# never returns from save_episode(), whatever the height or frame count.
+MIN_VIDEO_WIDTH = 25
+MIN_VIDEO_HEIGHT = 4
+
+
+class LeRobotFrameShapeError(ResurrectorError, ValueError):
+    """A camera topic's frames are a size LeRobot can't store faithfully.
+
+    Raised before the dataset directory is created. Each rule below is a
+    failure measured against LeRobot 0.6.1, not a guess:
+
+    - Height 1: LeRobot reads ``(1, W, 3)`` as single-channel, its image
+      writer drops every frame, and ``save_episode()`` dies with
+      FileNotFoundError. The 1x1 placeholder demo bags hit this.
+    - Height 3: read as channels-first ``(3, H, W)`` and transposed, so
+      image mode silently stores wrong pixels and video mode crashes.
+    - Video mode, height under ``MIN_VIDEO_HEIGHT`` or width under 4: the
+      encoder refuses it. Width 4 to ``MIN_VIDEO_WIDTH - 1``: the encoder
+      never returns.
+
+    Also a ``ValueError``, so callers that already map ValueError to a
+    clean error (the CLI, the dashboard's 400) keep doing so.
+    """
+
+    def __init__(self, topic: str, shape: tuple[int, ...], use_videos: bool):
+        self.topic = topic
+        self.shape = tuple(shape)
+        self.use_videos = use_videos
+        h, w = self.shape[:2]
+        if h == 1:
+            need = ("LeRobot reads a 1-pixel-high frame as single-channel "
+                    "and fails to write it; it needs frames at least 2 pixels high")
+        elif h == 3:
+            need = ("LeRobot reads a 3-pixel-high frame as channels-first and "
+                    "transposes it; it needs a height other than 1 or 3")
+        else:
+            need = (f"LeRobot's AV1 video encoder needs frames at least "
+                    f"{MIN_VIDEO_WIDTH} pixels wide and {MIN_VIDEO_HEIGHT} high "
+                    "(use_videos=False stores PNG images instead)")
+        hint = ""
+        if (h, w) == (1, 1):
+            hint = (" 1x1 frames usually mean a demo bag written without "
+                    "Pillow: regenerate it with `resurrector demo --force`.")
+        super().__init__(
+            f"Camera topic {topic!r} has {h}x{w} (height x width) frames: "
+            f"{need}. Leave the topic out of the export or resize its "
+            f"images.{hint}"
+        )
+
+
+def check_frame_shape(topic: str, shape: tuple[int, ...], use_videos: bool) -> None:
+    """Raise :class:`LeRobotFrameShapeError` if LeRobot would mishandle ``shape``.
+
+    ``shape`` is a decoded ``(H, W, 3)`` frame as handed to ``add_frame``.
+    """
+    h, w = shape[:2]
+    bad = h in (1, 3) or (
+        use_videos and (h < MIN_VIDEO_HEIGHT or w < MIN_VIDEO_WIDTH)
+    )
+    if bad:
+        raise LeRobotFrameShapeError(topic, shape, use_videos)
 
 
 @dataclass
@@ -420,6 +488,8 @@ def export_lerobot(
     Raises:
         ImportError: LeRobot isn't installed (see :data:`INSTALL_HINT`).
         FileExistsError: ``output_dir`` exists and is non-empty.
+        LeRobotFrameShapeError: A camera's frames are a size LeRobot
+            mishandles (see the class); raised before ``output_dir`` exists.
         ValueError: No overlapping data, or episodes disagree on features.
     """
     LeRobotDataset = import_lerobot_dataset()
@@ -448,6 +518,8 @@ def export_lerobot(
             streams = {_camera_key(v.name): frames_on_grid(v, ep.grid) for v in ep.image_views}
             firsts = {k: next(it) for k, it in streams.items()}
             cam_shapes = {k: tuple(int(x) for x in f.shape) for k, f in firsts.items()}
+            for v in ep.image_views:
+                check_frame_shape(v.name, cam_shapes[_camera_key(v.name)], use_videos)
             feats = _features(ep, cam_shapes, use_videos)
 
             if dataset is None:

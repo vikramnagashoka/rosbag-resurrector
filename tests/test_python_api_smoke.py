@@ -141,12 +141,14 @@ def test_doctor_core_checks_pass_on_base_install():
     assert not failing, f"core doctor checks not passing: {failing}"
 
 
-def test_demo_camera_frames_decode_at_configured_size(smoke_bag):
+def test_demo_camera_frames_decode_at_configured_size(smoke_bag, tmp_path):
     """Demo JPEG frames decode to full-size RGB on a base install.
 
     Would catch: Pillow living only in the extras. Without it the demo
     generator wrote hard-coded 1x1 grayscale JPEGs (LeRobot export then
     crashed on them) and decoding any CompressedImage raised ImportError.
+    The second bag uses a non-default size, so a generator that ignored
+    BagConfig and always wrote 64x48 frames would fail too.
     """
     import numpy as np
 
@@ -160,6 +162,12 @@ def test_demo_camera_frames_decode_at_configured_size(smoke_bag):
     _, raw = next(iter(bf["/camera/rgb"].iter_images()))
     drift = np.abs(frame.reshape(-1, 3).mean(axis=0) - raw[0, 0].astype(float))
     assert drift.max() < 10, f"compressed frame colour drifted by {drift}"
+
+    odd = BagConfig(duration_sec=0.5, image_width=40, image_height=30)
+    small = BagFrame(generate_bag(tmp_path / "small.mcap", odd))
+    for topic in ("/camera/compressed", "/camera/rgb"):
+        _, frame = next(iter(small[topic].iter_images()))
+        assert frame.shape == (30, 40, 3), topic
 
 
 def test_dashboard_serves_camera_frames(smoke_bag, tmp_path, monkeypatch):

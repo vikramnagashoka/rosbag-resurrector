@@ -79,13 +79,7 @@ def test_examples_do_not_import_the_tests_package():
     assert not offenders, offenders
 
 
-def test_example_04_skips_image_sections_without_pillow(tmp_path):
-    """04 must exit 0 on a base install (no Pillow, no OpenCV).
-
-    The JPEG decode and PNG export both need Pillow from [vision-lite];
-    before the fix the script died with ImportError on the first
-    CompressedImage frame.
-    """
+def _run_example_04(tmp_path, blocked: tuple[str, ...]) -> subprocess.CompletedProcess:
     from resurrector.demo.sample_bag import BagConfig, generate_bag
 
     home = tmp_path / "home"
@@ -96,23 +90,53 @@ def test_example_04_skips_image_sections_without_pillow(tmp_path):
     )
     script = EXAMPLES / "04_image_video_export.py"
     # sys.modules[name] = None makes `import name` raise ImportError, the
-    # same thing a base install sees.
+    # same thing an install without that package sees.
     boot = (
         "import runpy, sys\n"
-        "sys.modules['PIL'] = None\n"
-        "sys.modules['cv2'] = None\n"
-        f"sys.path.insert(0, {str(EXAMPLES)!r})\n"
+        + "".join(f"sys.modules[{name!r}] = None\n" for name in blocked)
+        + f"sys.path.insert(0, {str(EXAMPLES)!r})\n"
         f"runpy.run_path({str(script)!r}, run_name='__main__')\n"
     )
     env = {**os.environ, "HOME": str(home)}
-    proc = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", boot],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
     )
+
+
+def _skip_lines(stdout: str) -> list[str]:
+    return [line.strip() for line in stdout.splitlines() if "[SKIP]" in line]
+
+
+def test_example_04_on_a_base_install(tmp_path):
+    """A base install has Pillow but not OpenCV: only the MP4 step skips.
+
+    Would catch: the example (or a regression in the base dependencies)
+    skipping JPEG decoding and PNG export, which need only Pillow.
+    """
+    proc = _run_example_04(tmp_path, blocked=("cv2",))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "decoded shape=(48, 64, 3)" in proc.stdout
+    assert "Wrote 5 PNG file(s)" in proc.stdout
+    skips = _skip_lines(proc.stdout)
+    assert len(skips) == 1 and "MP4" in skips[0], proc.stdout
+    assert "[vision-lite]" in skips[0]
+
+
+def test_example_04_skips_image_sections_without_pillow(tmp_path):
+    """04 must exit 0 on a partial install that lacks Pillow (pip --no-deps).
+
+    Before the fix the script died with ImportError on the first
+    CompressedImage frame. The Pillow hints name the package itself:
+    Pillow ships with the base install, not with [vision-lite].
+    """
+    proc = _run_example_04(tmp_path, blocked=("PIL", "cv2"))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "frame 0:" in proc.stdout  # raw sensor_msgs/Image still decodes
-    assert proc.stdout.count("[SKIP]") == 3, proc.stdout
-    assert "vision-lite" in proc.stdout
+    jpeg, png, mp4 = _skip_lines(proc.stdout)
+    for line in (jpeg, png):
+        assert "pip install Pillow" in line and "vision-lite" not in line, line
+    assert "[vision-lite]" in mp4
 
 
 def test_example_26_runs_the_qc_cli(tmp_path):

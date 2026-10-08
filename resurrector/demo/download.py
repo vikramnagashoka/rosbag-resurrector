@@ -1,8 +1,8 @@
 """Real-data sample bag downloader for `resurrector demo --download`.
 
 Why this exists: the synthetic sample bag (``sample_bag.py``) is fast to
-generate and good for smoke tests, but every camera frame is colored noise.
-That makes the dashboard's CLIP-powered semantic frame search return
+generate and good for smoke tests, but every camera frame is one solid
+colour. That makes the dashboard's CLIP-powered semantic frame search return
 visually meaningless results — bad demo. This module fetches a real
 public-domain robotics dataset so demos and the search GIF actually
 look impressive.
