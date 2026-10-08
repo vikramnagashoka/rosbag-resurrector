@@ -1775,6 +1775,20 @@ async def _stop_bridge_process(proc: Any, grace_s: float) -> None:
         await asyncio.to_thread(proc.wait, grace_s)
 
 
+def _bridge_command(mode: str) -> list[str]:
+    """Argv prefix that launches ``resurrector bridge <mode>``.
+
+    In a PyInstaller build (the DMG/DEB) ``sys.executable`` is the frozen
+    resurrector CLI itself, not a Python interpreter, so ``-m module`` would
+    reach Typer as an unknown option ("No such option: -m") and the Bridge
+    page's Start failed.
+    """
+    import sys
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "bridge", mode]
+    return [sys.executable, "-m", "resurrector.cli.main", "bridge", mode]
+
+
 @app.post("/api/bridge/start")
 async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Start a bridge subprocess.
@@ -1835,8 +1849,7 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
                 409, f"Port {port} is already in use: {e}",
             )
 
-    import sys
-    cmd = [sys.executable, "-m", "resurrector.cli.main", "bridge", mode]
+    cmd = _bridge_command(mode)
     if mode == "playback":
         bag_path = payload.get("bag_path")
         if not bag_path:

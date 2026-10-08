@@ -410,3 +410,27 @@ class TestBridgeProxyErrors:
 
         assert r.status_code == 502, r.text
         assert "bridge" in r.json()["detail"].lower()
+
+
+class TestBridgeCommand:
+    """How the dashboard launches ``resurrector bridge``.
+
+    Would catch: the frozen DMG/DEB app spawning ``<binary> -m
+    resurrector.cli.main bridge ...``. There sys.executable is the
+    resurrector CLI, so Typer exited with "No such option: -m" and the
+    Bridge page's Start returned 500.
+    """
+
+    def test_frozen_app_calls_its_own_cli(self, monkeypatch):
+        import sys
+        from resurrector.dashboard.api import _bridge_command
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        assert _bridge_command("playback") == [sys.executable, "bridge", "playback"]
+
+    def test_python_install_runs_the_module(self, monkeypatch):
+        import sys
+        from resurrector.dashboard.api import _bridge_command
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        assert _bridge_command("live") == [
+            sys.executable, "-m", "resurrector.cli.main", "bridge", "live",
+        ]

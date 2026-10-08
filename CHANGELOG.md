@@ -78,10 +78,12 @@ speed changes and seek.
   Bridge Play/Pause/Seek returned 500 and the bridge's `/ws` returned 404
   (no WebSocket library for uvicorn). Both are now base dependencies, and
   the wheel-smoke CI job checks they ship.
-- **The DMG/DEB app can start the dashboard.** PyInstaller never bundled
-  `resurrector.dashboard` (uvicorn imports it by name), so
-  `resurrector dashboard` exited with "Could not import module"; the
-  builds now collect every `resurrector` module.
+- **The DMG/DEB app can start the dashboard and its bridge.** PyInstaller
+  never bundled `resurrector.dashboard` (uvicorn imports it by name), so
+  `resurrector dashboard` exited with "Could not import module"; the builds
+  now collect every `resurrector` module. The dashboard also launched the
+  bridge as `<binary> -m resurrector.cli.main`, which the frozen CLI rejected
+  ("No such option: -m"), so the Bridge page's Start returned 500.
 
 **Multi-bag playback**
 - Each bag's start offset is served once per session: resume no longer
@@ -160,7 +162,7 @@ speed changes and seek.
 
 ### Test counts
 
-- Backend: **1290 passed** (was 841), plus a memory-regression tier of 16
+- Backend: **1292 passed** (was 841), plus a memory-regression tier of 16
   (was 12). The `Extras (all-exports)` CI job now runs the RLDS tests
   against real tensorflow and fails if they skip; `Extras (lerobot)` does the
   same for LeRobot.
