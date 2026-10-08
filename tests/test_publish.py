@@ -562,9 +562,13 @@ class TestCardTopicsFollowExport:
 # Outside cp1252 (Windows' usual locale encoding) and ASCII.
 _NON_ASCII = "Pick the red cube → 拾取红色方块"
 
+# ascii(), not repr(): the prelude goes on the child's command line, and a
+# C-locale Linux Python decodes argv as ASCII, so non-ASCII source there
+# fails with "Unable to decode the command from the command line" before
+# the test runs. (macOS always decodes argv as UTF-8, which hid this.)
 _ASCII_LOCALE_PRELUDE = f"""
 import locale, sys
-TEXT = {_NON_ASCII!r}
+TEXT = {ascii(_NON_ASCII)}
 try:
     TEXT.encode(locale.getpreferredencoding(False))
 except UnicodeEncodeError:
