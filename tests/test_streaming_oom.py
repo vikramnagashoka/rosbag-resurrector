@@ -366,6 +366,142 @@ def test_numpy_export_under_cap_bounded(large_bag):
     assert delta_mb < 200, f"numpy export RSS delta {delta_mb:.1f} MB > 200 MB"
 
 
+_NPZ_TEXT_CHILD = """
+import json, resource, sys
+from pathlib import Path
+import polars as pl
+from resurrector.core.export import _stream_numpy
+
+out, rows, chunk, width = Path(sys.argv[1]), 150_000, 50_000, 500
+
+def chunks():
+    for start in range(0, rows, chunk):
+        s = ["base_link"] * chunk
+        s[0] = "x" * width
+        yield pl.DataFrame({"timestamp_ns": range(start, start + chunk), "s": s})
+
+def peak_bytes():
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru if sys.platform == "darwin" else ru * 1024
+
+before = peak_bytes()
+_stream_numpy(chunks(), out, "t")
+print(json.dumps({
+    "delta_mb": (peak_bytes() - before) / 2**20,
+    "fixed_mb": rows * width * 4 / 2**20,
+}))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ru_maxrss is POSIX-only")
+def test_npz_text_column_holds_one_fixed_width_copy(tmp_path):
+    """``.npz`` text is fixed width, so a column costs rows x its longest
+    value, unavoidably. Writing it must not cost that twice: per-chunk
+    ``<U`` arrays plus their concatenation peaked near 2x here (each chunk
+    holds one 500-character value); the column filled part by part from
+    object arrays stays near 1x.
+    """
+    import resurrector
+
+    src_root = str(Path(resurrector.__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (src_root, env.get("PYTHONPATH")) if p
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _NPZ_TEXT_CHILD, str(tmp_path)],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["delta_mb"] < 1.5 * result["fixed_mb"], (
+        f".npz text export peak RSS delta {result['delta_mb']:.0f} MB for a "
+        f"{result['fixed_mb']:.0f} MB fixed-width column"
+    )
+
+
+_WIDE_TYPE = "resurrector_test/msg/Wide"
+_WIDE_ROWS, _WIDE_LATE_FROM, _WIDE_COLS = 120_000, 100_000, 50
+
+_IPC_WIDEN_CHILD = f"""
+import json, resource, struct, sys
+import polars as pl
+from resurrector.core.bag_frame import BagFrame
+from resurrector.ingest.parser import register_decoder
+
+def decode(data):
+    (i,) = struct.unpack_from("<I", data, 4)
+    row = {{f"f{{k}}": float(i + k) for k in range({_WIDE_COLS})}}
+    if i >= {_WIDE_LATE_FROM}:
+        row["late"] = float(i)
+    return row
+
+register_decoder("{_WIDE_TYPE}", decode)
+
+def peak_bytes():
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru if sys.platform == "darwin" else ru * 1024
+
+view = BagFrame(sys.argv[1])["/wide"]
+view.message_count
+before = peak_bytes()
+with view.materialize_ipc_cache(chunk_size=2_000) as cache:
+    delta_mb = (peak_bytes() - before) / 2**20
+    late = cache.scan().select(pl.col("late").drop_nulls().len()).collect().item()
+    rows = cache.scan().select(pl.len()).collect().item()
+print(json.dumps({{"delta_mb": delta_mb, "rows": rows, "late": late}}))
+"""
+
+
+@pytest.fixture(scope="session")
+def wide_bag(tmp_path_factory):
+    """/wide: 50 float fields per message, plus ``late`` from message
+    100 000 on, so the IPC cache is widened after 100k rows."""
+    import struct
+
+    from mcap.writer import Writer
+
+    path = tmp_path_factory.mktemp("oom_wide") / "wide.mcap"
+    with open(path, "wb") as f:
+        writer = Writer(f)
+        writer.start(profile="ros2", library="resurrector-test")
+        sid = writer.register_schema(name=_WIDE_TYPE, encoding="ros2msg", data=b"uint32 i\n")
+        cid = writer.register_channel(topic="/wide", message_encoding="cdr", schema_id=sid)
+        for i in range(_WIDE_ROWS):
+            t = 1_700_000_000_000_000_000 + i * 1_000_000
+            writer.add_message(cid, log_time=t, publish_time=t,
+                               data=b"\x00\x01\x00\x00" + struct.pack("<I", i))
+        writer.finish()
+    yield path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ru_maxrss is POSIX-only")
+def test_ipc_cache_widening_bounded(wide_bag):
+    """A column that first appears after 100k rows widens the cached IPC
+    file, which rewrites those rows. The rewrite goes a batch at a time:
+    about 59 MB here against 48 MB with no widening, the same at 300k
+    rows. Reading the cached rows back whole peaked at 125 MB here and
+    251 MB at 300k rows."""
+    import resurrector
+
+    src_root = str(Path(resurrector.__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (src_root, env.get("PYTHONPATH")) if p
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _IPC_WIDEN_CHILD, str(wide_bag)],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["rows"] == _WIDE_ROWS
+    assert result["late"] == _WIDE_ROWS - _WIDE_LATE_FROM
+    assert result["delta_mb"] < 90, (
+        f"IPC cache widening peak RSS delta {result['delta_mb']:.1f} MB > 90 MB"
+    )
+
+
 def test_numpy_export_over_cap_raises(large_bag, monkeypatch):
     """NumPy export above NUMPY_HARD_CAP must raise LargeTopicError."""
     from resurrector.core import export as export_module
