@@ -221,6 +221,12 @@ export interface ExportPreset {
   description: string
   extras_required: string[]
   available: boolean
+  // Why the preset can't run on this install, or null when it can. Names
+  // the fix: usually an extra's pip command, but a prerequisite comes first
+  // where pip can't deliver the dependency ("Use Python 3.10-3.13 on ...,
+  // then: pip install ..."). See export_dependency_problem in
+  // resurrector/core/export.py.
+  unavailable_reason: string | null
 }
 
 // POST /api/bags/{id}/export (export_bag in resurrector/dashboard/api.py).

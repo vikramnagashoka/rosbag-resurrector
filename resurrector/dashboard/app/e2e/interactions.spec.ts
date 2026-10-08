@@ -1,6 +1,14 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test'
+import {
+  ALL_EXPORTS_CMD,
+  ALL_EXPORTS_NO_WHEEL_DESCRIPTION,
+  RLDS_NO_WHEEL_REASON,
+  capabilitiesFor,
+  exportPresetsFor,
+  type ExportEnv,
+} from '../src/exportPresetFixtures'
 
 // Behavioural tests for interactions that screenshot diffs can't
 // reliably capture (clicks, state changes, WebGL canvas content,
@@ -816,12 +824,19 @@ async function expectLerobotExportControlsHonest(page: Page, modal: Locator) {
   await expect(rate).toHaveAccessibleName(/^Frame rate \(fps[^)]*\)$/)
   await expect(rate).toHaveAttribute('placeholder', /30/)
 
+  // The field's border before any error, taken with the field focused like
+  // it is after each fill below.
+  const borderColor = () => rate.evaluate(el => getComputedStyle(el).borderTopColor)
+  await rate.fill('')
+  const normalBorder = await borderColor()
+
   // An fps that rounds to 0 blocks Export: the backend would read 0 as
   // "unset" and silently write 30 fps.
   await rate.fill('0.4')
   await expect(rate).toHaveAccessibleDescription('LeRobot needs at least 1 fps.')
   await expect(modal.getByText(/Rounded to 0 fps/)).toHaveCount(0)
   await expect(exportButton).toBeDisabled()
+  await expect.poll(borderColor).not.toBe(normalBorder)
 
   // A fractional fps is rounded, and the UI says so before export. The note
   // describes the field; it is not part of the field's name.
@@ -830,6 +845,9 @@ async function expectLerobotExportControlsHonest(page: Page, modal: Locator) {
   await expect(rate).toHaveAccessibleName(/^Frame rate \(fps[^)]*\)$/)
   await expect(rate).toHaveAccessibleDescription('Rounded to 15 fps.')
   await expect(exportButton).toBeEnabled()
+  // The error border goes away with the error. The classic dialog once
+  // left a browser-default grey border here until it remounted.
+  await expect.poll(borderColor).toBe(normalBorder)
 
   // The request carries exactly what the dialog shows: no sync flag, integer
   // fps. Fulfilled with export_bag's real response shape.
@@ -914,6 +932,80 @@ test.describe('Export dialog with LeRobot format', () => {
     // Explorer export dialog.
     const modal = await openClassicExportDialog(page)
     await expectLerobotExportControlsHonest(page, modal)
+  })
+})
+
+// Serve /api/export-presets and /api/system/capabilities as the backend
+// reports them in `env` (see src/exportPresetFixtures.ts). Call before the
+// page loads.
+async function mockExportEnv(page: Page, env: ExportEnv) {
+  await page.route(/\/api\/export-presets(\?|$)/, route =>
+    route.fulfill({ json: exportPresetsFor(env) }))
+  await page.route(/\/api\/system\/capabilities(\?|$)/, route =>
+    route.fulfill({ json: capabilitiesFor(env) }))
+}
+
+// On an interpreter where [all-exports] can't install tensorflow, with zarr
+// already installed: rlds is the only preset off and pip can't change that.
+async function expectRldsExplainedWithoutPip(modal: Locator) {
+  const rlds = modal.locator('select:has(option[value="training-tabular"]) option[value="rlds"]')
+  // Banner text comes from the capabilities response; once it is up, both
+  // payloads have rendered and the absence checks below mean something.
+  await expect(modal.getByText(ALL_EXPORTS_NO_WHEEL_DESCRIPTION)).toBeVisible()
+  await expect(modal.getByText(RLDS_NO_WHEEL_REASON)).toBeVisible()
+  await expect(rlds).toHaveAttribute('disabled', '')
+  await expect(rlds).toHaveAttribute('title', RLDS_NO_WHEEL_REASON)
+  await expect(rlds).not.toContainText('extras not installed')
+  await expect(modal).not.toContainText('extras not installed')
+  await expect(modal).not.toContainText('need the Zarr / RLDS extras')
+  // No copy block or <code> line holding the bare command.
+  await expect(modal.getByText(ALL_EXPORTS_CMD, { exact: true })).toHaveCount(0)
+  await expect(modal.getByRole('button', { name: 'Copy' })).toHaveCount(0)
+  await expect(modal.getByText('after installing')).toHaveCount(0)
+}
+
+// A supported interpreter where the extra just isn't installed: the
+// banner and its pip command are the whole fix, as before.
+async function expectPipOfferedForRlds(modal: Locator) {
+  const rlds = modal.locator('select:has(option[value="training-tabular"]) option[value="rlds"]')
+  await expect(modal.getByText(ALL_EXPORTS_CMD, { exact: true })).toBeVisible()
+  await expect(modal.getByText(
+    /^1 preset\(s\) (unavailable — Zarr \/ RLDS extras not installed|need the Zarr \/ RLDS extras)\.$/,
+  )).toBeVisible()
+  await expect(rlds).toHaveAttribute('disabled', '')
+  await expect(rlds).toHaveText('rlds (extras not installed)')
+  await expect(modal).not.toContainText('on this interpreter')
+}
+
+test.describe('Export dialog when pip cannot install tensorflow', () => {
+  test('notebook dialog says why rlds is off instead of offering pip', async ({ page }) => {
+    // Would catch: the notebook dialog showing "1 preset(s) need the Zarr /
+    // RLDS extras." with the [all-exports] command, and "rlds (extras not
+    // installed)", on Python 3.14 where that command can't install
+    // tensorflow; the backend's unavailable_reason never reaching the UI.
+    await mockExportEnv(page, 'no-wheel')
+    await expectRldsExplainedWithoutPip(await openNotebookExportDialog(page))
+  })
+
+  test('classic dialog says why rlds is off instead of offering pip', async ({ page }) => {
+    // Would catch: the classic dialog's InstallBanner title hiding the
+    // capability description, plus a copy block for a command that can't
+    // help on this interpreter.
+    await mockExportEnv(page, 'no-wheel')
+    await expectRldsExplainedWithoutPip(await openClassicExportDialog(page))
+  })
+
+  test('notebook dialog still offers pip where it installs tensorflow', async ({ page }) => {
+    // Would catch: the platform handling swallowing the ordinary
+    // missing-extra banner and its pip command.
+    await mockExportEnv(page, 'tensorflow-missing')
+    await expectPipOfferedForRlds(await openNotebookExportDialog(page))
+  })
+
+  test('classic dialog still offers pip where it installs tensorflow', async ({ page }) => {
+    // Would catch: the same regression in the classic dialog.
+    await mockExportEnv(page, 'tensorflow-missing')
+    await expectPipOfferedForRlds(await openClassicExportDialog(page))
   })
 })
 

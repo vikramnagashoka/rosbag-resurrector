@@ -1,12 +1,16 @@
 import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
-import { InstallBanner, useCapability } from './InstallBanner'
+import { InstallBanner, useCapabilities } from './InstallBanner'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 import {
   LEROBOT_DEFAULT_FPS,
   LEROBOT_SYNC_NOTE,
+  extraGap,
   fpsRoundingHint,
+  hasGap,
+  installWontFix,
   isLerobot,
+  presetOptionLabel,
   rateError,
   syncAndRateParams,
 } from '../exportOptions'
@@ -42,12 +46,25 @@ function applyTopicFilterClientSide(
   return topics
 }
 
+// "Extras not installed" only for what installing them fixes; presets the
+// extra can't unlock on this interpreter are counted apart.
+function allExportsTitle(fixable: number, stuck: number): string {
+  if (stuck === 0) return `${fixable} preset(s) unavailable — Zarr / RLDS extras not installed.`
+  if (fixable === 0) return `${stuck} preset(s) unavailable on this interpreter.`
+  return `${fixable} preset(s) unavailable — extras not installed. ` +
+    `${stuck} more can't run on this interpreter.`
+}
+
 export default function ExportDialog({ bagId, availableTopics, onClose }: Props) {
   const [presets, setPresets] = useState<ExportPreset[]>([])
-  const allExportsCap = useCapability('all_exports')
-  const lerobotCap = useCapability('lerobot')
-  const blockedBy = (extra: string) =>
-    presets.filter(p => !p.available && p.extras_required.includes(extra)).length
+  const caps = useCapabilities()
+  const allExportsCap = caps?.all_exports ?? null
+  const lerobotCap = caps?.lerobot ?? null
+  // Each banner offers only the install command that fixes something here;
+  // presets it can't fix get their own reason under the preset picker.
+  const allExportsGap = extraGap(presets, 'all-exports', caps)
+  const lerobotGap = extraGap(presets, 'lerobot', caps)
+  const stuckPresets = presets.filter(p => installWontFix(p, caps))
   const [selectedPreset, setSelectedPreset] = useState<string>('')   // '' = manual
   const [selectedTopics, setSelectedTopics] = useState<string[]>(availableTopics)
   const [format, setFormat] = useState('parquet')
@@ -58,6 +75,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   const [result, setResult] = useState<string | null>(null)
   const toast = useErrorToast()
   const outputDirId = useId()
+  const stuckNoteId = useId()
   const rateId = useId()
   const rateNoteId = useId()
   const syncNoteId = useId()
@@ -159,21 +177,28 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
       <div style={dialogStyle} onClick={e => e.stopPropagation()}>
         <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>Export Data</h2>
 
-        {lerobotCap && !lerobotCap.available && blockedBy('lerobot') > 0 && (
+        {lerobotCap && !lerobotCap.available && hasGap(lerobotGap) && (
           <InstallBanner
             capability={lerobotCap}
-            title="LeRobot preset unavailable — LeRobot extra not installed (Python 3.12+)."
-            helperText={<>Writes a LeRobot v3 dataset (state, camera video) that loads directly in LeRobot.</>}
+            installable={lerobotGap.fixable.length > 0}
+            title={lerobotGap.fixable.length > 0
+              ? 'LeRobot preset unavailable — LeRobot extra not installed (Python 3.12+).'
+              : 'LeRobot preset unavailable on this interpreter.'}
+            helperText={lerobotGap.stuck.length > 0
+              ? lerobotCap.description
+              : <>Writes a LeRobot v3 dataset (state, camera video) that loads directly in LeRobot.</>}
           />
         )}
-        {allExportsCap && !allExportsCap.available && blockedBy('all-exports') > 0 && (
+        {allExportsCap && !allExportsCap.available && hasGap(allExportsGap) && (
           <InstallBanner
             capability={allExportsCap}
-            title={`${blockedBy('all-exports')} preset(s) unavailable — Zarr / RLDS extras not installed.`}
-            helperText={
-              <>Parquet, HDF5, and CSV exports work without this. Install if you need
-                Zarr or RLDS dataset output.</>
-            }
+            installable={allExportsGap.fixable.length > 0}
+            title={allExportsTitle(allExportsGap.fixable.length, allExportsGap.stuck.length)}
+            helperText={allExportsGap.stuck.length > 0
+              // The backend's explanation of what the extra can't install here.
+              ? allExportsCap.description
+              : <>Parquet, HDF5, and CSV exports work without this. Install if you need
+                  Zarr or RLDS dataset output.</>}
           />
         )}
 
@@ -184,18 +209,33 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
             <select
               value={selectedPreset}
               onChange={e => applyPreset(e.target.value)}
+              aria-describedby={stuckPresets.length > 0 ? stuckNoteId : undefined}
               style={fieldStyle}
             >
               <option value="">— Manual configuration —</option>
               {presets.map(p => (
-                <option key={p.name} value={p.name} disabled={!p.available}>
-                  {p.name}{!p.available ? ' (extras not installed)' : ''}
+                <option
+                  key={p.name}
+                  value={p.name}
+                  disabled={!p.available}
+                  title={p.unavailable_reason ?? undefined}
+                >
+                  {presetOptionLabel(p, caps)}
                 </option>
               ))}
             </select>
             {selectedPresetMeta && (
               <div style={{ fontSize: 12, color: '#8b949e', marginTop: 6 }}>
                 {selectedPresetMeta.description}
+              </div>
+            )}
+            {stuckPresets.length > 0 && (
+              <div id={stuckNoteId}>
+                {stuckPresets.map(p => (
+                  <div key={p.name} style={{ fontSize: 12, color: '#8b949e', marginTop: 6 }}>
+                    <strong>{p.name}</strong>: {p.unavailable_reason}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -244,7 +284,10 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
               onChange={e => setDownsampleHz(e.target.value)}
               aria-invalid={rateErr ? true : undefined}
               aria-describedby={rateNote ? rateNoteId : undefined}
-              style={rateErr ? { ...fieldStyle, borderColor: '#f85149' } : fieldStyle}
+              // Swap the whole `border` shorthand. Layering `borderColor` on
+              // it made React clear the shorthand's colour when the error
+              // went away, leaving a browser-default border.
+              style={rateErr ? { ...fieldStyle, border: '1px solid #f85149' } : fieldStyle}
             />
             {rateNote && (
               <div

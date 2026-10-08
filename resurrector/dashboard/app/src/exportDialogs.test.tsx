@@ -5,10 +5,19 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { api } from './api'
+import { api, type CapabilityMap } from './api'
 import { ErrorToastProvider } from './ErrorToast'
 import ClassicExportDialog from './components/ExportDialog'
 import NotebookExportDialog from './notebook/ExportDialog'
+import {
+  ALL_EXPORTS_CMD,
+  ALL_EXPORTS_NO_WHEEL_DESCRIPTION,
+  RLDS_NOT_INSTALLED_REASON,
+  RLDS_NO_WHEEL_REASON,
+  capabilitiesFor,
+  exportPresetsFor,
+  type ExportEnv,
+} from './exportPresetFixtures'
 
 // POST /api/bags/{id}/export body, as resurrector/dashboard/api.py
 // export_bag returns it.
@@ -95,5 +104,96 @@ describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
 
     expect(rateInput()).toHaveAccessibleName(/^Frame rate \(fps(, default 30)?\)$/)
     expect(rateInput()).toHaveAccessibleDescription('Rounded to 15 fps.')
+  })
+
+  it('gives the fps field its normal border back after an error clears', () => {
+    // Would catch: the classic dialog adding `borderColor` on top of the
+    // `border` shorthand for the error state. Clearing the error makes React
+    // remove `borderColor`, which also wipes the colour out of `border`, so
+    // the field kept a browser-default border until it remounted.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    renderDialog(Dialog)
+    fireEvent.change(formatSelect(), { target: { value: 'lerobot' } })
+    const normal = rateInput().style.borderTopColor
+
+    fireEvent.change(rateInput(), { target: { value: '0.4' } })
+    fireEvent.change(rateInput(), { target: { value: '14.6' } })
+
+    expect(rateInput()).not.toHaveAttribute('aria-invalid')
+    expect(rateInput().style.borderTopColor).toBe(normal)
+    const styleWarnings = consoleError.mock.calls.filter(args =>
+      String(args[0]).includes('a style property during rerender'))
+    expect(styleWarnings).toEqual([])
+  })
+})
+
+// /api/export-presets reports `unavailable_reason` per preset. Where the
+// [all-exports] pip command can't install tensorflow (Python 3.14, Intel
+// macOS on 3.13, Windows ARM64), the dialogs must say why rlds is off
+// instead of offering that command as the fix.
+describe.each(dialogs)('%s export dialog preset availability', (_name, Dialog) => {
+  function mockEnv(env: ExportEnv) {
+    vi.spyOn(api, 'listExportPresets').mockResolvedValue(exportPresetsFor(env))
+    vi.spyOn(api, 'getCapabilities').mockResolvedValue(capabilitiesFor(env) as CapabilityMap)
+  }
+
+  async function presetOption(name: string): Promise<HTMLOptionElement> {
+    const option = await screen.findByRole('option', { name: new RegExp(`^${name}\\b`) })
+    return option as HTMLOptionElement
+  }
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('explains an rlds preset pip cannot fix and offers no install command', async () => {
+    // Would catch: "1 preset(s) unavailable — Zarr / RLDS extras not
+    // installed." plus a copy block for the [all-exports] command, and an
+    // "rlds (extras not installed)" option, on an interpreter where running
+    // that command can't make RLDS work.
+    mockEnv('no-wheel')
+    renderDialog(Dialog)
+
+    await waitFor(() => expect(document.body).toHaveTextContent(ALL_EXPORTS_NO_WHEEL_DESCRIPTION))
+    expect(document.body).toHaveTextContent(RLDS_NO_WHEEL_REASON)
+    const rlds = await presetOption('rlds')
+    expect(rlds.disabled).toBe(true)
+    expect(rlds).toHaveAttribute('title', RLDS_NO_WHEEL_REASON)
+    expect(rlds.closest('select')).toHaveAccessibleDescription(`rlds: ${RLDS_NO_WHEEL_REASON}`)
+    expect(document.body).not.toHaveTextContent('extras not installed')
+    expect(document.body).not.toHaveTextContent('need the Zarr / RLDS extras')
+    // Neither the copy block nor the <code> line holding the bare command.
+    expect(screen.queryByText(ALL_EXPORTS_CMD)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
+  })
+
+  it('keeps the pip command when it still unlocks Zarr, and says it will not fix rlds', async () => {
+    // Would catch: hiding the command that does install Zarr, or letting
+    // the banner promise it fixes rlds too.
+    mockEnv('no-wheel-no-zarr')
+    renderDialog(Dialog)
+
+    expect(await screen.findByText(ALL_EXPORTS_CMD)).toBeInTheDocument()
+    await waitFor(() => expect(document.body).toHaveTextContent(ALL_EXPORTS_NO_WHEEL_DESCRIPTION))
+    expect(document.body).toHaveTextContent(RLDS_NO_WHEEL_REASON)
+    expect((await presetOption('multimodal')).textContent).toBe('multimodal (extras not installed)')
+    expect((await presetOption('rlds')).textContent).not.toContain('extras not installed')
+  })
+
+  it('leaves the plain missing-extra case alone: banner and pip command', async () => {
+    // Would catch: the platform wording leaking into the case where the
+    // extra just isn't installed yet and the pip command is the whole fix.
+    mockEnv('tensorflow-missing')
+    renderDialog(Dialog)
+
+    expect(await screen.findByText(ALL_EXPORTS_CMD)).toBeInTheDocument()
+    expect(document.body).toHaveTextContent(/1 preset\(s\) (unavailable — Zarr \/ RLDS extras not installed|need the Zarr \/ RLDS extras)\./)
+    const rlds = await presetOption('rlds')
+    expect(rlds.disabled).toBe(true)
+    expect(rlds.textContent).toBe('rlds (extras not installed)')
+    // The banner already covers it; no second copy of the reason.
+    expect(document.body).not.toHaveTextContent(RLDS_NOT_INSTALLED_REASON)
+    expect(document.body).not.toHaveTextContent('on this interpreter')
   })
 })
