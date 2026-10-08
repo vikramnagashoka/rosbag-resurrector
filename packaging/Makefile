@@ -56,6 +56,7 @@ build-base:
 		--workpath $(DIST)/build \
 		--specpath $(DIST) \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
+		--collect-submodules resurrector \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \
 		--hidden-import uvicorn.protocols.http.auto \
@@ -101,6 +102,7 @@ macos-release:
 		--distpath $(DIST)/macos \
 		--workpath $(DIST)/build \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
+		--collect-submodules resurrector \
 		--add-data "resurrector/dashboard/static:resurrector/dashboard/static" \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \
@@ -128,6 +130,7 @@ ubuntu-release:
 		--distpath $(DIST)/ubuntu \
 		--workpath $(DIST)/build \
 		--add-data "resurrector/bridge/web:resurrector/bridge/web" \
+		--collect-submodules resurrector \
 		--add-data "resurrector/dashboard/static:resurrector/dashboard/static" \
 		--hidden-import uvicorn.workers \
 		--hidden-import uvicorn.logging \

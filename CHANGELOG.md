@@ -8,6 +8,8 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-10-07
+
 ### What's new
 
 The follow-ups from the v0.8.4 release audit. Synced exports now stream
@@ -22,9 +24,11 @@ speed changes and seek.
 - **Synced exports stream.** `--sync` and the `rlds` / `training-tabular` /
   `multimodal` presets used to build the whole synced table with
   `bf.sync()` and write it as one chunk; they now write a chunk at a time.
-  On a 100K-row synced export through the streaming engine, peak RSS fell
-  from about 540 MB to under 100 MB and no longer grows with the bag (a
-  memory-regression test covers Parquet, HDF5 and Zarr). Topics under 1 M
+  Memory now tracks the chunk size instead of the bag: through the
+  streaming engine at the default 50K-row chunk, peak RSS went from about
+  550 MB to 470 MB on a 100K-row synced export and from about 1.4 GB to
+  520 MB at 300K rows (about 95 MB at 100K rows with 5K-row chunks). A
+  memory-regression test covers Parquet, HDF5 and Zarr. Topics under 1 M
   messages still go through the eager engine, which loads them first.
 - Synced + downsampled exports pick exactly the rows
   `downsample_temporal(bf.sync(...))` would; the grid carries across chunks.
@@ -48,8 +52,9 @@ speed changes and seek.
 - Export dialogs no longer say "Exported to undefined"; the success message
   names the directory written.
 - For LeRobot, the dialogs disable the ignored "Synchronize topics" checkbox
-  (with a note), label the rate field "Frame rate (fps)", and block rates
-  that round below 1 fps, which used to be sent as 0 and silently became 30.
+  (with a note), label the rate field as the frame rate in fps, and block
+  rates that round below 1 fps (0 used to become 30 fps silently, and
+  fractional rates under 0.5 failed the export).
 - Presets are gated per format (`rlds` needs tensorflow, `multimodal` needs
   zarr), and `/api/export-presets` returns `unavailable_reason`. Where the
   extra can't install tensorflow (Python 3.14, Intel macOS on 3.13, Windows
@@ -67,6 +72,18 @@ speed changes and seek.
 - Stop no longer blocks every other dashboard request for up to 5 s, and a
   bridge that served a WebSocket client now exits on SIGTERM instead of
   waiting out the grace period and being killed.
+
+- **The bridge works on a plain `pip install`.** `httpx` and `websockets`
+  were only in the `[dev]` extra, so on a base install the dashboard's
+  Bridge Play/Pause/Seek returned 500 and the bridge's `/ws` returned 404
+  (no WebSocket library for uvicorn). Both are now base dependencies, and
+  the wheel-smoke CI job checks they ship.
+- **The DMG/DEB app can start the dashboard and its bridge.** PyInstaller
+  never bundled `resurrector.dashboard` (uvicorn imports it by name), so
+  `resurrector dashboard` exited with "Could not import module"; the builds
+  now collect every `resurrector` module. The dashboard also launched the
+  bridge as `<binary> -m resurrector.cli.main`, which the frozen CLI rejected
+  ("No such option: -m"), so the Bridge page's Start returned 500.
 
 **Multi-bag playback**
 - Each bag's start offset is served once per session: resume no longer
@@ -101,8 +118,10 @@ speed changes and seek.
   "Proprietary"; README links work on the PyPI page.
 - `examples/26_bag_qc_fleet.py` no longer calls a hard-coded dev path, 04
   degrades cleanly without Pillow, and 23 works without a repo checkout (its
-  scene-bag generator moved to `resurrector.demo.scene_bag`). All 25 examples
-  exit 0 on a fresh install with no extras.
+  scene-bag generator moved to `resurrector.demo.scene_bag`). Every example
+  exits 0 on a fresh install with no extras (15 runs the dashboard until
+  Ctrl+C), and 15 no longer freezes its dashboard after ~1,000 requests by
+  piping its output into a pipe nobody reads.
 - `resurrector doctor` reports LeRobot (with its Python floor) and RLDS's
   tensorflow from the same platform table the install markers use.
 
@@ -135,7 +154,20 @@ speed changes and seek.
 - Proxied bridge calls return 504 when the bridge doesn't respond and 502
   when the connection drops, instead of an opaque 500.
 - Dependencies: `typer>=0.16.0` (the first release whose `--help` works with
-  click 8.2+); building from source needs `setuptools>=77.0.3`.
+  click 8.2+), plus `httpx` and `websockets` (see Fixed); building from
+  source needs `setuptools>=77.0.3`. Python 3.14 is now listed as supported.
+- Platform limits: `[lerobot]` can't install on Intel macOS or Windows
+  ARM64 (torch publishes no wheels there), and a base install on Windows
+  ARM64 needs to build pyarrow from source.
+
+### Test counts
+
+- Backend: **1292 passed** (was 841), plus a memory-regression tier of 16
+  (was 12). The `Extras (all-exports)` CI job now runs the RLDS tests
+  against real tensorflow and fails if they skip; `Extras (lerobot)` does the
+  same for LeRobot.
+- Frontend unit: **80 passed** (was 48)
+- E2E: **47 behavioural** (was 39) plus 7 visual
 
 ## [0.8.4] — 2026-10-04
 

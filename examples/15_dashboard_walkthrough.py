@@ -62,15 +62,18 @@ def main() -> None:
     env["RESURRECTOR_ALLOWED_ROOTS"] = os.pathsep.join(
         [tempfile.gettempdir(), str(Path.home())]
     )
-    # Capture stderr so we can quote it back to the user if the
-    # subprocess dies during startup (e.g. SyntaxError on older Python
-    # versions). Without piping, the traceback would still print to the
-    # terminal but the script would oblivously claim "server up" later.
+    # stderr goes to a file so we can quote it back if the subprocess dies
+    # during startup. Not a pipe: nothing reads a pipe while the dashboard
+    # runs, and once uvicorn's access log filled its ~64 KB buffer the
+    # dashboard froze (the same bug the v0.8.5 bridge fix removed).
+    stderr_log = tempfile.NamedTemporaryFile(
+        prefix="resurrector-dashboard-", suffix=".log", delete=False,
+    )
     proc = subprocess.Popen(
         [sys.executable, "-m", "resurrector.cli.main", "dashboard", "--port", "8080"],
         env=env,
-        stderr=subprocess.PIPE,
-        stdout=subprocess.PIPE,
+        stderr=stderr_log,
+        stdout=subprocess.DEVNULL,
     )
     print(f"  [OK] Dashboard PID {proc.pid}\n")
 
@@ -87,8 +90,8 @@ def main() -> None:
         if proc.poll() is not None:
             # Subprocess exited during startup. Capture stderr and abort.
             try:
-                _, stderr_bytes = proc.communicate(timeout=2)
-                stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
+                stderr_log.flush()
+                stderr = Path(stderr_log.name).read_text(encoding="utf-8", errors="replace")
             except Exception:
                 stderr = "(could not read subprocess stderr)"
             print(f"\n  [FATAL] Dashboard subprocess exited (code {proc.returncode}).")

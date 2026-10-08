@@ -201,8 +201,8 @@ pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search 
 pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
 pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
 pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
-pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13, 3.10-3.12 on Intel macOS)
-pip install 'rosbag-resurrector[lerobot]'       # LeRobot v3 export (Python 3.12+, pulls torch)
+pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13, 3.10-3.12 on Intel macOS, not Windows ARM64)
+pip install 'rosbag-resurrector[lerobot]'       # LeRobot v3 export (Python 3.12+, pulls torch; not Intel macOS / Windows ARM64)
 pip install 'rosbag-resurrector[ros1]'          # ROS 1 .bag support via rosbags
 ```
 
