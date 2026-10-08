@@ -261,6 +261,41 @@ def test_null_strings_are_written_as_empty(fmt, tmp_path):
     assert got["timestamp_ns"] == [1, 2, 3, 4, 5]
 
 
+def test_later_chunk_with_longer_strings_round_trips(fmt, tmp_path):
+    """The first chunk's strings are 1 character; later ones are wider,
+    multi-byte UTF-8, 300 characters long, or outside the BMP. Would
+    catch: an array whose string width is fixed by the first chunk
+    (a ``<U1`` Zarr array stored ``['a', '', 'b', 'x']``)."""
+    later = ["base_link_é日本", "x" * 300, "emoji \U0001F916"]
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [1, 2], "s": ["a", None]}),
+        pl.DataFrame({"timestamp_ns": [3, 4, 5], "s": later}),
+    ]
+    got = _write(fmt, chunks, tmp_path)
+    assert got["s"] == ["a", ""] + later
+
+
+def test_zarr_strings_are_stored_as_vlen_utf8(tmp_path, zarr_installed):
+    """The on-disk format, not just what zarr reads back: variable-length
+    UTF-8. Would catch: a pickle object codec on zarr 2 (reads back the
+    same through zarr, but only Python can read it), or a fixed-width
+    dtype on zarr 3."""
+    import json
+
+    _write("zarr", [pl.DataFrame({"timestamp_ns": [1], "s": ["é日本"]})], tmp_path)
+    meta_dir = tmp_path / "t.zarr" / "s"
+    if (meta_dir / "zarr.json").exists():
+        meta = json.loads((meta_dir / "zarr.json").read_text())
+        assert meta["zarr_format"] == 3
+        assert meta["data_type"] == "string"
+        assert {"name": "vlen-utf8", "configuration": {}} in meta["codecs"]
+    else:
+        meta = json.loads((meta_dir / ".zarray").read_text())
+        assert meta["zarr_format"] == 2
+        assert meta["dtype"] == "|O"
+        assert meta["filters"] == [{"id": "vlen-utf8"}]
+
+
 def test_npz_strings_load_without_pickle(tmp_path):
     _stream_numpy(iter([pl.DataFrame({"timestamp_ns": [1, 2], "s": ["ab", None]})]),
                   tmp_path, "t")
@@ -320,7 +355,7 @@ def test_held_null_rows_are_appended_in_chunk_sized_pieces(monkeypatch):
     chunks.append(pl.DataFrame({"s": ["a", "b"]}))
     appended: list[tuple[str, int, bool]] = []
     rows, failures = export_module._write_numpy_columns(
-        iter(chunks), lambda col, arr, text, n: appended.append((col, len(arr), text)),
+        iter(chunks), lambda col, arr, text: appended.append((col, len(arr), text)),
     )
     assert (rows, failures) == (22, [])
     assert appended == [("s", 4, True)] * 5 + [("s", 2, True)]
@@ -366,13 +401,50 @@ def test_empty_chunk_between_string_chunks(fmt, tmp_path):
     ],
 ], ids=["string-then-float", "null-string-then-int"])
 def test_string_column_that_changes_dtype_fails_cleanly(fmt, tmp_path, chunks):
-    """A later chunk can't quietly turn a string column into "2.5"."""
+    """A later chunk can't quietly turn a string column into "2.5". The
+    failed column is removed from the file rather than left truncated."""
     with pytest.raises(ExportError) as exc:
         _write(fmt, chunks, tmp_path)
     [failure] = exc.value.failures
     assert failure.column == "s"
     assert failure.error_type == "TypeError"
     assert "was written as String" in failure.message
+    got = _read(fmt, tmp_path, "t")
+    assert "s" not in got
+    assert got["y"] == [float(i + 1) for i in range(len(chunks))]
+
+
+_US = pl.Datetime("us")
+
+
+@pytest.mark.parametrize("fmt_name", ["zarr", "numpy"])
+@pytest.mark.parametrize("chunks", [
+    [
+        pl.DataFrame({"timestamp_ns": [1], "d": pl.Series([1], dtype=pl.Duration("us")),
+                      "y": [1.0]}),
+        pl.DataFrame({"timestamp_ns": [2], "d": pl.Series([2], dtype=_US), "y": [2.0]}),
+    ],
+    [
+        pl.DataFrame({"timestamp_ns": [1], "d": pl.Series([1], dtype=_US), "y": [1.0]}),
+        pl.DataFrame({"timestamp_ns": [2], "d": [None], "y": [2.0]}),
+    ],
+], ids=["duration-then-datetime", "datetime-then-null"])
+def test_datetime_column_that_changes_dtype_fails_cleanly(fmt_name, tmp_path, chunks):
+    """Datetime and Duration have no missing value and no shared dtype in
+    these formats. Would catch: Zarr storing the datetimes as durations,
+    or appending NaT for the Null chunk, and ``.npz`` crashing with a raw
+    DTypePromotionError. (HDF5 refuses datetimes outright.)"""
+    if fmt_name == "zarr":
+        pytest.importorskip("zarr")
+    with pytest.raises(ExportError) as exc:
+        _write(fmt_name, chunks, tmp_path)
+    [failure] = exc.value.failures
+    assert failure.column == "d"
+    assert failure.error_type == "TypeError"
+    assert "in an earlier one" in failure.message
+    got = _read(fmt_name, tmp_path, "t")
+    assert "d" not in got
+    assert got["y"] == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("bad", [
@@ -391,5 +463,6 @@ def test_non_string_object_columns_fail_clearly(fmt, tmp_path, bad):
     assert failure.column == "bad"
     assert "Parquet" in failure.message
     got = _read(fmt, tmp_path, "t")
+    assert "bad" not in got
     assert got["s"] == ["a", ""]
     assert got["timestamp_ns"] == [1, 2]

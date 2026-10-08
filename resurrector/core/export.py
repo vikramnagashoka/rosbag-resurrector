@@ -18,7 +18,23 @@ requires materializing every column. We hard-cap NumPy export at
 HDF5, Zarr and NumPy have no missing value for integers or Booleans,
 and their arrays can't change dtype after the first chunk, so those
 columns are written as float64 with NaN for a missing value (see
-:class:`_NumpyColumns`); ``timestamp_ns`` stays int64.
+:class:`_NumpyColumns`); ``timestamp_ns`` stays int64. String columns
+are written as text (variable-length UTF-8 in HDF5 and Zarr,
+fixed-width unicode in ``.npz``) and a missing string as ``""``;
+Parquet keeps nulls.
+
+A topic's columns can change between chunks (a driver that starts
+publishing JointState velocity late). Every writer keeps each row
+aligned with its ``timestamp_ns``. HDF5, Zarr and NumPy write a column's
+rows outside the chunks that carry it as its missing value, and fail a
+column whose dtype has none (``timestamp_ns``, datetimes). CSV and
+Parquet fix their columns from the first chunk: a column a later chunk
+lacks is written empty / null there, a column that first appears later
+is reported and left out, and a Parquet column whose later values can't
+be stored losslessly as the first chunk's type is reported and written
+as null from that chunk on. Reported columns raise :class:`ExportError`
+once the file is written; HDF5, Zarr and NumPy leave them out of the
+file.
 """
 
 from __future__ import annotations
@@ -49,6 +65,11 @@ CHUNK_SIZE = 50_000
 # compression buffers easily exceed 1 GB. Refuse early with a clear
 # error pointing to Parquet, which streams.
 NUMPY_HARD_CAP = 1_000_000
+
+# .npz text is fixed width, so one long value widens every row of its
+# column (1 M rows x 300 characters is 1.2 GB). Past this size the
+# writer warns and points to Parquet / Zarr; it still writes the column.
+_NPZ_TEXT_WARN_BYTES = 256 * 2**20
 
 ALL_EXPORTS_INSTALL = "pip install 'rosbag-resurrector[all-exports]'"
 
@@ -557,8 +578,10 @@ class Exporter:
                 engine (topics over ``LARGE_TOPIC_THRESHOLD``). Raised
                 mid-stream, so ``synced.<ext>`` may already be partly
                 written.
-            ExportError: Some columns couldn't be written (e.g. strings
-                in Zarr); the other columns are complete.
+            ExportError: Some columns couldn't be written (e.g. list,
+                struct or binary columns, or a column that first
+                appears after a CSV or Parquet file's columns were set
+                by its first chunk); the other columns are complete.
         """
         require_export_dependencies(format)
         output_path = Path(output_dir)
@@ -672,8 +695,8 @@ class Exporter:
             ``Path`` to the topic's frames directory.
 
         Raises:
-            ImportError: If Pillow isn't installed (in the
-                ``[vision-lite]`` extra).
+            ImportError: If Pillow, a base dependency, is missing (a
+                partial install).
 
         Example::
 
@@ -683,8 +706,8 @@ class Exporter:
             from PIL import Image as PILImage
         except ImportError:
             raise ImportError(
-                "Frame export requires Pillow. "
-                "Install with: pip install 'rosbag-resurrector[vision-lite]'"
+                "Frame export requires Pillow, which this install is "
+                "missing. Install with: pip install Pillow"
             )
 
         output_path = Path(output_dir)
@@ -839,15 +862,19 @@ class _NumpyColumns:
       and an empty string read back the same; Parquet keeps them apart.
     - A chunk where the column is all null (polars dtype Null) says
       nothing about its dtype, so those rows are held back until a chunk
-      does, then written first as that dtype's missing value. A column
-      that is null in every chunk is written as float64 NaN.
+      does, then written first as that dtype's missing value. Rows where
+      the column is absent (a chunk without it, or the rows before the
+      chunk it first appears in) are treated the same way. A column that
+      is null or absent in every chunk is written as float64 NaN.
     - Anything else converts as polars does, and the writer decides
       whether it can store it. A column that converts to an object array
       (lists, structs, binary, ...) fails rather than being written as
       Python reprs or pickled objects.
 
     A later chunk whose column can't be cast to the chosen dtype fails
-    that column instead of being stored wrong.
+    that column instead of being stored wrong, and so does a column with
+    rows to fill whose dtype has no missing value (``timestamp_ns``,
+    datetimes).
     """
 
     def __init__(self) -> None:
@@ -860,6 +887,37 @@ class _NumpyColumns:
         """True if ``col`` is written as strings."""
         return self._targets.get(col) == pl.String
 
+    def knows(self, col: str) -> bool:
+        return col in self._targets or col in self._held
+
+    def known(self) -> list[str]:
+        """Every column seen so far, typed or still held."""
+        return list(self._targets) + [c for c in self._held if c not in self._targets]
+
+    def hold(self, col: str, rows: int) -> None:
+        """Hold ``rows`` missing rows for ``col`` ahead of its next values."""
+        self._held[col] = self._held.get(col, 0) + rows
+
+    def pad(
+        self, col: str, rows: int, start: int,
+    ) -> tuple[Iterator[np.ndarray], ExportColumnFailure | None]:
+        """Missing values for the ``rows`` rows from row ``start`` of a
+        chunk that lacks known column ``col``, or a failure record."""
+        if col not in self._targets:
+            self.hold(col, rows)
+            return iter(()), None
+        missing = _missing_value(self._targets[col])
+        if missing is None:
+            return iter(()), ExportColumnFailure(
+                column=col, error_type="ValueError",
+                message=(
+                    f"absent from rows {start} to {start + rows - 1}, and "
+                    f"{self._first_dtypes[col]} has no missing value in this "
+                    f"format to fill them with"
+                ),
+            )
+        return _repeat_rows(*missing, rows), None
+
     def convert(
         self, chunk, col: str,
     ) -> tuple[Iterator[np.ndarray], ExportColumnFailure | None]:
@@ -868,7 +926,7 @@ class _NumpyColumns:
         series = chunk[col]
         if col not in self._targets:
             if series.dtype == pl.Null:
-                self._held[col] = self._held.get(col, 0) + len(series)
+                self.hold(col, len(series))
                 return iter(()), None
             self._targets[col] = _numpy_target(col, series.dtype)
             self._first_dtypes[col] = series.dtype
@@ -881,19 +939,24 @@ class _NumpyColumns:
             missing = _missing_value(target)
             if missing is None:
                 raise ValueError(
-                    f"{col} is null in its first {held} rows and "
-                    f"{self._first_dtypes[col]} has no missing value here"
+                    f"absent or null in its first {held} rows, and "
+                    f"{self._first_dtypes[col]} has no missing value in this "
+                    f"format to fill them with"
                 )
-            return _held_then(_repeat_rows(missing, held, arr.dtype), arr), None
+            return _held_then(_repeat_rows(*missing, held), arr), None
         except Exception as e:
             return iter(()), ExportColumnFailure(
                 column=col, error_type=type(e).__name__, message=str(e),
             )
 
     def never_typed(self) -> Iterator[tuple[str, Iterator[np.ndarray]]]:
-        """Columns that were null in every chunk, as float64 NaN."""
+        """Columns that were null or absent in every chunk, as float64 NaN
+        (an empty array for a column seen only in 0-row chunks)."""
         for col, held in self._held.items():
-            yield col, _repeat_rows(np.nan, held, np.dtype(np.float64))
+            if held:
+                yield col, _repeat_rows(np.nan, np.dtype(np.float64), held)
+            else:
+                yield col, iter((np.empty(0, dtype=np.float64),))
 
     def _to_numpy(self, series: "pl.Series", col: str, target) -> np.ndarray:
         dtype = series.dtype
@@ -941,43 +1004,86 @@ class _NumpyColumns:
 
 def _write_numpy_columns(
     chunks: Iterable,
-    append: Callable[[str, np.ndarray, bool, int], None],
+    append: Callable[[str, np.ndarray, bool], None],
 ) -> tuple[int, list[ExportColumnFailure]]:
     """Convert every column of every chunk with :class:`_NumpyColumns` and
-    pass it to ``append(col, array, is_text, chunk_rows)``, which creates
-    the column's array on its first call and appends to it after that.
+    pass it to ``append(col, array, is_text)``, which creates the
+    column's array on its first call and appends to it after that.
+
+    Rows stay aligned when the column set changes between chunks: a
+    known column that a chunk lacks gets that chunk's rows as missing
+    values, and a column first seen after rows were written gets those
+    rows first (held, so they're written in ``CHUNK_SIZE`` pieces).
+    ``append`` is never called with a 0-row array, except once at the end
+    for a column seen only in 0-row chunks, so its (empty) array exists.
 
     A column that fails to convert or append is recorded once and skipped
-    from then on. Returns ``(rows_written, failures)``.
+    from then on; so is any column that doesn't end with exactly
+    ``rows_written`` rows. The caller removes failed columns from its
+    output. Returns ``(rows_written, failures)``.
     """
     columns = _NumpyColumns()
     failures: list[ExportColumnFailure] = []
     failed: set[str] = set()
+    lengths: dict[str, int] = {}
+    empty: dict[str, np.ndarray] = {}
     rows_written = 0
 
-    def write(col: str, arrays: Iterator[np.ndarray], chunk_rows: int) -> None:
+    def fail(failure: ExportColumnFailure) -> None:
+        failures.append(failure)
+        failed.add(failure.column)
+
+    def write(col: str, arrays: Iterator[np.ndarray]) -> None:
         try:
             for arr in arrays:
-                append(col, arr, columns.is_text(col), chunk_rows)
+                if len(arr) == 0:
+                    empty.setdefault(col, arr)
+                    continue
+                append(col, arr, columns.is_text(col))
+                lengths[col] = lengths.get(col, 0) + len(arr)
         except Exception as e:
-            failures.append(ExportColumnFailure(
+            fail(ExportColumnFailure(
                 column=col, error_type=type(e).__name__, message=str(e),
             ))
-            failed.add(col)
 
     for chunk in chunks:
+        present = set(chunk.columns)
+        for col in columns.known():
+            if col in present or col in failed or chunk.height == 0:
+                continue
+            arrays, failure = columns.pad(col, chunk.height, rows_written)
+            if failure is not None:
+                fail(failure)
+                continue
+            write(col, arrays)
         for col in chunk.columns:
             if col in failed:
                 continue
+            if rows_written and not columns.knows(col):
+                columns.hold(col, rows_written)
             arrays, failure = columns.convert(chunk, col)
             if failure is not None:
-                failures.append(failure)
-                failed.add(col)
+                fail(failure)
                 continue
-            write(col, arrays, chunk.height)
+            write(col, arrays)
         rows_written += chunk.height
     for col, arrays in columns.never_typed():
-        write(col, arrays, rows_written)
+        write(col, arrays)
+    for col, arr in empty.items():
+        if col not in lengths and col not in failed:
+            try:
+                append(col, arr, columns.is_text(col))
+                lengths[col] = 0
+            except Exception as e:
+                fail(ExportColumnFailure(
+                    column=col, error_type=type(e).__name__, message=str(e),
+                ))
+    for col, rows in lengths.items():
+        if col not in failed and rows != rows_written:
+            fail(ExportColumnFailure(
+                column=col, error_type="ValueError",
+                message=f"{rows} rows written where the export has {rows_written}",
+            ))
     return rows_written, failures
 
 
@@ -985,17 +1091,19 @@ def _is_text(dtype) -> bool:
     return dtype == pl.String or isinstance(dtype, (pl.Categorical, pl.Enum))
 
 
-def _missing_value(target) -> object | None:
-    """What a missing value is written as for ``target``, or None if it
-    has none."""
+def _missing_value(target) -> tuple[object, np.dtype] | None:
+    """What a missing value is written as for ``target``, and as which
+    NumPy dtype, or None if it has none."""
     if target == pl.String:
-        return ""
-    if target == pl.Float32 or target == pl.Float64:
-        return np.nan
+        return "", np.dtype(object)
+    if target == pl.Float32:
+        return np.nan, np.dtype(np.float32)
+    if target == pl.Float64:
+        return np.nan, np.dtype(np.float64)
     return None
 
 
-def _repeat_rows(value, rows: int, dtype: np.dtype) -> Iterator[np.ndarray]:
+def _repeat_rows(value, dtype: np.dtype, rows: int) -> Iterator[np.ndarray]:
     """``rows`` copies of ``value``, at most ``CHUNK_SIZE`` at a time, so
     a long all-null run doesn't become one big array."""
     while rows > 0:
@@ -1033,17 +1141,71 @@ def _numpy_target(col: str, dtype) -> "pl.DataType | None":
     return None
 
 
+class _FixedColumns:
+    """The columns a CSV or Parquet file took from its first chunk.
+
+    Both formats fix their columns when the first chunk is written (the
+    CSV header, the Parquet schema). A later chunk's own columns are
+    never written as they are: a chunk without one of the columns, or
+    with them in another order, would otherwise shift values under the
+    wrong header or fail the Parquet writer. Each later chunk is laid out
+    as the file's columns instead: a column it lacks is null (empty in
+    CSV), and a column that first appears in it is reported once and
+    left out, since the file can't add it.
+    """
+
+    def __init__(self, columns: Sequence[str], file_kind: str) -> None:
+        self.columns = list(columns)
+        self._names = set(self.columns)
+        self._file_kind = file_kind
+        self.failures: list[ExportColumnFailure] = []
+        self.failed: set[str] = set()
+
+    def fail(self, col: str, error_type: str, message: str) -> None:
+        self.failures.append(ExportColumnFailure(
+            column=col, error_type=error_type, message=message,
+        ))
+        self.failed.add(col)
+
+    def report_new(self, chunk_columns: Sequence[str], start: int, rows: int) -> None:
+        """Report columns first seen in a chunk of ``rows`` rows that
+        starts at row ``start``. A 0-row chunk loses no values."""
+        if rows == 0:
+            return
+        for col in chunk_columns:
+            if col not in self._names and col not in self.failed:
+                self.fail(
+                    col, "ValueError",
+                    f"first appears at row {start}, after the {self._file_kind} "
+                    f"took its columns from the first chunk, so it is not in "
+                    f"the file",
+                )
+
+
 def _stream_parquet(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    """Stream chunks to one Parquet file, a row group per chunk.
+
+    The schema comes from the first chunk (see :class:`_FixedColumns`).
+    A later chunk whose column has another type is cast to the file's
+    type only when every value survives the cast; otherwise the column
+    is reported and written as null from that chunk on.
+    """
     import pyarrow.parquet as pq
 
     filepath = output_path / f"{name}.parquet"
     writer = None
+    schema = None
+    fixed: _FixedColumns | None = None
     rows_written = 0
     try:
         for chunk in chunks:
             table = chunk.to_arrow()
             if writer is None:
-                writer = pq.ParquetWriter(str(filepath), table.schema)
+                schema = table.schema
+                writer = pq.ParquetWriter(str(filepath), schema)
+                fixed = _FixedColumns(schema.names, "Parquet schema")
+            else:
+                table = _fit_arrow_table(table, schema, fixed, rows_written)
             writer.write_table(table)
             rows_written += chunk.height
     finally:
@@ -1051,20 +1213,87 @@ def _stream_parquet(chunks: Iterable, output_path: Path, name: str) -> ExportRes
             writer.close()
 
     logger.info("Streamed %d rows to %s", rows_written, filepath)
+    if fixed is not None and fixed.failures:
+        raise ExportError(fixed.failures, filepath)
     return ExportResult(path=filepath, rows_written=rows_written)
 
 
+def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
+    """``table`` laid out as ``schema``: missing or failed columns null,
+    other types cast losslessly or the column reported."""
+    import pyarrow as pa
+
+    fixed.report_new(table.column_names, start, table.num_rows)
+    present = set(table.column_names)
+    arrays = []
+    for spec in schema:
+        column = None
+        if spec.name in present and spec.name not in fixed.failed:
+            column = table.column(spec.name)
+            if not column.type.equals(spec.type):
+                cast = _lossless_cast(column, spec.type)
+                if cast is None and pa.types.is_null(spec.type):
+                    fixed.fail(spec.name, "TypeError", (
+                        f"has no values in the first chunk, which set the "
+                        f"file's columns, so the file stores it as all null "
+                        f"and its {column.type} values from row {start} on "
+                        f"are not written"
+                    ))
+                elif cast is None:
+                    fixed.fail(spec.name, "TypeError", (
+                        f"{column.type} values from row {start} on can't be "
+                        f"stored losslessly as the file's {spec.type} column "
+                        f"(its type comes from the first chunk), so it is "
+                        f"null from row {start} on"
+                    ))
+                column = cast
+        arrays.append(column if column is not None else pa.nulls(table.num_rows, spec.type))
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _lossless_cast(column, target):
+    """``column`` cast to the Arrow type ``target``, or None if any value
+    wouldn't survive it. Arrow's safe cast still lets some lossy casts
+    through (float64 to float32, int to bool, "01" to 1), so the result
+    must also cast back to the original values."""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    try:
+        cast = pc.cast(column, target, safe=True)
+        if pa.types.is_null(column.type):
+            return cast
+        back = pc.cast(cast, column.type, safe=True)
+        # polars' equals counts null == null and NaN == NaN as equal.
+        if pl.from_arrow(back).equals(pl.from_arrow(column)):
+            return cast
+    except Exception:
+        pass
+    return None
+
+
 def _stream_csv(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
+    """Stream chunks to one CSV file. The header comes from the first
+    chunk (see :class:`_FixedColumns`); a null is an empty field."""
     filepath = output_path / f"{name}.csv"
     rows_written = 0
-    first = True
+    fixed: _FixedColumns | None = None
     with open(filepath, "wb") as f:
         for chunk in chunks:
+            first = fixed is None
+            if first:
+                fixed = _FixedColumns(chunk.columns, "CSV header")
+            else:
+                fixed.report_new(chunk.columns, rows_written, chunk.height)
+                chunk = chunk.with_columns([
+                    pl.lit(None).alias(c) for c in fixed.columns if c not in chunk.columns
+                ]).select(fixed.columns)
             csv_bytes = chunk.write_csv(file=None, include_header=first).encode("utf-8")
             f.write(csv_bytes)
             rows_written += chunk.height
-            first = False
     logger.info("Streamed %d rows to %s", rows_written, filepath)
+    if fixed is not None and fixed.failures:
+        raise ExportError(fixed.failures, filepath)
     return ExportResult(path=filepath, rows_written=rows_written)
 
 
@@ -1076,8 +1305,9 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     :class:`_NumpyColumns`: integers and Booleans as float64 with NaN for
     a missing value). String columns are variable-length UTF-8, with a
     missing string written as ``""`` (h5py reads them back as ``bytes``;
-    ``dataset.asstr()[:]`` gives ``str``). Columns that fail to serialize
-    are collected and reported.
+    ``dataset.asstr()[:]`` gives ``str``). Every dataset has one row per
+    ``timestamp_ns`` (see :func:`_write_numpy_columns`). Columns that fail
+    to serialize are removed from the file and reported.
     """
     import h5py
 
@@ -1087,7 +1317,7 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
         group = f.create_group(name)
         datasets: dict[str, h5py.Dataset] = {}
 
-        def append(col: str, arr: np.ndarray, text: bool, chunk_rows: int) -> None:
+        def append(col: str, arr: np.ndarray, text: bool) -> None:
             if col not in datasets:
                 if text:
                     datasets[col] = group.create_dataset(
@@ -1107,6 +1337,9 @@ def _stream_hdf5(chunks: Iterable, output_path: Path, name: str) -> ExportResult
             ds[start:] = arr
 
         rows_written, failures = _write_numpy_columns(chunks, append)
+        for failure in failures:
+            if failure.column in datasets:
+                del group[failure.column]
 
     logger.info("Streamed %d rows to %s", rows_written, filepath)
     if failures:
@@ -1128,24 +1361,37 @@ def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResul
     follow :class:`_NumpyColumns`, as for HDF5 and Zarr.
 
     String columns are fixed-width unicode (``<U``, every row as wide as
-    the longest value), a missing string written as ``""``. Unlike an
-    object array, that loads with ``np.load``'s default
-    ``allow_pickle=False``.
+    the longest value, 4 bytes per character), a missing string written
+    as ``""``. Unlike an object array, that loads with ``np.load``'s
+    default ``allow_pickle=False``. One long value widens every row, so
+    a column whose fixed-width array would pass
+    ``_NPZ_TEXT_WARN_BYTES`` logs a warning pointing to Parquet and Zarr,
+    which store each string at its own length.
     """
     filepath = output_path / f"{name}.npz"
     col_chunks: dict[str, list[np.ndarray]] = {}
+    text_cols: set[str] = set()
 
-    def append(col: str, arr: np.ndarray, text: bool, chunk_rows: int) -> None:
-        col_chunks.setdefault(col, []).append(arr.astype(str) if text else arr)
+    def append(col: str, arr: np.ndarray, text: bool) -> None:
+        if text:
+            text_cols.add(col)
+        col_chunks.setdefault(col, []).append(arr)
 
     rows_written, failures = _write_numpy_columns(chunks, append)
     failed_cols = {failure.column for failure in failures}
 
-    arrays = {
-        col: np.concatenate(parts) if len(parts) > 1 else parts[0]
-        for col, parts in col_chunks.items()
-        if col not in failed_cols
-    }
+    # Joined one column at a time, its parts released as it goes, so the
+    # parts and the joined arrays are never all held at once.
+    arrays = {}
+    for col in list(col_chunks):
+        parts = col_chunks.pop(col)
+        if col in failed_cols:
+            continue
+        if col in text_cols:
+            arrays[col] = _fixed_width_text(col, parts)
+        else:
+            arrays[col] = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        del parts
     np.savez_compressed(filepath, **arrays)
 
     logger.info("Streamed %d rows to %s", rows_written, filepath)
@@ -1153,6 +1399,32 @@ def _stream_numpy(chunks: Iterable, output_path: Path, name: str) -> ExportResul
         raise ExportError(failures, filepath)
     return ExportResult(path=filepath, rows_written=rows_written, failures=failures)
 
+
+def _fixed_width_text(col: str, parts: list[np.ndarray]) -> np.ndarray:
+    """One ``<U`` array from a text column's object-array parts.
+
+    Filled part by part, each part dropped once copied, so only one
+    fixed-width copy of the column is ever built (``np.concatenate`` of
+    per-part ``<U`` arrays holds two).
+    """
+    total = sum(len(part) for part in parts)
+    width = max(1, max((max(map(len, part), default=0) for part in parts), default=0))
+    nbytes = total * width * 4
+    if nbytes > _NPZ_TEXT_WARN_BYTES:
+        logger.warning(
+            "Column %r is written to .npz as fixed-width text: %d rows, each "
+            "as wide as its longest value (%d characters), %.0f MB before "
+            "compression and in memory while writing. Export to Parquet or "
+            "Zarr to store each string at its own length.",
+            col, total, width, nbytes / 2**20,
+        )
+    out = np.empty(total, dtype=f"<U{width}")
+    start = 0
+    for i, part in enumerate(parts):
+        out[start:start + len(part)] = part
+        start += len(part)
+        parts[i] = None
+    return out
 
 
 def _stream_rlds(
@@ -1245,7 +1517,11 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
     Array dtypes follow :class:`_NumpyColumns`, as for HDF5. String
     columns are variable-length UTF-8 arrays (zarr 3's string dtype, or
     zarr 2's ``VLenUTF8`` object codec), with a missing string written as
-    ``""``; ``zarr.open(path)[col][:]`` reads them back as text.
+    ``""``; ``zarr.open(path)[col][:]`` reads them back as text. Every
+    array has one row per ``timestamp_ns`` (see
+    :func:`_write_numpy_columns`) and ``CHUNK_SIZE``-row Zarr chunks,
+    whatever the size of the chunk that created it. Columns that fail to
+    serialize are removed from the store and reported.
     """
     try:
         import zarr
@@ -1269,9 +1545,12 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
 
     arrays: dict = {}
 
-    def append(col: str, arr: np.ndarray, text: bool, chunk_rows: int) -> None:
+    def append(col: str, arr: np.ndarray, text: bool) -> None:
         if col not in arrays:
-            chunk_shape = (max(1, min(chunk_rows, CHUNK_SIZE)),)
+            # Not the size of the chunk that types the column: a 3-row tail
+            # typing a column held through 100k null rows would otherwise
+            # store those rows as 33k 3-row chunk files.
+            chunk_shape = (CHUNK_SIZE,)
             if zarr_v3:
                 # For dtype=str, zarr 3.0 to 3.1.0 warn that the string
                 # dtype isn't in the v3 spec yet. Left visible: other v3
@@ -1294,6 +1573,9 @@ def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult
             arrays[col].append(arr)
 
     rows_written, failures = _write_numpy_columns(chunks, append)
+    for failure in failures:
+        if failure.column in arrays:
+            del root[failure.column]
 
     logger.info("Streamed %d rows to %s", rows_written, filepath)
     if failures:
