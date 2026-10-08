@@ -568,7 +568,7 @@ def export(
           resurrector export bag.mcap --preset lerobot --downsample 60 \\
               -o ./lerobot_60hz
     """
-    from resurrector.core.export import PRESETS
+    from resurrector.core.export import PRESETS, ExportError
 
     # --list-presets short-circuits to a table dump and exits
     if list_presets_flag:
@@ -647,7 +647,7 @@ def export(
             task=task,
             action_topics=action_topic,
         )
-    except (ValueError, FileExistsError) as e:
+    except (ValueError, FileExistsError, ExportError) as e:
         console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except ImportError as e:
@@ -1484,10 +1484,16 @@ def dataset_export(
       resurrector dataset export pick-place-experiments 1.0 -o ./datasets
     """
     from resurrector.core.dataset import DatasetManager
+    from resurrector.core.export import ExportError
     mgr = DatasetManager(db)
-    result = mgr.export_version(name, version, str(output))
+    try:
+        result = mgr.export_version(name, version, str(output))
+    except ExportError as e:
+        console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    finally:
+        mgr.close()
     console.print(f"[green]Exported to {result}[/green]")
-    mgr.close()
 
 
 @dataset_app.command("list")

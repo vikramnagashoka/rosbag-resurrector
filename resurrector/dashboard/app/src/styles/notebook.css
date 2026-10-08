@@ -1016,6 +1016,14 @@
   font-size: 12.5px; font-family: var(--nb-font-mono); margin-top: 12px;
   word-break: break-all;
 }
+/* Body text, not the red, for contrast on the tint. pre-wrap keeps one
+   failed column per line. */
+.nb-export-error {
+  background: var(--nb-health-bad-bg); border: 1px solid var(--nb-health-bad);
+  color: var(--nb-text-2); border-radius: 7px; padding: 8px 12px;
+  font-size: 12.5px; margin-top: 12px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 
 /* Help & Docs page (warm) */
 .nb-doc { max-width: 860px; }

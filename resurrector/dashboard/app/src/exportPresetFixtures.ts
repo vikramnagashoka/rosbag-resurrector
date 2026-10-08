@@ -1,6 +1,7 @@
 // Test payloads for the export dialogs, shaped like GET /api/export-presets
 // and GET /api/system/capabilities (list_export_presets and
-// get_system_capabilities in resurrector/dashboard/api.py), with the exact
+// get_system_capabilities in resurrector/dashboard/api.py; the failed
+// export body at the end has its own note), with the exact
 // strings resurrector/core/export.py and core/capabilities.py produce.
 // tests/test_rlds_capability.py pins those strings on the Python side.
 // Shared by exportDialogs.test.tsx and e2e/interactions.spec.ts.
@@ -128,4 +129,34 @@ export function capabilitiesFor(env: ExportEnv): Record<string, Capability> {
     },
   ]
   return Object.fromEntries(caps.map(c => [c.name, c]))
+}
+
+// POST /api/bags/{id}/export when a writer can't store some columns: the
+// 422 body _export_error_handler (resurrector/dashboard/api.py) returns,
+// carrying the message ExportError (resurrector/core/export.py) formats,
+// here for HDF5 and two list columns. tests/test_export_error_surfacing.py
+// pins the body's shape and this exact message on the Python side.
+export const EXPORT_FAILED_FILE = '/data/exports/run_7/lidar_scan.h5'
+const LIST_REASON =
+  'HDF5 does not support dtype object containing sequences (e.g. variable-length lists)'
+export const EXPORT_FAILED_COLUMN_LINES = [
+  `  - ranges: TypeError: ${LIST_REASON}`,
+  `  - intensities: TypeError: ${LIST_REASON}`,
+]
+export const EXPORT_COLUMN_FAILURES_MESSAGE =
+  `2 column(s) could not be written to ${EXPORT_FAILED_FILE}:\n` +
+  `${EXPORT_FAILED_COLUMN_LINES.join('\n')}\n` +
+  'That file is partial: the columns above are missing or incomplete; every ' +
+  'other column is complete. The export stopped there, so any later topics, ' +
+  'splits or bags were not exported. To keep these columns, export to ' +
+  'Parquet, which stores every column type.'
+export const EXPORT_COLUMN_FAILURES_BODY = {
+  detail: {
+    kind: 'export_column_failures',
+    message: EXPORT_COLUMN_FAILURES_MESSAGE,
+    output: EXPORT_FAILED_FILE,
+    failures: ['ranges', 'intensities'].map(column => ({
+      column, error_type: 'TypeError', message: LIST_REASON,
+    })),
+  },
 }

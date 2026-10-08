@@ -87,25 +87,24 @@ export function useErrorToast() {
 // Convenience wrapper: runs an async thunk and pushes any ApiError to
 // the toast. Returns the resolved value or null on failure, so callers
 // can do `const data = await runWithToast(toast, () => api.listBags())`.
+// `onError` gets the same message (without the prefix) for callers that
+// also keep it on screen: a toast is gone after 8 seconds.
 import { ApiError } from './api'
 
 export async function runWithToast<T>(
   toast: Ctx,
   fn: () => Promise<T>,
-  opts?: { successMessage?: string; errorPrefix?: string },
+  opts?: { successMessage?: string; errorPrefix?: string; onError?: (message: string) => void },
 ): Promise<T | null> {
   try {
     const result = await fn()
     if (opts?.successMessage) toast.push('info', opts.successMessage)
     return result
   } catch (e) {
-    if (e instanceof ApiError) {
-      const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
-      toast.push('error', `${prefix}${e.message}`)
-    } else {
-      const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
-      toast.push('error', `${prefix}${String(e)}`)
-    }
+    const message = e instanceof ApiError ? e.message : String(e)
+    const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
+    toast.push('error', `${prefix}${message}`)
+    opts?.onError?.(message)
     return null
   }
 }

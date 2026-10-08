@@ -433,16 +433,31 @@ class ExportColumnFailure:
 class ExportError(Exception):
     """Raised when one or more columns fail to serialize during export.
 
-    The output file may be partial. Inspect ``failures`` to see which
-    columns were dropped and why.
+    The output file is partial: the failed columns are missing from it or
+    stop early, and every other column is complete. Inspect ``failures``
+    to see which columns failed and why.
+
+    The message names each column with its reason, says the file is
+    partial and gives the fix, so the CLI and the dashboard show
+    ``str(error)`` as it is.
     """
 
     def __init__(self, failures: list[ExportColumnFailure], output: Path):
         self.failures = failures
         self.output = output
-        cols = ", ".join(f.column for f in failures)
+        reasons = "\n".join(
+            f"  - {f.column}: {f.error_type}: {f.message}" for f in failures
+        )
+        # Every caller (Exporter.export, splits, dataset versions, trim)
+        # lets this propagate, so nothing after this file gets written.
         super().__init__(
-            f"Failed to serialize {len(failures)} column(s) to {output}: {cols}"
+            f"{len(failures)} column(s) could not be written to {output}:\n"
+            f"{reasons}\n"
+            "That file is partial: the columns above are missing or "
+            "incomplete; every other column is complete. The export stopped "
+            "there, so any later topics, splits or bags were not exported. "
+            "To keep these columns, export to Parquet, which stores every "
+            "column type."
         )
 
 

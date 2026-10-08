@@ -4,14 +4,16 @@
 // accessibility wiring) is the real component.
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { api, type CapabilityMap } from './api'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { api, ApiError, type CapabilityMap } from './api'
 import { ErrorToastProvider } from './ErrorToast'
 import ClassicExportDialog from './components/ExportDialog'
 import NotebookExportDialog from './notebook/ExportDialog'
 import {
   ALL_EXPORTS_CMD,
   ALL_EXPORTS_NO_WHEEL_DESCRIPTION,
+  EXPORT_COLUMN_FAILURES_BODY,
+  EXPORT_COLUMN_FAILURES_MESSAGE,
   RLDS_NOT_INSTALLED_REASON,
   RLDS_NO_WHEEL_REASON,
   capabilitiesFor,
@@ -53,6 +55,12 @@ function exportButton(): HTMLButtonElement {
   return screen.getByRole('button', { name: 'Export' }) as HTMLButtonElement
 }
 
+// The dialog box itself: its heading's parent in both dialogs. Toasts
+// render outside it.
+function dialogBox(): HTMLElement {
+  return screen.getByRole('heading', { name: /^Export data$/i }).parentElement!
+}
+
 describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
   let exportBag: MockInstance<typeof api.exportBag>
 
@@ -75,6 +83,30 @@ describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
     const toasts = screen.getAllByRole('alert').map(a => a.textContent)
     expect(toasts).toContain('Exported to /data/exports/run_7')
     expect(toasts.join('\n')).not.toContain('undefined')
+  })
+
+  it('keeps a failed-columns error in the dialog, one column per line', async () => {
+    // Would catch: export_bag's 422 (columns the format can't store) reaching
+    // the user only as an 8-second toast with the column lines run together,
+    // or as "[object Object]"; and the error outliving a retry that works.
+    exportBag.mockRejectedValueOnce(
+      new ApiError(422, EXPORT_COLUMN_FAILURES_BODY, 'POST /api/bags/7/export failed (422)'),
+    )
+    renderDialog(Dialog)
+    fireEvent.click(exportButton())
+
+    const expected = `Export failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`
+    const inDialog = await within(dialogBox()).findByRole('alert')
+    // textContent keeps the newlines the dialog's pre-wrap shows.
+    expect(inDialog.textContent).toBe(expected)
+    const all = screen.getAllByRole('alert').map(a => a.textContent)
+    expect(all.filter(t => t === expected)).toHaveLength(2)  // + the toast
+    expect(all.join('\n')).not.toContain('[object Object]')
+    expect(within(dialogBox()).queryByRole('status')).toBeNull()
+
+    fireEvent.click(exportButton())
+    expect(await within(dialogBox()).findByRole('status')).toHaveTextContent('Exported to /data/exports/run_7')
+    expect(within(dialogBox()).queryByRole('alert')).toBeNull()
   })
 
   it('blocks a LeRobot export whose fps rounds below 1, then sends 1 for 0.5', async () => {

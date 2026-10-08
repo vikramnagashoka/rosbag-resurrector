@@ -49,6 +49,7 @@ export default function ExportDialog({
   const [outputDir, setOutputDir] = useState('./export')
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const toast = useErrorToast()
   const presetId = useId()
   const stuckNoteId = useId()
@@ -83,13 +84,17 @@ export default function ExportDialog({
 
   async function handleExport() {
     setExporting(true)
+    setResult(null)
+    setError(null)
     const r = await runWithToast(
       toast,
       () => api.exportBag(bagId, {
         topics: selectedTopics, format, output_dir: outputDir,
         ...syncAndRateParams(format, sync, downsampleHz), preset: selectedPreset || undefined,
       }),
-      { errorPrefix: 'Export failed' },
+      // Kept in the dialog too: a failed-columns error lists each column
+      // and the fix, more than an 8-second toast can show.
+      { errorPrefix: 'Export failed', onError: setError },
     )
     if (r) { setResult(r.output_path); toast.push('info', `Exported to ${r.output_path}`) }
     setExporting(false)
@@ -244,6 +249,7 @@ export default function ExportDialog({
         {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
         {result && <div className="nb-export-result" role="status">Exported to {result}</div>}
+        {error && <div className="nb-export-error" role="alert">Export failed: {error}</div>}
 
         <div className="nb-modal-actions">
           <button className="nb-btn" onClick={onClose}>Close</button>

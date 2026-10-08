@@ -73,6 +73,7 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
   const [outputDir, setOutputDir] = useState('./export')
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const toast = useErrorToast()
   const outputDirId = useId()
   const stuckNoteId = useId()
@@ -113,6 +114,8 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
 
   async function handleExport() {
     setExporting(true)
+    setResult(null)
+    setError(null)
     const r = await runWithToast(
       toast,
       () =>
@@ -126,7 +129,9 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           // even when manual is fine — user-supplied values still win.
           preset: selectedPreset || undefined,
         }),
-      { errorPrefix: 'Export failed' },
+      // Kept in the dialog too: a failed-columns error lists each column
+      // and the fix, more than an 8-second toast can show.
+      { errorPrefix: 'Export failed', onError: setError },
     )
     if (r) {
       setResult(r.output_path)
@@ -366,6 +371,26 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
             }}
           >
             Exported to {result}
+          </div>
+        )}
+
+        {error && (
+          <div
+            role="alert"
+            style={{
+              background: 'rgba(248,81,73,0.1)',
+              border: '1px solid #f85149',
+              borderRadius: 6,
+              padding: '8px 12px',
+              color: '#ffa198',
+              fontSize: 13,
+              marginBottom: 16,
+              // The message puts each failed column on its own line.
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+            }}
+          >
+            Export failed: {error}
           </div>
         )}
 
