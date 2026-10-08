@@ -10,6 +10,8 @@ import typer
 from rich.console import Console
 from rich.markup import escape as rich_escape
 
+from resurrector.core.export import TENSORFLOW_WHERE
+
 app = typer.Typer(
     name="resurrector",
     help="RosBag Resurrector — Stop letting your rosbag data rot.",
@@ -461,7 +463,11 @@ def list_bags(
     index.close()
 
 
-@app.command()
+@app.command(epilog=(
+    "Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds "
+    "need `pip install 'rosbag-resurrector[all-exports]'`. rlds also needs "
+    f"tensorflow, which the extra installs on {TENSORFLOW_WHERE}."
+))
 def export(
     path: Annotated[Optional[Path], typer.Argument(
         help="Path to a bag file (.mcap). Not needed with --list-presets. "
@@ -477,7 +483,7 @@ def export(
         help="Output format. parquet (default), hdf5, csv, numpy "
              "(capped at 1 M rows per topic), zarr (needs [all-exports]), "
              "lerobot (needs [lerobot], Python 3.12+) / rlds (needs [all-exports], "
-             "Python 3.10-3.13, or 3.10-3.12 on Intel macOS). "
+             f"whose tensorflow installs on {TENSORFLOW_WHERE}). "
              "Overrides the preset's format if --preset is set. "
              "e.g. -f hdf5",
     )] = None,
@@ -561,11 +567,6 @@ def export(
       Preset with override (LeRobot defaults but at 60 Hz):
           resurrector export bag.mcap --preset lerobot --downsample 60 \\
               -o ./lerobot_60hz
-
-    Format support note: lerobot needs `[lerobot]` (Python 3.12+); zarr/rlds need
-    `pip install 'rosbag-resurrector[all-exports]'` (rlds also needs a Python
-    the extra can install tensorflow for: 3.10-3.13, or 3.10-3.12 on Intel
-    macOS).
     """
     from resurrector.core.export import PRESETS
 
@@ -595,7 +596,7 @@ def export(
                 "`pip install 'rosbag-resurrector\\[lerobot]'` (Python 3.12+) "
                 "for lerobot; `pip install 'rosbag-resurrector\\[all-exports]'` "
                 "for multimodal and rlds (rlds needs tensorflow, which the extra "
-                "installs on Python 3.10-3.13, or 3.10-3.12 on Intel macOS; "
+                f"installs on {TENSORFLOW_WHERE}; "
                 "`resurrector doctor` checks this machine).[/dim]"
             )
         raise typer.Exit()

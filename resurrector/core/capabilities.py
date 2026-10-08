@@ -110,9 +110,13 @@ def _copilot_available() -> bool:
 
 
 def _lerobot_available() -> bool:
-    """LeRobot export drives LeRobot's own dataset writer (Python 3.12+)."""
-    from resurrector.core.lerobot_export import lerobot_available
-    return lerobot_available()
+    """LeRobot export drives LeRobot's own dataset writer (Python 3.12+).
+
+    Presence-only, like ``_all_exports_available``: importing the writer
+    pulls in torch, and this runs on every capabilities request.
+    """
+    from resurrector.core.export import export_dependency_problem
+    return export_dependency_problem("lerobot") is None
 
 
 def get_capabilities() -> dict[str, Capability]:

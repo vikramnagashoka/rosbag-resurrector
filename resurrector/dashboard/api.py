@@ -649,22 +649,17 @@ async def list_export_presets() -> list[dict[str, Any]]:
     ``unavailable_reason`` (``None``, or why not). Availability is per
     format, not per extra: ``[all-exports]`` installs zarr everywhere but
     tensorflow only where it ships wheels, so ``multimodal`` (Zarr) can be
-    available while ``rlds`` is not.
+    available while ``rlds`` is not. The check is presence-only, so this
+    never imports tensorflow or LeRobot (torch).
 
     Used by ExportDialog to populate the preset dropdown and disable
     presets whose dependencies are missing on this install.
     """
     from resurrector.core.export import export_dependency_problem, list_presets
 
-    def _unavailable_reason(fmt: str) -> str | None:
-        if fmt == "lerobot":
-            from resurrector.core.lerobot_export import INSTALL_HINT, lerobot_available
-            return None if lerobot_available() else INSTALL_HINT
-        return export_dependency_problem(fmt)
-
     out: list[dict[str, Any]] = []
     for p in list_presets():
-        reason = _unavailable_reason(p.format)
+        reason = export_dependency_problem(p.format)
         out.append({
             "name": p.name,
             "format": p.format,

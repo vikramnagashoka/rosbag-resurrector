@@ -1,6 +1,7 @@
 """RLDS export needs tensorflow: the [all-exports] extra, the capability
 report, the dashboard preset list, `doctor`, and the export pre-flight must
-all agree on that.
+all agree on that. LeRobot export gets the same pre-flight and preset check
+for the [lerobot] extra.
 
 Before this was fixed, [all-exports] installed zarr + tensorflow-datasets
 but not tensorflow, so the capability and the dashboard's RLDS preset read
@@ -18,6 +19,7 @@ from __future__ import annotations
 import importlib.abc
 import importlib.machinery
 import itertools
+import re
 import shlex
 import sys
 import tempfile
@@ -35,6 +37,10 @@ TF_WHERE = (
     "Windows, or Python 3.10-3.12 on Intel macOS"
 )
 CAP_BASE = "Zarr and RLDS (TFRecord) export formats"
+LEROBOT_HINT = (
+    "LeRobot export needs the [lerobot] extra (Python 3.12+): "
+    "pip install 'rosbag-resurrector[lerobot]'"
+)
 BROKEN_TF = "libtensorflow_framework.2.dylib: cannot open shared object file"
 
 
@@ -50,14 +56,16 @@ def sample_bag(tmp_dir):
 
 
 class _FakeLoader(importlib.abc.Loader):
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, exploded: list[str]):
         self.mode = mode
+        self.exploded = exploded
 
     def create_module(self, spec):
         return None
 
     def exec_module(self, module):
         if self.mode == "explode":
+            self.exploded.append(module.__name__)
             raise AssertionError(
                 f"{module.__name__} was imported; availability checks must "
                 "use importlib.util.find_spec instead"
@@ -73,13 +81,16 @@ class _FakeFinder(importlib.abc.MetaPathFinder):
     findable but raise if anything actually imports them, which is how a
     test proves a check never paid for ``import tensorflow``. ``broken``
     modules are findable but raise ImportError on import, like a
-    tensorflow whose native library is missing.
+    tensorflow whose native library is missing. ``exploded`` lists every
+    attempt to import an exploding module, so a check that swallows the
+    error (``except Exception``) is still caught.
     """
 
     def __init__(self, importable=(), exploding=(), broken=()):
-        self.loaders = {n: _FakeLoader("ok") for n in importable}
-        self.loaders.update({n: _FakeLoader("explode") for n in exploding})
-        self.loaders.update({n: _FakeLoader("broken") for n in broken})
+        self.exploded: list[str] = []
+        self.loaders = {n: _FakeLoader("ok", self.exploded) for n in importable}
+        self.loaders.update({n: _FakeLoader("explode", self.exploded) for n in exploding})
+        self.loaders.update({n: _FakeLoader("broken", self.exploded) for n in broken})
 
     def find_spec(self, fullname, path=None, target=None):
         loader = self.loaders.get(fullname)
@@ -90,7 +101,8 @@ class _FakeFinder(importlib.abc.MetaPathFinder):
 
 @pytest.fixture
 def deps(monkeypatch):
-    """``deps(installed=..., missing=..., no_import=..., broken=...)`` fakes module state."""
+    """``deps(installed=..., missing=..., no_import=..., broken=...)`` fakes
+    module state and returns the :class:`_FakeFinder`."""
 
     def _set(installed=(), missing=(), no_import=(), broken=()):
         for name in (*installed, *no_import, *broken):
@@ -103,6 +115,7 @@ def deps(monkeypatch):
             monkeypatch.setitem(sys.modules, name, None)
         finder = _FakeFinder(importable=installed, exploding=no_import, broken=broken)
         monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+        return finder
 
     return _set
 
@@ -150,19 +163,29 @@ class TestAllExportsExtra:
         names = {r.name for r in _all_exports_requirements()}
         assert "tensorflow" in names, names
 
+    def test_extra_lists_only_packages_the_code_imports(self):
+        """Would catch: a dependency nothing imports riding along in the
+        extra (tensorflow-datasets did: a large install, with markers to
+        keep in sync, that the RLDS writer never used)."""
+        sources = "\n".join(
+            p.read_text() for p in (PYPROJECT.parent / "resurrector").rglob("*.py")
+        )
+        for req in _all_exports_requirements():
+            module = req.name.replace("-", "_")
+            assert re.search(rf"^\s*(import|from) {module}\b", sources, re.M), (
+                f"[all-exports] installs {req.name}, but nothing under resurrector/ imports it"
+            )
+
     def test_tensorflow_marker_matches_runtime_platform_table(self):
-        """The pyproject markers decide where pip installs tensorflow (and
-        tensorflow-datasets); the runtime table decides what `doctor` / the
-        dashboard say. Would catch the two drifting apart (e.g. a Python
-        bump in one but not the other, which would tell users to install an
-        extra that can't deliver)."""
+        """The pyproject markers decide where pip installs tensorflow; the
+        runtime table decides what `doctor` / the dashboard say. Would catch
+        the two drifting apart (e.g. a Python bump in one but not the other,
+        which would tell users to install an extra that can't deliver)."""
         from packaging.markers import default_environment
         from resurrector.core.export import tensorflow_wheels_available
 
-        reqs = _all_exports_requirements()
-        tf_reqs = [r for r in reqs if r.name == "tensorflow"]
-        tfds_req = next(r for r in reqs if r.name == "tensorflow-datasets")
-        assert all(r.marker is not None for r in [*tf_reqs, tfds_req]), (
+        tf_reqs = [r for r in _all_exports_requirements() if r.name == "tensorflow"]
+        assert all(r.marker is not None for r in tf_reqs), (
             "tensorflow must be marker-gated so installs don't break where it has no wheel"
         )
 
@@ -182,7 +205,6 @@ class TestAllExportsExtra:
             applicable = [r for r in tf_reqs if r.marker.evaluate(env)]
             assert bool(applicable) == expected, (minor, system, machine)
             assert len(applicable) <= 1, (minor, system, machine)  # never two ranges at once
-            assert tfds_req.marker.evaluate(env) == expected, (minor, system, machine)
 
     def test_no_prerelease_only_python_is_admitted(self):
         """tensorflow 2.21 (latest stable) ships cp310-cp313. On 3.14 pip
@@ -219,6 +241,71 @@ class TestAllExportsExtra:
         ]
         assert req.specifier.contains("2.16.2")
         assert not req.specifier.contains("2.17.0")
+
+
+_PY_RANGE = re.compile(r"\b(3\.\d+)-(3\.\d+)\b")
+
+
+def _py_ranges(text: str) -> set[str]:
+    return {f"{lo}-{hi}" for lo, hi in _PY_RANGE.findall(text)}
+
+
+def _table_ranges() -> set[str]:
+    """``"3.10-3.13"``-style ranges the tensorflow platform table implies."""
+    from resurrector.core.export import TENSORFLOW_MIN_PYTHON, TENSORFLOW_PLATFORMS
+    lo = "%d.%d" % TENSORFLOW_MIN_PYTHON
+    return {f"{lo}-{major}.{minor}" for major, minor in TENSORFLOW_PLATFORMS.values()}
+
+
+class TestTensorflowWhere:
+    """TENSORFLOW_WHERE, the README and the CLI tell users which Pythons get
+    tensorflow. Before this was fixed they were hand-written copies of
+    TENSORFLOW_PLATFORMS that only a reader would notice going stale."""
+
+    def test_every_max_python_is_in_where(self):
+        """Would catch: a hand-written TENSORFLOW_WHERE left quoting the old
+        Pythons after a table change."""
+        from resurrector.core.export import TENSORFLOW_WHERE
+        assert _table_ranges()
+        assert _py_ranges(TENSORFLOW_WHERE) == _table_ranges()
+
+    def test_wording_for_the_current_table(self):
+        from resurrector.core.export import TENSORFLOW_WHERE
+        assert TENSORFLOW_WHERE == TF_WHERE
+
+    def test_where_follows_a_changed_table(self):
+        """Would catch: a hand-written TENSORFLOW_WHERE that keeps saying
+        3.13 after the table admits 3.14."""
+        from resurrector.core.export import describe_tensorflow_platforms
+        table = {
+            ("Linux", "x86_64"): (3, 14),
+            ("Windows", "AMD64"): (3, 14),
+            ("Windows", "x86_64"): (3, 14),
+            ("Darwin", "arm64"): (3, 13),
+            ("Darwin", "x86_64"): (3, 12),
+        }
+        assert describe_tensorflow_platforms(table) == (
+            "Python 3.10-3.14 on x86_64 Linux or x64 Windows, "
+            "or Python 3.10-3.13 on Apple-silicon macOS, "
+            "or Python 3.10-3.12 on Intel macOS"
+        )
+
+    def test_floor_is_the_package_floor(self):
+        tomllib = pytest.importorskip("tomllib")
+        from resurrector.core.export import TENSORFLOW_MIN_PYTHON
+        requires = tomllib.loads(PYPROJECT.read_text())["project"]["requires-python"]
+        assert requires == ">=%d.%d" % TENSORFLOW_MIN_PYTHON
+
+    def test_readme_install_text_matches_the_table(self):
+        """Would catch: a table bump (or drop) that leaves the README's
+        install line or its RLDS paragraph quoting the old Pythons."""
+        readme = (PYPROJECT.parent / "README.md").read_text()
+        lines = [ln for ln in readme.splitlines() if "tensorflow" in ln and _py_ranges(ln)]
+        assert len(lines) >= 2, "expected the install line and the RLDS formats paragraph"
+        assert any("pip install 'rosbag-resurrector[all-exports]'" in ln for ln in lines)
+        assert any("RLDS writes TFRecords with tensorflow" in ln for ln in lines)
+        for ln in lines:
+            assert _py_ranges(ln) == _table_ranges(), ln
 
 
 class TestPlatformMessages:
@@ -343,6 +430,24 @@ class TestAllExportsCapability:
             assert cap.description == CAP_BASE
 
 
+class TestLeRobotCapability:
+    def test_available_without_importing_lerobot(self, deps, platform_as):
+        """Would catch: /api/system/capabilities importing LeRobot's writer
+        (and torch) on every call, and disagreeing with the preset list."""
+        from resurrector.core.capabilities import get_capabilities
+        finder = deps(no_import=("lerobot",))
+        platform_as((3, 12), "Linux", "x86_64")
+        assert get_capabilities()["lerobot"].available is True
+        assert finder.exploded == []
+
+    def test_unavailable_below_python_312(self, deps, platform_as):
+        from resurrector.core.capabilities import get_capabilities
+        finder = deps(no_import=("lerobot",))
+        platform_as((3, 11), "Linux", "x86_64")
+        assert get_capabilities()["lerobot"].available is False
+        assert finder.exploded == []
+
+
 class TestExportPresetsEndpoint:
     def _presets(self):
         from fastapi.testclient import TestClient
@@ -367,6 +472,31 @@ class TestExportPresetsEndpoint:
         deps(installed=("zarr",), no_import=("tensorflow",))
         assert self._presets()["rlds"]["available"] is True
         assert "tensorflow" not in sys.modules
+
+    def test_lerobot_preset_available_without_importing_lerobot(self, deps, platform_as):
+        """Would catch: the preset list importing LeRobot's writer (and so
+        torch) on every request to decide availability."""
+        finder = deps(no_import=("lerobot",))
+        platform_as((3, 12), "Linux", "x86_64")
+        preset = self._presets()["lerobot"]
+        assert (preset["available"], preset["unavailable_reason"]) == (True, None)
+        assert finder.exploded == []
+
+    @pytest.mark.parametrize("python, lerobot", [
+        ((3, 12), "missing"),
+        # An older LeRobot can be installed below 3.12, but not one we can drive.
+        ((3, 11), "installed"),
+    ])
+    def test_lerobot_preset_unavailable_names_the_extra(
+        self, deps, platform_as, python, lerobot,
+    ):
+        finder = deps(**(
+            {"missing": ("lerobot",)} if lerobot == "missing" else {"no_import": ("lerobot",)}
+        ))
+        platform_as(python, "Linux", "x86_64")
+        preset = self._presets()["lerobot"]
+        assert (preset["available"], preset["unavailable_reason"]) == (False, LEROBOT_HINT)
+        assert finder.exploded == []
 
 
 # ---------------------------------------------------------------- pre-flight
@@ -435,6 +565,112 @@ class TestExportPreflight:
         finally:
             mgr.close()
         assert not (tmp_dir / "datasets").exists()
+
+
+class TestLeRobotPreflight:
+    """[lerobot] gets the same pre-flight as zarr and rlds. Before it did,
+    ``require_export_dependencies("lerobot")`` was a no-op, so a split
+    export or a dataset version in LeRobot format created its output
+    directory and then raised, leaving an empty directory behind."""
+
+    @pytest.fixture(autouse=True)
+    def _python_312(self, platform_as):
+        platform_as((3, 12), "Linux", "x86_64")
+
+    def test_problem_is_the_install_hint(self, deps):
+        from resurrector.core import export
+        deps(missing=("lerobot",))
+        assert export.export_dependency_problem("lerobot") == LEROBOT_HINT
+
+    def test_problem_check_never_imports_lerobot(self, deps):
+        from resurrector.core import export
+        finder = deps(no_import=("lerobot",))
+        assert export.export_dependency_problem("lerobot") is None
+        assert finder.exploded == []
+
+    def test_python_floor(self, deps, platform_as):
+        from resurrector.core import export
+        finder = deps(no_import=("lerobot",))
+        platform_as((3, 11), "Linux", "x86_64")
+        assert export.export_dependency_problem("lerobot") == LEROBOT_HINT
+        assert finder.exploded == []
+
+    def test_exporter_creates_nothing(self, deps, tmp_dir, sample_bag):
+        from resurrector.core.export import Exporter
+        deps(missing=("lerobot",))
+        out = tmp_dir / "lr_out"
+        with pytest.raises(ImportError, match=r"\[lerobot\]"):
+            Exporter().export(BagFrame(sample_bag), ["/imu/data"], format="lerobot",
+                              output_dir=str(out))
+        assert not out.exists()
+
+    def test_split_export_creates_nothing(self, deps, tmp_dir, sample_bag):
+        """Would catch: split_export mkdir-ing ``<out>/train`` before the
+        LeRobot writer finds LeRobot missing."""
+        deps(missing=("lerobot",))
+        out = tmp_dir / "splits"
+        with pytest.raises(ImportError, match=r"\[lerobot\]"):
+            BagFrame(sample_bag).export(
+                topics=["/imu/data"], format="lerobot", output=str(out),
+                split={"train": 0.5, "val": 0.5},
+            )
+        assert not out.exists()
+
+    def test_dataset_version_export_creates_nothing(self, deps, tmp_dir, sample_bag):
+        """Would catch: export_version creating ``datasets/<name>/<ver>``
+        before the LeRobot writer finds LeRobot missing."""
+        from resurrector.core.dataset import BagRef, DatasetManager
+        deps(missing=("lerobot",))
+        mgr = DatasetManager(tmp_dir / "ds.db")
+        try:
+            mgr.create("lr")
+            mgr.create_version(
+                dataset_name="lr", version="1.0",
+                bag_refs=[BagRef(path=str(sample_bag))],
+                topics=["/imu/data"], export_format="lerobot",
+            )
+            with pytest.raises(ImportError, match=r"\[lerobot\]"):
+                mgr.export_version("lr", "1.0", str(tmp_dir / "datasets"))
+        finally:
+            mgr.close()
+        assert not (tmp_dir / "datasets").exists()
+
+    def test_unimportable_writer_caught_before_anything_is_written(
+        self, deps, monkeypatch, tmp_dir, sample_bag,
+    ):
+        """find_spec sees lerobot but its dataset writer won't import (e.g.
+        lerobot installed without its [dataset] extra). The dashboard's
+        presence check can't tell; the export-time check imports the writer,
+        so the split still leaves nothing behind."""
+        from resurrector.core.export import require_export_dependencies
+        deps(broken=("lerobot",))
+        # Independent of whether a real LeRobot was imported earlier.
+        monkeypatch.setitem(sys.modules, "lerobot.datasets.lerobot_dataset", None)
+        with pytest.raises(ImportError) as ei:
+            require_export_dependencies("lerobot")
+        assert str(ei.value) == LEROBOT_HINT
+        assert isinstance(ei.value.__cause__, ImportError)
+        out = tmp_dir / "splits"
+        with pytest.raises(ImportError, match=r"\[lerobot\]"):
+            BagFrame(sample_bag).export(
+                topics=["/imu/data"], format="lerobot", output=str(out),
+                split={"train": 0.5, "val": 0.5},
+            )
+        assert not out.exists()
+
+    def test_min_python_matches_the_extra_marker(self):
+        """The [lerobot] extra installs LeRobot only from LEROBOT_MIN_PYTHON
+        up; would catch the marker and the runtime floor drifting apart."""
+        tomllib = pytest.importorskip("tomllib")
+        from packaging.markers import default_environment
+        from packaging.requirements import Requirement
+        from resurrector.core.lerobot_export import LEROBOT_MIN_PYTHON
+        extra = tomllib.loads(PYPROJECT.read_text())["project"]["optional-dependencies"]["lerobot"]
+        (req,) = [r for r in map(Requirement, extra) if r.name == "lerobot"]
+        for minor in range(10, 16):
+            env = default_environment()
+            env.update(python_version=f"3.{minor}", python_full_version=f"3.{minor}.0")
+            assert req.marker.evaluate(env) == ((3, minor) >= LEROBOT_MIN_PYTHON), minor
 
 
 class TestRldsWriterImportError:
@@ -509,6 +745,26 @@ class TestCli:
         out = " ".join(result.output.split())
         assert "pip install tensorflow" not in out
         assert "rosbag-resurrector[all-exports]" in out and "3.10-3.13" in out
+
+    def test_cli_strings_quote_tensorflow_where(self):
+        """Would catch: the --format help, the export command's help and the
+        --list-presets footer hard-coding Python ranges instead of using
+        TENSORFLOW_WHERE (they drift when the table changes)."""
+        import typer
+        from typer.testing import CliRunner
+        from resurrector.cli.main import app
+        from resurrector.core.export import TENSORFLOW_WHERE
+
+        cmd = typer.main.get_command(app).commands["export"]
+        format_help = next(p.help for p in cmd.params if p.name == "format")
+        command_help = " ".join(f"{cmd.help or ''} {cmd.epilog or ''}".split())
+        footer = CliRunner().invoke(app, ["export", "--list-presets"], env={"COLUMNS": "200"})
+        for where, text in (
+            ("--format help", format_help),
+            ("command help", command_help),
+            ("--list-presets footer", " ".join(footer.output.split())),
+        ):
+            assert TENSORFLOW_WHERE in text, where
 
     def test_export_without_tensorflow_prints_extra_and_writes_nothing(
         self, deps, tf_platform, tmp_dir, sample_bag,

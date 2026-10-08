@@ -820,8 +820,10 @@ class BagFrame:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
             ValueError: If ``preset`` is not known, or ``split`` ratios don't
                 sum to ~1.0, or ``split_strategy`` is unknown.
-            ImportError: ``lerobot`` without the ``[lerobot]`` extra
-                (Python 3.12+).
+            ImportError: The format's optional dependency is missing
+                (``[all-exports]`` for zarr / rlds, ``[lerobot]`` on
+                Python 3.12+ for lerobot). Raised before anything is
+                written, split or not.
             FileExistsError: ``lerobot`` into a non-empty directory.
 
         Example::

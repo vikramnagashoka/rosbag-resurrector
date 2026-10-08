@@ -67,7 +67,7 @@ jobs:
         extra:
           - vision-lite     # PIL + opencv-python-headless
           - vision          # vision-lite + sentence-transformers (downloads CLIP model)
-          - all-exports     # zarr + tensorflow + tensorflow-datasets (heavy: TF wheel ~600 MB)
+          - all-exports     # zarr + tensorflow (heavy: TF wheel ~600 MB)
           - watch           # watchdog (tiny)
           - ros1            # rosbags (for legacy .bag reading)
           - publish         # huggingface_hub (v0.7 dataset publishing)
@@ -113,6 +113,8 @@ jobs:
         # skips forever reads as coverage. In this job they must execute.
         if: matrix.extra == 'lerobot'
         run: |
+          # Without pipefail the pipeline's status is tee's, so failing tests pass the step.
+          set -o pipefail
           pytest tests/test_lerobot_export.py -q -rs | tee lerobot.log
           ! grep -q "SKIPPED" lerobot.log
 
@@ -121,6 +123,7 @@ jobs:
         # tensorflow-gated test in these files skipped here and read as coverage.
         if: matrix.extra == 'all-exports'
         run: |
+          set -o pipefail
           python -c "import tensorflow, zarr"
           pytest tests/test_export_ml.py tests/test_export_v040.py tests/test_rlds_capability.py -q -rs | tee rlds.log
           ! grep -q "SKIPPED" rlds.log

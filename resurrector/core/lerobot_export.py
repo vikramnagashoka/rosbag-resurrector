@@ -51,6 +51,9 @@ INSTALL_HINT = (
     "LeRobot export needs the [lerobot] extra (Python 3.12+): "
     "pip install 'rosbag-resurrector[lerobot]'"
 )
+# LeRobot's own floor; pyproject's [lerobot] marker installs nothing below
+# it (tests/test_rlds_capability.py checks the two agree).
+LEROBOT_MIN_PYTHON = (3, 12)
 
 DEFAULT_FPS = 30
 
@@ -63,13 +66,27 @@ _NUMERIC = (pl.Float32, pl.Float64, pl.Int8, pl.Int16, pl.Int32, pl.Int64,
             pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Boolean)
 
 
-def lerobot_available() -> bool:
-    """True when LeRobot's dataset writer is importable."""
+def import_lerobot_dataset():
+    """Import and return LeRobot's ``LeRobotDataset`` writer class.
+
+    Pulls in torch, so it costs seconds the first time. Raises
+    ``ImportError(INSTALL_HINT)`` chained to the real failure, which may
+    be a missing package or lerobot's own ``require_package`` check.
+    """
     try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset  # noqa: F401
-        return True
-    except Exception:
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except Exception as e:
+        raise ImportError(INSTALL_HINT) from e
+    return LeRobotDataset
+
+
+def lerobot_available() -> bool:
+    """True when LeRobot's dataset writer is importable (imports it)."""
+    try:
+        import_lerobot_dataset()
+    except ImportError:
         return False
+    return True
 
 
 @dataclass
@@ -405,10 +422,7 @@ def export_lerobot(
         FileExistsError: ``output_dir`` exists and is non-empty.
         ValueError: No overlapping data, or episodes disagree on features.
     """
-    try:
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    except Exception as e:  # ImportError, or lerobot's own require_package
-        raise ImportError(INSTALL_HINT) from e
+    LeRobotDataset = import_lerobot_dataset()
 
     if not bags:
         raise ValueError("export_lerobot needs at least one bag")

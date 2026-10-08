@@ -71,10 +71,54 @@ TENSORFLOW_PLATFORMS: Mapping[tuple[str, str], tuple[int, int]] = MappingProxyTy
     # extra caps tensorflow at <2.17 there.
     ("Darwin", "x86_64"): (3, 12),
 })
-TENSORFLOW_WHERE = (
-    "Python 3.10-3.13 on x86_64/aarch64 Linux, Apple-silicon macOS or x64 "
-    "Windows, or Python 3.10-3.12 on Intel macOS"
-)
+# Low end of every range above: the package's own floor (requires-python),
+# which every tensorflow release in the table also covers.
+TENSORFLOW_MIN_PYTHON = (3, 10)
+
+_MACOS_NAMES = {"x86_64": "Intel macOS", "arm64": "Apple-silicon macOS"}
+
+
+def _platform_names(keys: Sequence[tuple[str, str]]) -> list[str]:
+    """Readable names for platform-table keys, in order, without repeats.
+
+    Linux machines share one name ("x86_64/aarch64 Linux"), and Windows'
+    two spellings of x64 collapse into "x64 Windows".
+    """
+    linux = "/".join(machine for system, machine in keys if system == "Linux")
+    names: list[str] = []
+    for system, machine in keys:
+        if system == "Linux":
+            name = f"{linux} Linux"
+        elif system == "Darwin":
+            name = _MACOS_NAMES.get(machine, f"macOS {machine}")
+        elif system == "Windows" and machine in ("AMD64", "x86_64"):
+            name = "x64 Windows"
+        else:
+            name = f"{system} {machine}"
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def describe_tensorflow_platforms(
+    table: Mapping[tuple[str, str], tuple[int, int]],
+) -> str:
+    """Prose for where ``[all-exports]`` installs tensorflow, built from a
+    platform table such as :data:`TENSORFLOW_PLATFORMS`. Platforms that
+    share a newest Python share a clause, newest Python first."""
+    by_max: dict[tuple[int, int], list[tuple[str, str]]] = {}
+    for key, max_python in table.items():
+        by_max.setdefault(max_python, []).append(key)
+    low = "%d.%d" % TENSORFLOW_MIN_PYTHON
+    clauses = []
+    for (major, minor), keys in sorted(by_max.items(), reverse=True):
+        *rest, last = _platform_names(keys)
+        where = f"{', '.join(rest)} or {last}" if rest else last
+        clauses.append(f"Python {low}-{major}.{minor} on {where}")
+    return ", or ".join(clauses)
+
+
+TENSORFLOW_WHERE = describe_tensorflow_platforms(TENSORFLOW_PLATFORMS)
 
 
 def _running_platform() -> tuple[tuple[int, int], str, str]:
@@ -115,8 +159,7 @@ def _tensorflow_gap() -> str:
         return "isn't installed"
     (major, minor), system, machine = _running_platform()
     if system == "Darwin":
-        where = {"x86_64": "Intel macOS", "arm64": "Apple-silicon macOS"}.get(
-            machine, f"macOS {machine}")
+        where = _MACOS_NAMES.get(machine, f"macOS {machine}")
     else:
         where = f"{system} {machine}"
     return f"publishes no stable wheel for Python {major}.{minor} on {where}"
@@ -139,10 +182,12 @@ def _module_installed(name: str) -> bool:
 def export_dependency_problem(format: str) -> str | None:
     """Why ``format`` can't be exported with this install, or ``None``.
 
-    Covers the ``[all-exports]`` formats (``zarr``, ``rlds``). Uses
-    ``find_spec`` only, so it is cheap enough for every dashboard request
-    and never imports tensorflow. LeRobot is checked by
-    :func:`resurrector.core.lerobot_export.export_lerobot` itself.
+    Covers every format with an optional dependency: ``zarr`` and ``rlds``
+    (``[all-exports]``) and ``lerobot`` (``[lerobot]``, which also needs
+    Python 3.12+). Presence-only (``find_spec``), so it is cheap enough for
+    every dashboard request and never imports tensorflow or LeRobot (and
+    with it torch). A package that is present but fails to import passes
+    here; :func:`require_export_dependencies` catches that for LeRobot.
     """
     if format == "zarr" and not _module_installed("zarr"):
         return f"Zarr export requires the zarr package. Install with: {ALL_EXPORTS_INSTALL}"
@@ -151,16 +196,30 @@ def export_dependency_problem(format: str) -> str | None:
         if hint == ALL_EXPORTS_INSTALL:
             hint = f"Install with: {hint}"
         return f"RLDS export needs tensorflow, which {_tensorflow_gap()}. {hint}"
+    if format == "lerobot":
+        from resurrector.core.lerobot_export import INSTALL_HINT, LEROBOT_MIN_PYTHON
+        python, _, _ = _running_platform()
+        if python < LEROBOT_MIN_PYTHON or not _module_installed("lerobot"):
+            return INSTALL_HINT
     return None
 
 
 def require_export_dependencies(format: str) -> None:
     """Raise ``ImportError`` before any output is written if ``format``'s
     optional dependency is missing, so a failed export leaves no empty
-    directory behind."""
+    directory behind.
+
+    For ``lerobot`` this also imports LeRobot's writer: the export is about
+    to anyway, and a LeRobot that is installed but won't import (e.g.
+    without its ``[dataset]`` extra) would otherwise fail only after a
+    split or dataset export had created its directories.
+    """
     problem = export_dependency_problem(format)
     if problem:
         raise ImportError(problem)
+    if format == "lerobot":
+        from resurrector.core.lerobot_export import import_lerobot_dataset
+        import_lerobot_dataset()
 
 
 @dataclass(frozen=True)

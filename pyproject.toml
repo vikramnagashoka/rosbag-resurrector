@@ -71,12 +71,12 @@ ros1 = ["rosbags>=0.9.0"]
 # Windows; markers can't tell musl from glibc, so on musl Linux (Alpine)
 # pip finds no tensorflow wheel and the install fails.
 # Keep these markers in sync with TENSORFLOW_PLATFORMS in
-# resurrector/core/export.py (a test checks).
+# resurrector/core/export.py (a test checks). The writer needs tensorflow
+# only (tf.io / tf.train), so tensorflow-datasets stays out of the extra.
 all-exports = [
     "zarr>=2.16.0",
     "tensorflow>=2.18; python_version < '3.14' and ((platform_system == 'Linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (platform_system == 'Darwin' and platform_machine == 'arm64') or (platform_system == 'Windows' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')))",
     "tensorflow>=2.16,<2.17; python_version < '3.13' and platform_system == 'Darwin' and platform_machine == 'x86_64'",
-    "tensorflow-datasets>=4.9.0; (python_version < '3.14' and ((platform_system == 'Linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (platform_system == 'Darwin' and platform_machine == 'arm64') or (platform_system == 'Windows' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')))) or (python_version < '3.13' and platform_system == 'Darwin' and platform_machine == 'x86_64')",
 ]
 vision-lite = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0"]
 vision = ["Pillow>=10.0.0", "opencv-python-headless>=4.8.0", "sentence-transformers>=2.2.0"]
