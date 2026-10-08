@@ -122,3 +122,89 @@ def test_bridge_runtime_deps_ship_with_the_base_install():
     assert AutoWebSocketsProtocol is not None, (
         "uvicorn found no WebSocket library; the bridge's /ws would return 404"
     )
+
+
+def test_doctor_core_checks_pass_on_base_install():
+    """`resurrector doctor` finds every core dependency in a base install.
+
+    Would catch: doctor listing a module as core (where a miss counts as
+    a warning) that only an extra installs, or a base dependency such as
+    Pillow dropping out of pyproject.toml.
+    """
+    from resurrector.cli.doctor import run_all_checks
+
+    core = {r.name: r for r in run_all_checks() if r.tier == "core"}
+    assert "Image decoding" in core
+    # The index directory only appears after the first scan.
+    core.pop("Index location", None)
+    failing = {n: r.detail for n, r in core.items() if r.status != "pass"}
+    assert not failing, f"core doctor checks not passing: {failing}"
+
+
+def test_demo_camera_frames_decode_at_configured_size(smoke_bag):
+    """Demo JPEG frames decode to full-size RGB on a base install.
+
+    Would catch: Pillow living only in the extras. Without it the demo
+    generator wrote hard-coded 1x1 grayscale JPEGs (LeRobot export then
+    crashed on them) and decoding any CompressedImage raised ImportError.
+    """
+    import numpy as np
+
+    config = BagConfig()
+    bf = BagFrame(smoke_bag)
+    _, frame = next(iter(bf["/camera/compressed"].iter_images()))
+    assert frame.shape == (config.image_height, config.image_width, 3)
+
+    # Same colour as the raw frame at that time, up to JPEG loss: a
+    # placeholder frame of the right size would still fail here.
+    _, raw = next(iter(bf["/camera/rgb"].iter_images()))
+    drift = np.abs(frame.reshape(-1, 3).mean(axis=0) - raw[0, 0].astype(float))
+    assert drift.max() < 10, f"compressed frame colour drifted by {drift}"
+
+
+def test_dashboard_serves_camera_frames(smoke_bag, tmp_path, monkeypatch):
+    """Frame and Library-thumbnail endpoints return JPEGs on a base install.
+
+    Would catch: the same Pillow gap on the dashboard side, where every
+    camera frame and thumbnail returned HTTP 500 (ModuleNotFoundError:
+    PIL) after a plain ``pip install``.
+    """
+    import io
+
+    from fastapi.testclient import TestClient
+
+    from resurrector.dashboard.api import app
+    from resurrector.ingest.indexer import BagIndex
+    from resurrector.ingest.parser import parse_bag
+    from resurrector.ingest.scanner import scan_path
+
+    db_path = tmp_path / "index.db"
+    monkeypatch.setenv("RESURRECTOR_DB_PATH", str(db_path))
+    index = BagIndex(db_path)
+    try:
+        bag_id = index.upsert_bag(
+            scan_path(smoke_bag)[0], parse_bag(smoke_bag).get_metadata(),
+        )
+    finally:
+        index.close()
+
+    config = BagConfig()
+    client = TestClient(app, raise_server_exceptions=False)
+    for topic in ("camera/compressed", "camera/rgb"):
+        for route, size in (
+            ("frame/0", (config.image_width, config.image_height)),
+            ("thumbnail", None),
+        ):
+            r = client.get(f"/api/bags/{bag_id}/topics/{topic}/{route}")
+            assert r.status_code == 200, (
+                f"{topic}/{route}: HTTP {r.status_code} {r.text[:200]}"
+            )
+            assert r.headers["content-type"] == "image/jpeg"
+            # Imported only after the request so a missing Pillow shows
+            # up as the endpoint's 500, not as this test's ImportError.
+            from PIL import Image
+
+            img = Image.open(io.BytesIO(r.content))
+            assert img.format == "JPEG"
+            if size is not None:
+                assert img.size == size
