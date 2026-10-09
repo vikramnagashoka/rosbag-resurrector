@@ -23,7 +23,9 @@ from resurrector.core.bag_frame import BagFrame
 from resurrector.core.exceptions import ResurrectorError
 from resurrector.core.lerobot_export import (
     INSTALL_HINT,
+    MIN_VIDEO_HEIGHT,
     MIN_VIDEO_WIDTH,
+    LeRobotFrameFormatError,
     LeRobotFrameShapeError,
     _prepare_root,
     asof_on_grid,
@@ -33,6 +35,67 @@ from resurrector.core.lerobot_export import (
     to_rgb,
 )
 from resurrector.demo.sample_bag import BagConfig, generate_bag
+
+
+def _png_camera_bag(path: Path, img) -> Path:
+    """A bag whose only topic, ``/cam``, is five CompressedImage frames of
+    the PIL image ``img`` saved as PNG (so any PNG mode reaches the export)."""
+    import io
+
+    from mcap.writer import Writer
+
+    from resurrector.demo.sample_bag import SCHEMAS, _encode_compressed_image
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    mt = "sensor_msgs/msg/CompressedImage"
+    with open(path, "wb") as f:
+        w = Writer(f)
+        w.start(profile="ros2", library="test")
+        sid = w.register_schema(name=mt, encoding="ros2msg", data=SCHEMAS[mt]["data"].encode())
+        cid = w.register_channel(topic="/cam", message_encoding="cdr", schema_id=sid)
+        for i in range(5):
+            ts = 1_700_000_000_000_000_000 + i * 100_000_000
+            w.add_message(channel_id=cid, log_time=ts, publish_time=ts, sequence=i,
+                          data=_encode_compressed_image(*divmod(ts, 10**9), buf.getvalue()))
+        w.finish()
+    return path
+
+
+def _raw_camera_bag(path: Path, encoding: str, arr: np.ndarray) -> Path:
+    """A bag whose only topic, ``/cam``, is five sensor_msgs/Image frames of
+    ``arr`` (little-endian) labelled ``encoding``."""
+    import struct
+
+    from mcap.writer import Writer
+
+    from resurrector.demo.sample_bag import SCHEMAS, _cdr_encapsulate, _encode_cdr_header
+
+    h = arr.shape[0]
+    data = arr.astype(arr.dtype.newbyteorder("<")).tobytes()
+    enc = encoding.encode() + b"\x00"
+    body = (struct.pack("<II", h, arr.shape[1]) + struct.pack("<I", len(enc)) + enc
+            + b"\x00" * ((4 - len(enc) % 4) % 4) + b"\x00" * 4
+            + struct.pack("<I", len(data) // h) + struct.pack("<I", len(data)) + data)
+    mt = "sensor_msgs/msg/Image"
+    with open(path, "wb") as f:
+        w = Writer(f)
+        w.start(profile="ros2", library="test")
+        sid = w.register_schema(name=mt, encoding="ros2msg", data=SCHEMAS[mt]["data"].encode())
+        cid = w.register_channel(topic="/cam", message_encoding="cdr", schema_id=sid)
+        for i in range(5):
+            ts = 1_700_000_000_000_000_000 + i * 100_000_000
+            payload = _cdr_encapsulate(_encode_cdr_header(*divmod(ts, 10**9), "cam") + body)
+            w.add_message(channel_id=cid, log_time=ts, publish_time=ts, sequence=i, data=payload)
+        w.finish()
+    return path
+
+
+def _halves(dtype, left, right, h=48, w=64) -> np.ndarray:
+    a = np.empty((h, w), dtype)
+    a[:, : w // 2] = left
+    a[:, w // 2:] = right
+    return a
 
 
 @pytest.fixture
@@ -117,6 +180,42 @@ class TestToRgb:
         assert to_rgb(px, "bgra8")[0, 0].tolist() == [30, 20, 10]
         assert to_rgb(px, "rgba8").shape == (1, 1, 3)
 
+    def test_gray_alpha_becomes_gray_rgb(self):
+        """A PNG "LA" frame decodes to (H, W, 2). Would catch: passing it
+        through, which LeRobot 0.6.1 can't write (FileNotFoundError from
+        save_episode in both modes)."""
+        la = np.stack([_halves(np.uint8, 50, 200), np.full((48, 64), 128, np.uint8)], -1)
+        out = to_rgb(la, None)
+        assert out.shape == (48, 64, 3) and out.dtype == np.uint8
+        assert out[0, 0].tolist() == [50, 50, 50] and out[0, -1].tolist() == [200, 200, 200]
+        assert to_rgb(la[..., :1], None).shape == (48, 64, 3)
+
+    def test_one_bit_frame_is_black_and_white(self):
+        """PNG mode "1" decodes to bool; a uint8 cast would make white 1/255."""
+        out = to_rgb(np.array([[True, False]]), None)
+        assert out[0].tolist() == [[255, 255, 255], [0, 0, 0]]
+
+    @pytest.mark.parametrize("dtype,value", [
+        (np.uint16, 300), (np.uint16, 40000), (np.int32, 70000),
+        (np.float32, 0.5), (np.float64, 1.25),
+    ])
+    def test_non_8bit_frames_refused_not_wrapped(self, dtype, value):
+        """Would catch: the old astype(uint8), which turned a 16-bit PNG's
+        300 into 44 and 40000 into 64 and exported that without a word."""
+        frame = np.full((48, 64), value, dtype)
+        with pytest.raises(LeRobotFrameFormatError) as exc:
+            to_rgb(frame, None, "/depth")
+        msg = str(exc.value)
+        assert "'/depth'" in msg and np.dtype(dtype).name in msg and "8-bit" in msg
+        assert isinstance(exc.value, ResurrectorError) and isinstance(exc.value, ValueError)
+        with pytest.raises(LeRobotFrameFormatError):
+            to_rgb(np.full((48, 64, 3), value, dtype), "rgb16")
+
+    @pytest.mark.parametrize("shape", [(4, 4, 5), (2, 4, 4, 3), (8,)])
+    def test_unknown_layout_refused(self, shape):
+        with pytest.raises(LeRobotFrameFormatError, match="1 to 4 channels"):
+            to_rgb(np.zeros(shape, np.uint8), None, "/cam")
+
 
 class TestFrameShapeGuard:
     """Which decoded (H, W, 3) frames are refused before LeRobot sees them.
@@ -148,19 +247,61 @@ class TestFrameShapeGuard:
     def test_accepted(self, shape, use_videos):
         check_frame_shape("/cam", shape, use_videos)
 
-    def test_messages_name_what_lerobot_needs(self):
-        def msg(shape, use_videos=True):
-            with pytest.raises(LeRobotFrameShapeError) as exc:
-                check_frame_shape("/cam", shape, use_videos)
-            return str(exc.value)
+    def test_frame_errors_live_in_core_exceptions(self):
+        """CLAUDE.md: typed exceptions live in core/exceptions.py. The
+        lerobot_export names are re-exports of the same classes."""
+        from resurrector.core import exceptions, lerobot_export
 
-        assert "at least 2 pixels high" in msg((1, 64, 3))
-        assert "resurrector demo --force" in msg((1, 1, 3))
-        assert "resurrector demo --force" not in msg((1, 64, 3))
-        assert "other than 1 or 3" in msg((3, 64, 3), use_videos=False)
-        narrow = msg((48, 8, 3))
-        assert f"at least {MIN_VIDEO_WIDTH} pixels wide" in narrow
-        assert "use_videos=False" in narrow
+        for name in ("LeRobotFrameShapeError", "LeRobotFrameFormatError"):
+            cls = getattr(exceptions, name)
+            assert getattr(lerobot_export, name) is cls
+            assert cls.__module__ == "resurrector.core.exceptions"
+            assert issubclass(cls, ResurrectorError) and issubclass(cls, ValueError)
+
+    @staticmethod
+    def _msg(shape, use_videos=True, bag=None):
+        with pytest.raises(LeRobotFrameShapeError) as exc:
+            check_frame_shape("/cam", shape, use_videos, bag=bag)
+        return str(exc.value)
+
+    VIDEO_MIN = f"at least {MIN_VIDEO_WIDTH} pixels wide and {MIN_VIDEO_HEIGHT} pixels high"
+    PNG_OPTION = "Python API: export_lerobot(..., use_videos=False)"
+
+    @pytest.mark.parametrize("shape", [
+        (1, 1, 3), (1, 64, 3), (2, 64, 3), (3, 64, 3), (3, 3, 3), (48, 2, 3), (48, 24, 3),
+    ])
+    def test_video_messages_state_the_video_minimum(self, shape):
+        """Would catch: a 1-pixel-high frame told only "at least 2 pixels
+        high", so the user resized to 2x64 and was refused again."""
+        assert self.VIDEO_MIN in self._msg(shape)
+
+    def test_png_option_only_where_png_images_work(self):
+        """The PNG fallback is offered as the Python API call (the CLI,
+        dashboard and BagFrame.export have no use_videos option), and only
+        for frames image mode actually stores."""
+        for shape in [(2, 64, 3), (48, 2, 3), (48, 24, 3)]:
+            assert self.PNG_OPTION in self._msg(shape), shape
+        for shape in [(1, 64, 3), (3, 64, 3)]:
+            msg = self._msg(shape)
+            assert "use_videos=False" not in msg and "can't hold them either" in msg, shape
+        assert "use_videos=False" not in self._msg((1, 64, 3), use_videos=False)
+
+    def test_image_mode_names_the_allowed_heights(self):
+        for h in (1, 3):
+            msg = self._msg((h, 64, 3), use_videos=False)
+            assert "height of 2 or at least 4 pixels" in msg
+            assert "video encoder" not in msg
+
+    def test_one_by_one_hint_regenerates_the_bag_itself(self, tmp_dir):
+        """Would catch: telling users to run `resurrector demo --force`,
+        which rewrites ~/.resurrector/demo_sample.mcap, not the bag they
+        exported (e.g. a dashboard-generated demo_<ts>.mcap)."""
+        bag = tmp_dir / "demo_123.mcap"
+        msg = self._msg((1, 1, 3), bag=bag)
+        assert f"regenerate the bag ({bag})" in msg
+        assert "`resurrector demo`" in msg and "--force" not in msg
+        assert "regenerate the bag;" in self._msg((1, 1, 3))
+        assert "resurrector demo" not in self._msg((1, 64, 3), bag=bag)
 
 
 class TestStartMethodProbe:
@@ -231,6 +372,134 @@ class TestGuards:
         with pytest.raises(ImportError, match=r"\[lerobot\]"):
             BagFrame(sample_bag).export(format="lerobot", output=str(tmp_dir / "out"))
         assert "Python 3.12" in INSTALL_HINT
+
+
+@pytest.fixture
+def fake_lerobot(monkeypatch):
+    """Replace LeRobot's writer with a recorder; runs without LeRobot.
+
+    ``export_lerobot`` gets ``LeRobotDataset`` from ``import_lerobot_dataset``,
+    so patching that helper puts the recorder in its place. Returns the
+    record: ``create`` kwargs per call and every frame passed to add_frame.
+    """
+    from types import SimpleNamespace
+
+    from resurrector.core import lerobot_export
+
+    calls = SimpleNamespace(create=[], frames=[])
+
+    class _Dataset:
+        def add_frame(self, frame):
+            calls.frames.append(frame)
+
+        def save_episode(self, **_kw):
+            pass
+
+        def finalize(self):
+            pass
+
+    class _LeRobotDataset:
+        @staticmethod
+        def create(**kwargs):
+            calls.create.append(kwargs)
+            return _Dataset()
+
+    monkeypatch.setattr(lerobot_export, "import_lerobot_dataset", lambda: _LeRobotDataset)
+    return calls
+
+
+class TestGuardsRunBeforeLeRobot:
+    """Frame guards refuse a camera before ``LeRobotDataset.create`` runs.
+
+    The real-LeRobot tests below can't see the order: on any error the
+    exporter's cleanup deletes the output directory, so "output dir doesn't
+    exist" holds whether the guard ran before or after create(). These
+    tests record create() itself.
+    """
+
+    def test_positive_control_create_is_recorded(self, tmp_dir, fake_lerobot):
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = generate_bag(tmp_dir / "ok.mcap", BagConfig(duration_sec=1.0))
+        export_lerobot([BagFrame(bag)], ["/camera/rgb"], tmp_dir / "lr")
+        assert len(fake_lerobot.create) == 1
+        assert fake_lerobot.frames[0]["observation.images.camera_rgb"].shape == (48, 64, 3)
+
+    @pytest.mark.parametrize("h,w,use_videos", [(48, 2, True), (1, 8, True), (3, 16, False)])
+    def test_shape_guard_raises_before_create(self, tmp_dir, fake_lerobot, h, w, use_videos):
+        """Would catch: check_frame_shape moved after LeRobotDataset.create
+        (every output-dir assertion still passes in that order)."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = generate_bag(tmp_dir / "b.mcap",
+                           BagConfig(duration_sec=1.0, image_height=h, image_width=w))
+        with pytest.raises(LeRobotFrameShapeError, match=rf"{h}x{w} \(height x width\)"):
+            export_lerobot([BagFrame(bag)], ["/camera/rgb"], tmp_dir / "lr",
+                           use_videos=use_videos)
+        assert fake_lerobot.create == []
+        assert not (tmp_dir / "lr").exists()
+
+    def test_one_by_one_message_names_the_exported_bag(self, tmp_dir, fake_lerobot):
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = generate_bag(tmp_dir / "demo_20260101.mcap",
+                           BagConfig(duration_sec=1.0, image_height=1, image_width=1))
+        with pytest.raises(LeRobotFrameShapeError) as exc:
+            export_lerobot([BagFrame(bag)], ["/camera/rgb"], tmp_dir / "lr")
+        assert f"regenerate the bag ({bag})" in str(exc.value)
+        assert fake_lerobot.create == []
+
+    def test_sixteen_bit_png_refused_before_create(self, tmp_dir, fake_lerobot):
+        """A 16-bit grayscale PNG (how compressed_image_transport stores
+        16UC1 depth and mono16) decodes to uint16. Would catch: the cast
+        that exported 300 as 44 and 40000 as 64."""
+        from PIL import Image
+
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = _png_camera_bag(tmp_dir / "depth.mcap",
+                              Image.fromarray(_halves(np.uint16, 300, 40000)))
+        with pytest.raises(LeRobotFrameFormatError, match=r"'/cam' has uint16 frames"):
+            export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert fake_lerobot.create == []
+        assert not (tmp_dir / "lr").exists()
+
+    @pytest.mark.parametrize("encoding", ["mono16", "16UC1", "rgb16"])
+    def test_undecodable_raw_frames_name_their_encoding(self, tmp_dir, fake_lerobot, encoding):
+        """Raw 16-bit sensor_msgs/Image frames don't decode at all (the
+        image decoder reads 8-bit encodings only). Would catch: the bare
+        "No decodable frame on /cam at or before 1700000000000000000"."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        ch = 3 if encoding == "rgb16" else 1
+        arr = np.full((48, 64, ch), 40000, np.uint16).squeeze()
+        bag = _raw_camera_bag(tmp_dir / "raw.mcap", encoding, arr)
+        with pytest.raises(ValueError, match=rf"No decodable frame on /cam .*'{encoding}'"):
+            export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert fake_lerobot.create == []
+
+    def test_raw_helper_control_rgb8_decodes(self, tmp_dir, fake_lerobot):
+        """Control for the test above: the same writer with rgb8 exports."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        export_lerobot([BagFrame(_raw_camera_bag(tmp_dir / "raw.mcap", "rgb8", rgb))],
+                       ["/cam"], tmp_dir / "lr")
+        frame = fake_lerobot.frames[0]["observation.images.cam"]
+        assert frame[0, 0].tolist() == [10, 10, 10] and frame[0, -1].tolist() == [200, 200, 200]
+
+    def test_gray_alpha_png_exports_as_gray_rgb(self, tmp_dir, fake_lerobot):
+        from PIL import Image
+
+        from resurrector.core.lerobot_export import export_lerobot
+
+        la = np.stack([_halves(np.uint8, 50, 200), np.full((48, 64), 128, np.uint8)], -1)
+        bag = _png_camera_bag(tmp_dir / "la.mcap", Image.fromarray(la, "LA"))
+        export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        feats = fake_lerobot.create[0]["features"]
+        assert feats["observation.images.cam"]["shape"] == (48, 64, 3)
+        frame = fake_lerobot.frames[0]["observation.images.cam"]
+        assert frame[0, 0].tolist() == [50, 50, 50] and frame[0, -1].tolist() == [200, 200, 200]
 
 
 class TestImageSpillCleanup:
@@ -469,6 +738,49 @@ class TestLeRobotRoundTrip:
             BagFrame(bag).export(preset="lerobot", output=str(out))
         assert not out.exists()
 
+    def test_real_create_not_called_when_guard_raises(self, tmp_dir, sample_bag, monkeypatch):
+        """Same order check as TestGuardsRunBeforeLeRobot, through
+        BagFrame.export with the installed LeRobotDataset.create wrapped."""
+        LeRobotDataset = _lerobot().LeRobotDataset
+        real = LeRobotDataset.create
+        created = []
+
+        def spy(cls, *args, **kwargs):
+            created.append(kwargs.get("root"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(LeRobotDataset, "create", classmethod(spy))
+        bad = generate_bag(tmp_dir / "flat.mcap",
+                           BagConfig(duration_sec=1.0, image_height=1, image_width=8))
+        with pytest.raises(LeRobotFrameShapeError):
+            BagFrame(bad).export(preset="lerobot", output=str(tmp_dir / "lr_bad"))
+        assert created == []
+
+        BagFrame(sample_bag).export(format="lerobot", topics=["/imu/data", "/camera/rgb"],
+                                    output=str(tmp_dir / "lr_ok"))
+        assert created == [tmp_dir / "lr_ok"]  # the spy sees a real create
+
+    def test_gray_alpha_and_sixteen_bit_pngs(self, tmp_dir):
+        """Gray+alpha PNG frames round-trip exactly as gray RGB in image
+        mode (before: FileNotFoundError from LeRobot); 16-bit PNG frames
+        are refused (before: exported wrapped, 300 -> 44)."""
+        _lerobot()
+        from PIL import Image
+
+        from resurrector.core.lerobot_export import export_lerobot
+
+        la = np.stack([_halves(np.uint8, 50, 200), np.full((48, 64), 128, np.uint8)], -1)
+        bag = _png_camera_bag(tmp_dir / "la.mcap", Image.fromarray(la, "LA"))
+        out = tmp_dir / "lr_la"
+        export_lerobot([BagFrame(bag)], ["/cam"], out, use_videos=False)
+        got = (_load(out)[0]["observation.images.cam"].permute(1, 2, 0).numpy() * 255).round()
+        assert got[0, 0].tolist() == [50, 50, 50] and got[0, -1].tolist() == [200, 200, 200]
+
+        depth = _png_camera_bag(tmp_dir / "d.mcap", Image.fromarray(_halves(np.uint16, 300, 40000)))
+        with pytest.raises(LeRobotFrameFormatError):
+            export_lerobot([BagFrame(depth)], ["/cam"], tmp_dir / "lr_d", use_videos=False)
+        assert not (tmp_dir / "lr_d").exists()
+
     def test_cli_reports_bad_frame_shape_in_one_line(self, tmp_dir):
         from typer.testing import CliRunner
         from resurrector.cli.main import app
@@ -478,11 +790,13 @@ class TestLeRobotRoundTrip:
                            BagConfig(duration_sec=1.0, image_height=1, image_width=1))
         result = CliRunner().invoke(
             app, ["export", str(bag), "--preset", "lerobot", "-o", str(tmp_dir / "out")],
-            env={"COLUMNS": "400"},
+            env={"COLUMNS": "2000"},
         )
         assert result.exit_code == 1
         assert isinstance(result.exception, SystemExit), repr(result.exception)
-        assert "Export failed" in result.output and "resurrector demo --force" in result.output
+        assert "Export failed" in result.output
+        assert f"regenerate the bag ({bag})" in result.output, result.output
+        assert "`resurrector demo`" in result.output
         assert not (tmp_dir / "out").exists()
 
     def test_three_pixel_high_image_mode_refused(self, tmp_dir):
