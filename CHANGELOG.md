@@ -6,7 +6,7 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ---
 
-## [Unreleased]
+## [0.8.6] — 2026-10-09
 
 ### What's new
 
@@ -29,7 +29,8 @@ frames in the dashboard.
   against the wrong timestamps; CSV wrote them under the wrong header; and
   Parquet failed with a raw pyarrow schema error. HDF5, Zarr and `.npz` now
   fill the missing rows (NaN, or `""` for text). CSV and Parquet keep the
-  first chunk's columns and report a column that first appears later.
+  first chunk's columns; a column that first appears later is left out and
+  the export fails, naming it (see below).
 - `iter_chunks()`, which every export and `to_polars()` read through, no
   longer drops a field first seen after row 100 of a chunk, or truncates a
   field that is an integer in the first 100 rows and a float later (2.5
@@ -67,11 +68,12 @@ frames in the dashboard.
   error before it writes anything (an error on a later bag removes the
   partial dataset): 16-bit, 32-bit and float frames (a cast
   to 8 bits wrapped 16-bit depth values, 300 becoming 44), and frame sizes
-  LeRobot mishandles (1 or 3 pixels high, or below the video encoder's
-  25 x 4 minimum, which ended in a `FileNotFoundError` traceback, a
-  transposed image or a hung encoder). Gray+alpha frames now export as gray,
-  1-bit frames as black and white, and bags whose fields are first seen in
-  a different order can share one dataset.
+  LeRobot mishandles (1 or 3 pixels high, or under the video encoder's
+  minimum of 25 pixels wide and 4 high, which ended in a
+  `FileNotFoundError` traceback, a transposed image or a hung encoder).
+  Gray+alpha frames now export as gray, 1-bit frames as black and white,
+  and bags whose fields are first seen in a different order can share one
+  dataset.
 - A failed export lists every column that couldn't be written with its
   reason, says whether each is still in the file, and names a format that
   would keep it (Parquet for list, struct and binary columns in
@@ -80,9 +82,9 @@ frames in the dashboard.
   traceback and the dashboard showed "Export failed: Internal Server
   Error". `resurrector export` and `resurrector dataset export` print it to
   stderr and exit 1; dataset export also says how to get the other format
-  (a new version with `-f`). `resurrector dataset export` also reports a
-  LeRobot frame error or an existing LeRobot target in one line, where it
-  ended in a traceback.
+  (a new version with `-f`). `resurrector dataset export` also reports an
+  unknown dataset or version, a LeRobot frame error or an existing LeRobot
+  target in one line, where it ended in a traceback.
 
 **Dashboard and install**
 
@@ -93,7 +95,10 @@ frames in the dashboard.
   frames on its CompressedImage topic (`/camera/compressed`); it now always
   writes real frames, never leaves a half-written bag at the output path,
   and regenerates a 1x1 sample left by 0.8.5 on its own. The examples do
-  the same for their sample bag.
+  the same for their sample bag. `resurrector demo -o` on an existing file
+  it didn't write leaves the file alone and exits 1, where it suggested
+  `--force` (which would replace it with synthetic data) and then ran the
+  walkthrough on it.
 - Bag export and trim return 422 with the failed columns instead of a bare
   500, and dataset-version export returns the same 422 instead of a 500.
   The export dialogs, the trim popover and
@@ -103,18 +108,20 @@ frames in the dashboard.
   dataset is deleted.
 - Dataset-version export answers an unknown dataset or version with 404
   (was 500), a LeRobot frame error with 400, and an existing LeRobot target
-  with 409. Dataset-version export and trim answer a missing extra (Zarr,
-  tensorflow, LeRobot) with the 503 bag export already used, so the page
-  shows its install banner instead of a 500.
+  with 409. Dataset-version export (Zarr, tensorflow, LeRobot) and trim
+  (Zarr, and OpenCV for MP4) answer a missing extra with a 503 whose
+  message names the install command, as bag export already did, so the
+  page shows that instead of "Internal Server Error".
 - `resurrector doctor` checks Pillow under "Core install".
 
 ### Changed
 
-- `ExportError` is a `ResurrectorError`, and its message changed: it used
-  to be "Failed to serialize N column(s) to PATH: col1, col2". Its
-  `failures` and `output` attributes are unchanged. `ExportColumnFailure`
-  gains `kind` and `array_storable` fields (with defaults), and
-  `ExportError` gains `suggested_formats` and `suggests_parquet`.
+- `ExportError` (in `resurrector.core.export`) is a `ResurrectorError`,
+  and its message changed: it used to be "Failed to serialize N column(s)
+  to PATH: col1, col2". Its `failures` and `output` attributes are
+  unchanged. `ExportColumnFailure` gains `kind` and `array_storable`
+  fields (with defaults), and `ExportError` gains `suggested_formats` and
+  `suggests_parquet`.
 - List, struct, fixed-size array, binary and decimal columns now fail in
   HDF5, Zarr and `.npz` with a message pointing to Parquet. Before, `.npz`
   pickled list columns (unloadable without `allow_pickle=True`) and wrote
@@ -127,6 +134,9 @@ frames in the dashboard.
   `resurrector.core.exceptions`, both a `ResurrectorError` and a
   `ValueError` (also importable from `resurrector.core.lerobot_export`).
 - `[vision-lite]` now only adds OpenCV, for MP4 video export.
+- `resurrector export` prints all of its errors to stderr; it printed
+  unknown-preset, `--split`, missing-extra and other export errors to
+  stdout. Exit codes are unchanged.
 
 ### Test infrastructure
 
@@ -136,13 +146,16 @@ frames in the dashboard.
   checks the HDF5 chunk cache.
 - `wheel-smoke` runs the smoke tests from outside the checkout, so they
   test the installed wheel.
+- A test checks that `resurrector.__version__` matches the version in
+  `pyproject.toml`.
 
 ### Test counts
 
-- Backend: **1694 passed** (was 1305) with zarr and tensorflow installed,
-  plus a memory-regression tier of 20 (was 16)
+- Backend: **1715 passed** (was 1305) with zarr and tensorflow installed
+  and `tests/test_vision.py` excluded, plus a memory-regression tier of 20
+  (was 16)
 - Frontend unit: **101 passed** (was 80)
-- E2E: **55 behavioural** (was 47) plus 7 visual
+- E2E: **56 behavioural** (was 47) plus 7 visual
 
 ## [0.8.5] — 2026-10-07
 

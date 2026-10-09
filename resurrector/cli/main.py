@@ -2156,8 +2156,8 @@ def demo(
     """Generate or download a sample bag and walk through the basic workflow.
 
     Default: generates a 5-second synthetic bag (fast, good for smoke tests,
-    but the camera frames are solid colours that change over time — bad
-    for visual demos like CLIP search). Pass --download to fetch a
+    but the camera frames are solid colors that change over time, so CLIP
+    search finds nothing useful in them). Pass --download to fetch a
     real-data MCAP bag with actual camera footage instead.
 
     An existing sample is reused unless --force is given, or it is broken
@@ -2176,7 +2176,7 @@ def demo(
 
     # Default path: generate synthetic bag
     from resurrector.demo.sample_bag import (
-        BagConfig, generate_bag, stale_sample_reason,
+        BagConfig, generate_bag, stale_sample_reason, written_by_generator,
     )
 
     output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
@@ -2184,6 +2184,15 @@ def demo(
 
     reuse = output.exists() and not force
     stale = reuse and stale_sample_reason(output)
+    if reuse and not stale and not written_by_generator(output):
+        # Not a sample this command wrote (a user's own recording, say):
+        # leave it untouched and stop, rather than walking through it.
+        err_console.print(
+            f"[yellow]{rich_escape(str(output))} exists and isn't a `resurrector demo` "
+            f"sample, so it was left as is. To write a sample, pick another path "
+            f"with -o (--force would replace it with synthetic data).[/yellow]",
+        )
+        raise typer.Exit(code=1)
     if reuse and not stale:
         console.print(f"[dim]Sample already exists at {output} (use --force to regenerate)[/dim]")
     else:

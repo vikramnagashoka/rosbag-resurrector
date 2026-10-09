@@ -15,6 +15,8 @@ shows up in the default suite before a release is built:
   there. Only absolute URLs and in-page ``#anchors`` are allowed.
 - The .deb and .dmg built from packaging/ must carry the same license
   and version as the wheel.
+- ``resurrector.__version__`` (what ``--version`` and the frozen app
+  report) must match pyproject's version.
 """
 
 from __future__ import annotations
@@ -61,6 +63,15 @@ def test_typer_requirement_needs_no_extra(pyproject):
     # (`--help` raises in make_metavar); 0.16.0 is the first compatible release.
     assert not typer.specifier.contains("0.15.3")
     assert typer.specifier.contains("0.16.0")
+
+
+def test_dunder_version_matches_pyproject(pyproject):
+    """Would catch: a release bump that edits one of the two, so the wheel
+    says 0.8.6 and `resurrector --version` says 0.8.5."""
+    source = (REPO_ROOT / "resurrector" / "__init__.py").read_text()
+    match = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
+    assert match, "resurrector/__init__.py has no __version__ line"
+    assert match.group(1) == pyproject["project"]["version"]
 
 
 def test_license_is_spdx_expression(pyproject):

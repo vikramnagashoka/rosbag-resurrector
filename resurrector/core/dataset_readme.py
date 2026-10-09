@@ -243,7 +243,8 @@ def _lerobot_config_lines(output_path: Path, downsample_hz: float | None) -> lis
     lines.append(
         "- **Resampling**: every topic is sampled onto a uniform 1/fps grid; "
         "each frame holds the latest sample at or before its timestamp "
-        "(causal, no look-ahead)"
+        "(causal, except that a field missing from a topic's first frames "
+        "holds its first value there; the export logs which frames)"
     )
     return lines
 

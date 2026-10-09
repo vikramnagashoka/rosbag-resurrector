@@ -1192,6 +1192,36 @@ test.describe('Trim popover when columns fail to serialize', () => {
   })
 })
 
+test.describe('Trim popover when an optional extra is missing', () => {
+  test('shows the install command from a 503 that names no capability', async ({ page }) => {
+    // Would catch: trim to MP4 without OpenCV showing anything but the
+    // [vision-lite] install command. Since v0.8.6 that 503 carries only
+    // kind + message (it used to name the [all-exports] capability, which
+    // doesn't install OpenCV), so the popover must not depend on the
+    // capability fields.
+    const message = "Video export requires OpenCV. Install with: pip install 'rosbag-resurrector[vision-lite]'"
+    await page.setViewportSize({ width: 1280, height: 600 })
+    await page.goto('/classic')
+    await page.getByText(/scene_demo\.mcap/).first().click()
+    await page.waitForURL(/\/classic\/bag\/\d+/)
+    await page.getByText('sensor_msgs/msg/PointCloud2 | 80 msgs').click()
+    await page.getByRole('button', { name: /^Trim (manually|current zoom)…$/ }).click()
+    const popover = page.locator('div:has(> h2:text-is("Trim & export"))')
+    await expect(popover).toBeVisible()
+    await page.route(/\/api\/bags\/\d+\/trim$/, route => route.fulfill({
+      status: 503, json: { detail: { kind: 'capability_unavailable', message } },
+    }))
+    await popover.locator('select:has(option[value="mp4"])').selectOption('mp4')
+    await popover.getByRole('button', { name: 'Export', exact: true }).click()
+    const inline = popover.getByTestId('export-failure')
+    await expect(inline).toBeVisible()
+    expect(await inline.textContent()).toBe(`Export failed: ${message}`)
+    const toast = page.getByTestId('toast').filter({ hasText: 'Trim export' })
+    await expect(toast).toHaveCount(1)
+    expect(await toast.textContent()).toBe(`Trim export: ${message}`)
+  })
+})
+
 test.describe('Datasets page when columns fail to serialize', () => {
   test('notebook page keeps each failed column on screen until an export works', async ({ page, request }) => {
     // Would catch: a dataset-version export's failed-columns 422 reaching

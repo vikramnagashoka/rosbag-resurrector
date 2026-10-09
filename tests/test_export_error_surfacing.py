@@ -684,6 +684,49 @@ class TestApi:
         assert r.json()["detail"]["kind"] == "capability_unavailable"
         assert r.json()["detail"]["capability"] == "all_exports"
 
+    def test_trim_to_mp4_without_opencv_names_no_wrong_extra(self, api, tmp_dir, monkeypatch):
+        """Would catch: the 503 for MP4 without OpenCV labelled all_exports
+        with the [all-exports] install command, which doesn't install
+        OpenCV ([vision-lite] does)."""
+        monkeypatch.setitem(sys.modules, "cv2", None)
+        client, bag_id = api
+        r = client.post(
+            f"/api/bags/{bag_id}/trim",
+            json={"start_sec": 0.0, "end_sec": 0.5, "topics": ["/camera/rgb"],
+                  "format": "mp4", "output_path": str(tmp_dir / "trim")},
+        )
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"]
+        assert detail["kind"] == "capability_unavailable"
+        assert "[vision-lite]" in detail["message"]
+        assert "capability" not in detail and "install_command" not in detail
+
+    @pytest.mark.parametrize(("message", "capability"), [
+        ("LeRobot export needs the [lerobot] extra (Python 3.12+): "
+         "pip install 'rosbag-resurrector[lerobot]'", "lerobot"),
+        ("Zarr export requires the zarr package. Install with: "
+         "pip install 'rosbag-resurrector[all-exports]'", "all_exports"),
+        ("RLDS export needs tensorflow, which failed to import: "
+         "libtensorflow_framework.2.dylib not found", "all_exports"),
+        ("Video export requires OpenCV. Install with: "
+         "pip install 'rosbag-resurrector[vision-lite]'", None),
+        ("Frame export requires Pillow, which this install is missing. "
+         "Install with: pip install Pillow", None),
+    ], ids=["lerobot", "zarr", "broken-tensorflow", "opencv", "pillow"])
+    def test_capability_unavailable_names_only_the_extra_that_fixes_it(self, message, capability):
+        """Would catch: a missing OpenCV or Pillow labelled with the
+        [all-exports] install command, which installs neither, or a broken
+        tensorflow import losing its [all-exports] capability."""
+        from resurrector.dashboard.api import _capability_unavailable
+
+        detail = _capability_unavailable(ImportError(message)).detail
+        assert detail["kind"] == "capability_unavailable"
+        assert detail["message"] == message
+        assert detail.get("capability") == capability
+        if capability:
+            assert detail["install_command"].endswith(
+                f"rosbag-resurrector[{capability.replace('_', '-')}]'")
+
     @pytest.mark.parametrize(("name", "version", "detail"), [
         ("nosuch", "1.0", "Dataset 'nosuch' not found"),
         ("pick-place", "9.9", "Version '9.9' not found for dataset 'pick-place'"),

@@ -271,7 +271,7 @@ def _require_pillow():
 
 
 def _make_test_jpeg(width: int, height: int, r: int, g: int, b: int) -> bytes:
-    """Encode a solid-colour ``width`` x ``height`` RGB JPEG."""
+    """Encode a solid-color ``width`` x ``height`` RGB JPEG."""
     import io
 
     img = _require_pillow().new("RGB", (width, height), (r, g, b))
@@ -566,6 +566,19 @@ def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Pa
     return output_path
 
 
+def written_by_generator(path: str | Path) -> bool:
+    """True if this generator wrote the MCAP file at ``path`` (its header
+    names :data:`GENERATOR_LIBRARY`). False for a bag from any other
+    writer and for a file that can't be read as MCAP."""
+    from mcap.reader import make_reader
+
+    try:
+        with open(path, "rb") as f:
+            return make_reader(f).get_header().library == GENERATOR_LIBRARY
+    except Exception:
+        return False
+
+
 def stale_sample_reason(path: str | Path) -> str | None:
     """Why an existing sample bag at ``path`` should be regenerated, or None.
 
@@ -576,19 +589,12 @@ def stale_sample_reason(path: str | Path) -> str | None:
     first compressed frame only. A file whose header names another writer
     is never flagged, so a user's own bag is never overwritten.
     """
-    from mcap.reader import make_reader
-
     from resurrector.ingest.parser import MCAPParser, get_compressed_image_array
 
     path = Path(path)
     if path.stat().st_size == 0:
         return "it is empty"
-    try:
-        with open(path, "rb") as f:
-            library = make_reader(f).get_header().library
-    except Exception:
-        return None
-    if library != GENERATOR_LIBRARY:
+    if not written_by_generator(path):
         return None
     try:
         # Reading starts with the summary at the end of the file, so a

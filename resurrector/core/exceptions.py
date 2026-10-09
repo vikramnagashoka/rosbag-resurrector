@@ -148,7 +148,10 @@ class LeRobotFrameShapeError(ResurrectorError, ValueError):
 
     ``min_width`` / ``min_height`` are the video encoder's limits, measured
     and defined in :mod:`resurrector.core.lerobot_export`. ``bag`` is the
-    source bag's path, named in the 1x1 hint when given.
+    source bag's path. ``demo_sample`` says ``resurrector demo`` wrote it: only
+    then does a 1x1 error tell the user to regenerate it with
+    ``resurrector demo -o <bag>``, so a user's own recording is never named
+    there. With no ``bag``, the hint names ``resurrector demo`` generically.
 
     Also a ``ValueError``, so callers that already map ValueError to a
     clean error (the CLI, the dashboard's 400) keep doing so.
@@ -163,11 +166,13 @@ class LeRobotFrameShapeError(ResurrectorError, ValueError):
         min_width: int,
         min_height: int,
         bag: str | os.PathLike | None = None,
+        demo_sample: bool = False,
     ):
         self.topic = topic
         self.shape = tuple(shape)
         self.use_videos = use_videos
         self.bag = bag
+        self.demo_sample = demo_sample
         h, w = self.shape[:2]
         # What image mode does with this height; None when it stores it fine.
         image_problem = {
@@ -191,7 +196,7 @@ class LeRobotFrameShapeError(ResurrectorError, ValueError):
         else:
             need = f"{image_problem}; PNG images need a height of 2 or at least 4 pixels"
         hint = ""
-        if (h, w) == (1, 1):
+        if (h, w) == (1, 1) and (demo_sample or not bag):
             regen = (f"`resurrector demo -o {shlex.quote(os.fspath(bag))}`" if bag
                      else "`resurrector demo` (or `resurrector demo -o <bag>` for another path)")
             hint = (" 1x1 frames usually mean a demo bag written by an install without "
@@ -212,7 +217,7 @@ class LeRobotFrameFormatError(ResurrectorError, ValueError):
     (alpha is dropped); anything else raises this before the dataset
     directory is created. A plain cast would wrap 16-bit values (300 -> 44),
     and scaling 16-bit or float data to 8 bits turns metric depth (16UC1
-    millimetres, 32FC1 metres) into a near-black, coarsely stepped image,
+    millimeters, 32FC1 meters) into a near-black, coarsely stepped image,
     so neither is done silently.
 
     Also a ``ValueError``, for the same reason as :class:`LeRobotFrameShapeError`.
@@ -228,7 +233,7 @@ class LeRobotFrameFormatError(ResurrectorError, ValueError):
                 f"has {self.dtype} frames (shape {self.shape}): LeRobot export "
                 "stores cameras as 8-bit RGB, and converting these pixels to "
                 "8 bits would wrap or flatten their values (16-bit depth in "
-                "millimetres, for example, becomes a near-black image)"
+                "millimeters, for example, becomes a near-black image)"
             )
         else:
             problem = (
