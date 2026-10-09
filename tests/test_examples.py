@@ -81,6 +81,26 @@ def test_examples_do_not_import_the_tests_package():
     assert not offenders, offenders
 
 
+def test_examples_make_bags_through_the_common_helpers():
+    """Would catch: an example calling ``generate_bag`` itself (example
+    25 did), which ends in a traceback on an install without Pillow
+    instead of the one-line hint, and reuses a stale sample bag. Bags
+    come from ``_common.ensure_bag`` / ``generate_bag_or_exit``."""
+    offenders = []
+    for path in _example_sources():
+        if path.name == "_common.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "resurrector.demo.sample_bag"
+                and any(a.name == "generate_bag" for a in node.names)
+            ):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, offenders
+
+
 def _good_sample(path: Path) -> None:
     from resurrector.demo.sample_bag import BagConfig, generate_bag
 

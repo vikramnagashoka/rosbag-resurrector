@@ -13,10 +13,14 @@ Our job is the mapping from a bag to LeRobot frames:
   so every frame must sit on an exact ``1/fps`` grid. Topics are resampled
   onto that grid with a backward as-of join: each frame gets the latest
   sample at or before its grid time. That is causal (no future sample
-  leaks into a frame, which matters for policy training).
+  leaks into a frame, which matters for policy training), with one logged
+  exception: a field missing from a topic's first frames (a driver that
+  starts publishing JointState velocity late) takes its first later value
+  there, because a NaN would make LeRobot's statistics for it NaN.
 - **Grid bounds** are ``[max(first_ts), min(last_ts)]`` across the selected
   topics, so no topic is ever extrapolated before it starts or held past
-  the point where it stopped publishing.
+  the point where it stopped publishing. A single field that stops while
+  its topic keeps publishing is held at its last value, also logged.
 - ``observation.state`` = numeric fields of non-image topics (minus header
   stamps), ``action`` = numeric fields of ``action_topics`` if given, and
   ``observation.images.<topic>`` = one video stream per image topic.
@@ -380,12 +384,41 @@ def _resample_topics(
                     for c, n in late.items()
                 ),
             )
+        stopped = {c: int(df[c].is_not_null().arg_true()[-1]) + 1 for c in cols}
+        stopped = {c: n for c, n in stopped.items() if n < df.height}
+        if stopped:
+            logger.warning(
+                "Topic %s: %s; those frames hold the field's last value",
+                topic, ", ".join(
+                    f"{c} has no value after frame {n - 1} of {df.height}"
+                    for c, n in stopped.items()
+                ),
+            )
         df = df.fill_null(strategy="forward").fill_null(strategy="backward")
         blocks.append(df.cast(pl.Float32).to_numpy())
         names.extend(_label(topic, c) for c in df.columns)
     if not blocks:
         return np.zeros((len(grid), 0), dtype=np.float32), []
     return np.concatenate(blocks, axis=1).astype(np.float32), names
+
+
+def _match_field_order(ep: _Episode, names: tuple[list[str], list[str]]) -> _Episode:
+    """``ep`` with its state and action columns in the order of ``names``
+    (the first episode's), when it has the same fields in another order.
+
+    Fields are ordered as first seen, so a bag whose driver started
+    publishing a field later than in the first bag lists the same fields
+    differently. Different field sets are left alone, so the feature check
+    still refuses them.
+    """
+    def _reorder(values, have, want):
+        if values is None or have == want or sorted(have) != sorted(want):
+            return values, have
+        return values[:, [have.index(n) for n in want]], list(want)
+
+    state, state_names = _reorder(ep.state, ep.state_names, names[0])
+    action, action_names = _reorder(ep.action, ep.action_names, names[1])
+    return _Episode(ep.grid, state, action, state_names, action_names, ep.image_views)
 
 
 def _plan_episode(
@@ -516,10 +549,12 @@ def export_lerobot(
         ImportError: LeRobot isn't installed (see :data:`INSTALL_HINT`).
         FileExistsError: ``output_dir`` exists and is non-empty.
         LeRobotFrameShapeError: A camera's frames are a size LeRobot
-            mishandles (see the class); raised before ``output_dir`` exists.
+            mishandles (see the class); for the first bag, raised before
+            ``output_dir`` exists.
         LeRobotFrameFormatError: A camera's pixels aren't 8-bit (16-bit,
-            float, ...) and can't become RGB losslessly; raised on the
-            topic's first frame, before ``output_dir`` exists.
+            float, ...) and can't become RGB losslessly; usually raised on
+            the topic's first frame, before ``output_dir`` exists.
+        Either error on a later frame or bag removes the partial dataset.
         ValueError: No overlapping data, or episodes disagree on features.
     """
     LeRobotDataset = import_lerobot_dataset()
@@ -545,6 +580,8 @@ def export_lerobot(
         for bf in bags:
             sel = list(topics) if topics else list(bf.topic_names)
             ep = _plan_episode(bf, sel, action_topics, fps)
+            if first_names is not None:
+                ep = _match_field_order(ep, first_names)
             streams = {_camera_key(v.name): frames_on_grid(v, ep.grid) for v in ep.image_views}
             firsts = {k: next(it) for k, it in streams.items()}
             cam_shapes = {k: tuple(int(x) for x in f.shape) for k, f in firsts.items()}

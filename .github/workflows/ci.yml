@@ -115,7 +115,7 @@ jobs:
         run: |
           # Without pipefail the pipeline's status is tee's, so failing tests pass the step.
           set -o pipefail
-          pytest tests/test_lerobot_export.py -q -rs | tee lerobot.log
+          pytest tests/test_lerobot_export.py tests/test_export_lerobot_columns.py -q -rs | tee lerobot.log
           ! grep -q "SKIPPED" lerobot.log
 
       - name: Assert RLDS tests actually ran

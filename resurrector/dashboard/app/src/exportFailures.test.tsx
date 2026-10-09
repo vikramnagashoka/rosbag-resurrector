@@ -184,23 +184,35 @@ describe.each([
 
   it('drops the error when its version is deleted, not another one', async () => {
     // Would catch: "Export of pick-place@1.0 failed" staying on screen after
-    // the user deleted 1.0 (the hint's next step is a new Parquet version,
-    // then deleting the failed one), or a delete of 2.0 clearing it.
+    // the user deleted 1.0 (the hint's next step is a new version in another
+    // format, then deleting the failed one), or a delete of 2.0, or of
+    // another dataset's 1.0 (version strings repeat across datasets),
+    // clearing it.
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     const deleteVersion = vi.spyOn(api, 'deleteDatasetVersion').mockImplementation(
       async (name, version) => ({ deleted: { name, version } }),
     )
-    vi.spyOn(api, 'getDataset').mockResolvedValue(DATASET)
+    vi.spyOn(api, 'getDataset').mockImplementation(
+      async name => (name === OTHER.name ? OTHER : DATASET),
+    )
     await failExport()
 
     fireEvent.click(within(versionRow('2.0')).getByRole('button', { name: 'Delete' }))
     expect(await screen.findByText('Deleted pick-place@2.0')).toBeInTheDocument()
     expect(screen.getByTestId('export-failure').textContent).toBe(ERROR_TEXT)
 
+    fireEvent.click(screen.getByText('stack-cups'))
+    expect(await screen.findByRole('heading', { name: 'stack-cups' })).toBeInTheDocument()
+    fireEvent.click(within(versionRow('1.0')).getByRole('button', { name: 'Delete' }))
+    expect(await screen.findByText('Deleted stack-cups@1.0')).toBeInTheDocument()
+    expect(screen.getByTestId('export-failure').textContent).toBe(ERROR_TEXT)
+
+    fireEvent.click(screen.getByText('pick-place'))
+    expect(await screen.findByRole('heading', { name: 'pick-place' })).toBeInTheDocument()
     fireEvent.click(within(versionRow('1.0')).getByRole('button', { name: 'Delete' }))
     expect(await screen.findByText('Deleted pick-place@1.0')).toBeInTheDocument()
     expect(screen.queryByTestId('export-failure')).toBeNull()
-    expect(deleteVersion).toHaveBeenCalledTimes(2)
+    expect(deleteVersion).toHaveBeenCalledTimes(3)
   })
 
   it('drops the error when its dataset is deleted, not another one', async () => {

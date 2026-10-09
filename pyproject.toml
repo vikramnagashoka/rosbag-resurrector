@@ -97,7 +97,8 @@ copilot = ["anthropic>=0.40.0"]
 # LeRobot itself requires Python 3.12+; on older interpreters the extra
 # installs nothing and the exporter raises an ImportError with this hint.
 lerobot = ["lerobot[dataset]>=0.6; python_version >= '3.12'", "Pillow>=10.0.0"]
-dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0", "httpx>=0.27.0", "Pillow>=10.0.0", "websockets>=12.0", "psutil>=5.9.0"]
+# click 8.2: CliRunner captures stderr apart from stdout, which the CLI tests check.
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0", "httpx>=0.27.0", "Pillow>=10.0.0", "websockets>=12.0", "psutil>=5.9.0", "click>=8.2"]
 packaging = ["pyinstaller>=6.0.0", "pyarmor>=8.0.0"]
 watch = ["watchdog>=4.0.0"]
 

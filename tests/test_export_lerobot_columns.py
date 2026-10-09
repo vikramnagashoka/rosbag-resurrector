@@ -169,10 +169,96 @@ def test_resample_topics_keeps_every_field_and_ignores_chunking(joint_bag, monke
     for i, name in enumerate(names):
         col = name.split("/", 1)[1]
         assert np.allclose(state[:, i], expected[col].to_numpy().astype(np.float32)), col
-    [warning] = warnings
+    [warning] = [w for w in warnings if "first value" in w]
     lead = int(np.searchsorted(grid, BASE_NS + velocity.start * 1_000_000))
     assert f"velocity.0 has no value in the first {lead} of {len(grid)} frames" in warning
     assert "position" not in warning
+
+    # A field that stops while its topic keeps publishing is held, and
+    # says so (intermittent: velocity stops at row 250, effort at 200).
+    stops = [w for w in warnings if "last value" in w]
+    _, effort_until = JS_BAGS["intermittent" if velocity.stop < JS_ROWS else "late"]
+    if velocity.stop < JS_ROWS:
+        [stop] = stops
+        for field, last_row in (("velocity.0", velocity.stop - 1), ("effort.0", effort_until - 1)):
+            last = int(np.searchsorted(grid, BASE_NS + last_row * 1_000_000, side="right")) - 1
+            assert f"{field} has no value after frame {last} of {len(grid)}" in stop
+        assert "position" not in stop
+    else:
+        assert stops == []
+
+
+def test_resample_topics_streams_its_chunks(tmp_path, monkeypatch):
+    """Would catch: collecting a topic's chunks before resampling them
+    (``list(iter_chunks())`` in _resample_topics, or ``list(chunks)`` in
+    asof_on_grid to find every column up front), which holds the whole
+    topic in memory. Counts live chunks rather than measuring RSS: the
+    memory-regression bag is too small for a whole-topic copy to show."""
+    import gc
+    import weakref
+
+    bag = write_joint_state_bag(tmp_path / "js.mcap", 2_000, range(500, 2_000), 2_000)
+    real = bag_frame_module.TopicView.iter_chunks
+    refs: list = []
+    live: list[int] = []
+
+    def tracking(self, chunk_size=50_000):
+        for chunk in real(self, 100):
+            gc.collect()
+            live.append(sum(r() is not None for r in refs))
+            refs.append(weakref.ref(chunk))
+            yield chunk
+
+    monkeypatch.setattr(bag_frame_module.TopicView, "iter_chunks", tracking)
+    bf = BagFrame(bag)
+    grid = build_grid(BASE_NS, BASE_NS + 1_999 * 1_000_000, 100)
+    state, names = _resample_topics(bf, ["/joint_states"], grid)
+    assert "joint_states/velocity.0" in names
+    assert len(refs) == 20
+    # The first chunk stays referenced (it is peeked at); nothing piles up.
+    assert max(live) <= 2, live
+
+
+def test_later_bag_with_fields_in_another_order_is_aligned():
+    """Would catch: a second bag whose driver starts publishing velocity
+    later (so it is first seen after effort) being refused as "a
+    different feature set", or its columns kept in their own order under
+    the first bag's names."""
+    from resurrector.core.lerobot_export import _Episode, _match_field_order
+
+    first = (["js/position.0", "js/velocity.0", "js/effort.0"], [])
+    state = np.array([[1.0, 3.0, 2.0], [4.0, 6.0, 5.0]], dtype=np.float32)
+    ep = _Episode(np.array([0, 1]), state, None,
+                  ["js/position.0", "js/effort.0", "js/velocity.0"], [], [])
+    got = _match_field_order(ep, first)
+    assert got.state_names == first[0]
+    assert got.state.tolist() == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+    other = _Episode(np.array([0, 1]), state, None,
+                     ["js/position.0", "js/effort.0", "js/extra.0"], [], [])
+    assert _match_field_order(other, first).state_names == other.state_names
+
+
+def test_two_bags_with_fields_first_seen_in_another_order(tmp_path, monkeypatch):
+    """Both bags export into one dataset, and the second episode's state
+    is in the first episode's field order."""
+    lerobot_dataset = pytest.importorskip("lerobot.datasets.lerobot_dataset")
+    from resurrector.core.lerobot_export import export_lerobot
+
+    a = write_joint_state_bag(tmp_path / "a.mcap", JS_ROWS, range(0, JS_ROWS), JS_ROWS)
+    b = write_joint_state_bag(tmp_path / "b.mcap", JS_ROWS, range(160, JS_ROWS), JS_ROWS)
+    _small_chunks(monkeypatch, JS_CHUNK)
+    out = tmp_path / "lr"
+    result = export_lerobot([BagFrame(a), BagFrame(b)], ["/joint_states"], out, fps=100)
+    assert result.episodes == 2
+    ds = lerobot_dataset.LeRobotDataset(repo_id=f"local/{out.name}", root=out)
+    names = ds.meta.features["observation.state"]["names"]
+    grid = build_grid(BASE_NS, BASE_NS + (JS_ROWS - 1) * 1_000_000, 100)
+    expected = _expected_state(BagFrame(b), grid)
+    k = len(grid) - 1
+    state = ds[len(grid) + k]["observation.state"].numpy()  # episode 2, last frame
+    for i, name in enumerate(names):
+        assert state[i] == pytest.approx(expected[name.split("/", 1)[1]][k], rel=1e-6), name
 
 
 def test_round_trip_through_lerobot(joint_bag, tmp_path, monkeypatch):

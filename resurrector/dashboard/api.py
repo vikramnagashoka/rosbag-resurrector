@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
+from resurrector.core.exceptions import LeRobotFrameFormatError, LeRobotFrameShapeError
 from resurrector.core.export import ExportError
 
 app = FastAPI(
@@ -699,7 +700,7 @@ async def _export_error_handler(request: Request, exc: ExportError) -> JSONRespo
     Bag export and trim raise it; dataset-version export adds a hint of
     its own (see ``export_dataset_version_api``). The dashboard's
     ApiError shows ``detail.message`` (the exception's own message: each
-    column with its reason, that those columns are not in the file, and
+    column with its reason, which of them are or aren't in the file, and
     what to do); ``output`` and ``failures`` are for API callers.
     """
     return JSONResponse(status_code=422, content={"detail": _export_error_detail(exc)})
@@ -1692,14 +1693,18 @@ async def export_dataset_version_api(
             raise HTTPException(404, f"Version '{version}' not found for dataset '{name}'")
         try:
             path = mgr.export_version(name, version, output_dir=output_dir)
+        except (LeRobotFrameShapeError, LeRobotFrameFormatError) as e:
+            # ValueErrors too, but about the bag's frames, not a missing
+            # version: 400, as the single-bag export route returns.
+            raise HTTPException(400, str(e))
         except ValueError as e:
             raise HTTPException(404, str(e))
         except ExportError as e:
             message = str(e)
-            if e.suggests_parquet:
+            if e.suggested_formats:
                 # The version pins the format; this route can't change it.
-                from resurrector.core.dataset import parquet_version_hint
-                message += "\n" + parquet_version_hint(name)
+                from resurrector.core.dataset import version_format_hint
+                message += "\n" + version_format_hint(name, e.suggested_formats)
             raise HTTPException(422, _export_error_detail(e, message))
         except Exception as e:
             # Transactional cleanup: user sees the error; partial files may exist

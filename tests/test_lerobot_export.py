@@ -265,7 +265,10 @@ class TestFrameShapeGuard:
         return str(exc.value)
 
     VIDEO_MIN = f"at least {MIN_VIDEO_WIDTH} pixels wide and {MIN_VIDEO_HEIGHT} pixels high"
-    PNG_OPTION = "Python API: export_lerobot(..., use_videos=False)"
+    PNG_OPTION = (
+        "from resurrector.core.lerobot_export import export_lerobot; "
+        "export_lerobot([BagFrame(bag)], topics, output_dir, use_videos=False)"
+    )
 
     @pytest.mark.parametrize("shape", [
         (1, 1, 3), (1, 64, 3), (2, 64, 3), (3, 64, 3), (3, 3, 3), (48, 2, 3), (48, 24, 3),
@@ -295,12 +298,13 @@ class TestFrameShapeGuard:
     def test_one_by_one_hint_regenerates_the_bag_itself(self, tmp_dir):
         """Would catch: telling users to run `resurrector demo --force`,
         which rewrites ~/.resurrector/demo_sample.mcap, not the bag they
-        exported (e.g. a dashboard-generated demo_<ts>.mcap)."""
-        bag = tmp_dir / "demo_123.mcap"
+        exported (e.g. a dashboard-generated demo_<ts>.mcap), or naming
+        the bag without a command that regenerates it."""
+        bag = tmp_dir / "my demo 123.mcap"
         msg = self._msg((1, 1, 3), bag=bag)
-        assert f"regenerate the bag ({bag})" in msg
-        assert "`resurrector demo`" in msg and "--force" not in msg
-        assert "regenerate the bag;" in self._msg((1, 1, 3))
+        assert f"regenerate it with `resurrector demo -o '{bag}'`" in msg
+        assert "--force" not in msg
+        assert "`resurrector demo` (or `resurrector demo -o <bag>`" in self._msg((1, 1, 3))
         assert "resurrector demo" not in self._msg((1, 64, 3), bag=bag)
 
 
@@ -446,7 +450,7 @@ class TestGuardsRunBeforeLeRobot:
                            BagConfig(duration_sec=1.0, image_height=1, image_width=1))
         with pytest.raises(LeRobotFrameShapeError) as exc:
             export_lerobot([BagFrame(bag)], ["/camera/rgb"], tmp_dir / "lr")
-        assert f"regenerate the bag ({bag})" in str(exc.value)
+        assert f"regenerate it with `resurrector demo -o {bag}`" in str(exc.value)
         assert fake_lerobot.create == []
 
     def test_sixteen_bit_png_refused_before_create(self, tmp_dir, fake_lerobot):
@@ -795,8 +799,7 @@ class TestLeRobotRoundTrip:
         assert result.exit_code == 1
         assert isinstance(result.exception, SystemExit), repr(result.exception)
         assert "Export failed" in result.output
-        assert f"regenerate the bag ({bag})" in result.output, result.output
-        assert "`resurrector demo`" in result.output
+        assert f"regenerate it with `resurrector demo -o {bag}`" in result.output, result.output
         assert not (tmp_dir / "out").exists()
 
     def test_three_pixel_high_image_mode_refused(self, tmp_dir):

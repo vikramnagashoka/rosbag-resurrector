@@ -1235,8 +1235,8 @@ test.describe('Datasets page when columns fail to serialize', () => {
     await expect(inline).toHaveCount(0)
   })
 
-  // Two datasets, the first with versions v1 and v2, and v1's export
-  // answered with the failed-columns 422.
+  // Two datasets, the first with versions v1 and v2 and the second with a
+  // v1, and the first's v1 export answered with the failed-columns 422.
   async function datasetsWithFailingV1(page: Page, request: APIRequestContext) {
     const bags = await (await request.get('/api/bags')).json()
     // Neither name contains the other, so a hasText match is unambiguous.
@@ -1245,8 +1245,9 @@ test.describe('Datasets page when columns fail to serialize', () => {
     for (const ds of [name, other]) {
       expect((await request.post('/api/datasets', { data: { name: ds } })).ok()).toBe(true)
     }
-    for (const version of ['v1', 'v2']) {
-      const created = await request.post(`/api/datasets/${name}/versions`, {
+    // The other dataset has a v1 too: version strings repeat across datasets.
+    for (const [ds, version] of [[name, 'v1'], [name, 'v2'], [other, 'v1']]) {
+      const created = await request.post(`/api/datasets/${ds}/versions`, {
         data: { version, bag_refs: [{ path: bags[0].path }], export_format: 'csv' },
       })
       expect(created.ok()).toBe(true)
@@ -1266,9 +1267,10 @@ test.describe('Datasets page when columns fail to serialize', () => {
 
   test('notebook page keeps the error across datasets until its version is deleted', async ({ page, request }) => {
     // Would catch: the error vanishing when the user selects another
-    // dataset (it used to live in the failed dataset's panel), and
-    // "Export of X@v1 failed" staying on screen after v1 was deleted, the
-    // natural next step once the hint has them add a Parquet version.
+    // dataset (it used to live in the failed dataset's panel), deleting
+    // the other dataset's v1 clearing it, and "Export of X@v1 failed"
+    // staying on screen after v1 was deleted, the natural next step once
+    // the hint has them add a version in another format.
     const { name, other, text } = await datasetsWithFailingV1(page, request)
     await page.goto('/n/datasets')
     await page.locator('.nb-ds-item', { hasText: name }).click()
@@ -1278,6 +1280,9 @@ test.describe('Datasets page when columns fail to serialize', () => {
 
     await page.locator('.nb-ds-item', { hasText: other }).click()
     await expect(page.locator('.nb-panel-title')).toHaveText(other)
+    await expect(inline).toHaveText(text)
+    await versionRow(page, 'v1').getByRole('button', { name: 'Delete', exact: true }).click()
+    await expect(versionRow(page, 'v1')).toHaveCount(0)
     await expect(inline).toHaveText(text)
 
     await page.locator('.nb-ds-item', { hasText: name }).click()
@@ -1290,19 +1295,28 @@ test.describe('Datasets page when columns fail to serialize', () => {
     await expect(inline).toHaveCount(0)
   })
 
-  test('classic page drops the error when its dataset is deleted', async ({ page, request }) => {
+  test('classic page drops the error when its dataset is deleted, not another', async ({ page, request }) => {
     // Would catch: the failed export of a dataset the user just deleted
-    // staying on the classic page.
-    const { name, text } = await datasetsWithFailingV1(page, request)
+    // staying on the classic page, the error living only under the
+    // selected dataset (so it vanished on selecting another one), or
+    // deleting another dataset clearing it.
+    const { name, other, text } = await datasetsWithFailingV1(page, request)
     await page.goto('/classic/datasets')
-    // The list item's name; the ✕ that deletes the dataset sits next to it.
-    const listName = page.locator('strong', { hasText: new RegExp(`^${name}$`) })
-    await listName.click()
+    // A list item's name; the ✕ that deletes the dataset sits next to it.
+    const listName = (ds: string) => page.locator('strong', { hasText: new RegExp(`^${ds}$`) })
+    await listName(name).click()
     await versionRow(page, 'v1').getByRole('button', { name: 'Export', exact: true }).click()
     const inline = page.getByTestId('export-failure')
     await expect(inline).toHaveText(text)
 
-    await listName.locator('xpath=following-sibling::button').click()
+    await listName(other).click()
+    await expect(page.getByRole('heading', { name: other })).toBeVisible()
+    await expect(inline).toHaveText(text)
+    await listName(other).locator('xpath=following-sibling::button').click()
+    await expect(page.getByTestId('toast').filter({ hasText: `Deleted "${other}"` })).toHaveCount(1)
+    await expect(inline).toHaveText(text)
+
+    await listName(name).locator('xpath=following-sibling::button').click()
     await expect(page.getByTestId('toast').filter({ hasText: `Deleted "${name}"` })).toHaveCount(1)
     await expect(inline).toHaveCount(0)
   })

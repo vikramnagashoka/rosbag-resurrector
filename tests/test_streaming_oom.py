@@ -118,22 +118,22 @@ def test_density_bounded(large_bag):
 
 
 def test_lerobot_grid_resample_bounded(large_bag):
-    """LeRobot's as-of resampler streams chunks onto the frame grid.
-
-    Runs with a small chunk size so the topic spans many chunks; the
-    streaming path must not accumulate them. Doesn't need LeRobot itself.
+    """LeRobot's resampler streams chunks onto the frame grid, through the
+    path export uses (``_resample_topics``, which finds each topic's
+    columns as it goes). Doesn't need LeRobot itself.
+    (test_export_lerobot_columns.py::test_resample_topics_streams_its_chunks
+    checks the streaming itself; this bag is too small for a whole-topic
+    copy to show in RSS.)
     """
-    from resurrector.core.lerobot_export import asof_on_grid, build_grid, numeric_columns
+    from resurrector.core.lerobot_export import _resample_topics, build_grid
 
     bf = BagFrame(large_bag)
-    view = bf["/imu/data"]
-    cols = numeric_columns(next(iter(view.iter_chunks(1_000))).schema)
     grid = build_grid(int(bf.metadata.start_time_ns), int(bf.metadata.end_time_ns), 30)
-    delta_mb, df = _peak_rss_delta_mb(
-        lambda: asof_on_grid(view.iter_chunks(1_000), grid, cols),
+    delta_mb, (state, names) = _peak_rss_delta_mb(
+        lambda: _resample_topics(bf, ["/imu/data"], grid),
     )
-    assert df.height == len(grid)
-    assert delta_mb < 100, f"asof_on_grid RSS delta {delta_mb:.1f} MB > 100 MB"
+    assert state.shape == (len(grid), len(names)) and names
+    assert delta_mb < 100, f"_resample_topics RSS delta {delta_mb:.1f} MB > 100 MB"
 
 
 def test_stream_bucketed_minmax_bounded(large_bag):

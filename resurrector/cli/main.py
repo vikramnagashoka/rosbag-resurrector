@@ -1488,16 +1488,16 @@ def dataset_export(
     Example:
       resurrector dataset export pick-place-experiments 1.0 -o ./datasets
     """
-    from resurrector.core.dataset import DatasetManager, parquet_version_hint
+    from resurrector.core.dataset import DatasetManager, version_format_hint
     from resurrector.core.export import ExportError
     mgr = DatasetManager(db)
     try:
         result = mgr.export_version(name, version, str(output))
     except ExportError as e:
         err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
-        if e.suggests_parquet:
+        if e.suggested_formats:
             # This command has no --format: the version pins it.
-            err_console.print(rich_escape(parquet_version_hint(name)))
+            err_console.print(rich_escape(version_format_hint(name, e.suggested_formats)))
         raise typer.Exit(1)
     except KeyError as e:
         # Unknown dataset or version. str(KeyError) would quote the message.

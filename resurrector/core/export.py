@@ -465,12 +465,16 @@ class ExportColumnFailure:
 
     ``kind`` is one of the ``FAILURE_*`` constants (see
     :class:`ExportError` for what each means per format); ``"other"``
-    when nothing more specific applies.
+    when nothing more specific applies. ``array_storable`` is False for a
+    ``late_column`` or ``untyped_first_chunk`` failure whose type HDF5 and
+    Zarr can't hold either (lists, structs, binary, datetimes), so the
+    message doesn't send the user there.
     """
     column: str
     error_type: str
     message: str
     kind: str = FAILURE_OTHER
+    array_storable: bool = True
 
 
 class _ColumnError(Exception):
@@ -570,6 +574,13 @@ class ExportError(ResurrectorError):
             "is complete."
         )
 
+    def _late_kinds(self) -> set[str]:
+        """The late/untyped kinds among failures HDF5 or Zarr would keep."""
+        return {
+            f.kind for f in self.failures
+            if f.kind in (FAILURE_LATE_COLUMN, FAILURE_UNTYPED) and f.array_storable
+        }
+
     def _advice(self) -> list[str]:
         advice = []
         if self.suggests_parquet:
@@ -577,10 +588,9 @@ class ExportError(ResurrectorError):
                 "To keep a column this format can't store, export to "
                 "Parquet, which stores every column type."
             )
-        kinds = {f.kind for f in self.failures}
-        if kinds & {FAILURE_LATE_COLUMN, FAILURE_UNTYPED} and self.format not in ("hdf5", "zarr"):
+        if "hdf5" in self.suggested_formats:
             when = (
-                "first appears, or first has values," if FAILURE_UNTYPED in kinds
+                "first appears, or first has values," if FAILURE_UNTYPED in self._late_kinds()
                 else "first appears"
             )
             advice.append(
@@ -591,15 +601,28 @@ class ExportError(ResurrectorError):
         return advice
 
     @property
-    def suggests_parquet(self) -> bool:
-        """True when the message suggests Parquet: some column failed
-        because the format can't store its type (``unstorable``), and the
-        file isn't Parquet already. Parquet doesn't fix the other kinds:
-        it can't add a late column either, and it fails the same type
-        changes."""
-        return self.format != "parquet" and any(
+    def suggested_formats(self) -> list[str]:
+        """The formats the message suggests, in its order: ``"parquet"``
+        when some column's type is one this format can't store
+        (``unstorable``) and the file isn't Parquet; ``"hdf5"`` and
+        ``"zarr"`` when some CSV or Parquet column first appears (or first
+        has values) after the first chunk and its type is one they hold.
+        Empty when no other format would keep the columns: Parquet can't
+        add a late column either and fails the same type changes."""
+        formats = []
+        if self.format != "parquet" and any(
             f.kind == FAILURE_UNSTORABLE for f in self.failures
-        )
+        ):
+            formats.append("parquet")
+        if self._late_kinds() and self.format not in ("hdf5", "zarr"):
+            formats.extend(["hdf5", "zarr"])
+        return formats
+
+    @property
+    def suggests_parquet(self) -> bool:
+        """True when the message suggests Parquet (see
+        :attr:`suggested_formats`)."""
+        return "parquet" in self.suggested_formats
 
 
 def _names(columns: list[str]) -> str:
@@ -1298,15 +1321,24 @@ class _FixedColumns:
         self.failures: list[ExportColumnFailure] = []
         self.failed: set[str] = set()
 
-    def fail(self, col: str, error_type: str, kind: str, message: str) -> None:
+    def fail(
+        self, col: str, error_type: str, kind: str, message: str,
+        array_storable: bool = True,
+    ) -> None:
         self.failures.append(ExportColumnFailure(
             column=col, error_type=error_type, message=message, kind=kind,
+            array_storable=array_storable,
         ))
         self.failed.add(col)
 
-    def report_new(self, chunk_columns: Sequence[str], start: int, rows: int) -> None:
+    def report_new(
+        self, chunk_columns: Sequence[str], start: int, rows: int,
+        array_storable: Callable[[str], bool] = lambda col: True,
+    ) -> None:
         """Report columns first seen in a chunk of ``rows`` rows that
-        starts at row ``start``. A 0-row chunk loses no values."""
+        starts at row ``start``. A 0-row chunk loses no values.
+        ``array_storable(col)`` says whether HDF5 and Zarr could hold the
+        column's type in this chunk."""
         if rows == 0:
             return
         for col in chunk_columns:
@@ -1316,6 +1348,7 @@ class _FixedColumns:
                     f"first appears at row {start}, after the {self._file_kind} "
                     f"took its columns from the first chunk, so it is not in "
                     f"the file",
+                    array_storable=array_storable(col),
                 )
 
 
@@ -1363,7 +1396,10 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
     other types cast losslessly or the column reported."""
     import pyarrow as pa
 
-    fixed.report_new(table.column_names, start, table.num_rows)
+    fixed.report_new(
+        table.column_names, start, table.num_rows,
+        lambda col: _arrow_array_storable(table.schema.field(col).type),
+    )
     present = set(table.column_names)
     arrays = []
     for spec in schema:
@@ -1383,7 +1419,7 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
                         f"file's columns, so the file stores it as all null "
                         f"and its {column.type} values from row {start} on "
                         f"are not written"
-                    ))
+                    ), array_storable=_arrow_array_storable(column.type))
                 elif text_mismatch:
                     fixed.fail(spec.name, "TypeError", FAILURE_TYPE_CHANGE, (
                         f"{column.type} values from row {start} on can't go "
@@ -1402,6 +1438,27 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
                 column = cast
         arrays.append(column if column is not None else pa.nulls(table.num_rows, spec.type))
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _arrow_array_storable(arrow_type) -> bool:
+    """True if HDF5 and Zarr can hold a column of this Arrow type when it
+    first appears in a later chunk: numbers and booleans (as float64 with
+    NaN for the rows before), text (empty string) and all-null columns."""
+    import pyarrow as pa
+
+    return (
+        pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type)
+        or pa.types.is_boolean(arrow_type) or pa.types.is_null(arrow_type)
+        or _arrow_is_text(arrow_type)
+    )
+
+
+def _polars_array_storable(dtype) -> bool:
+    """:func:`_arrow_array_storable` for a polars dtype."""
+    return (
+        dtype.is_numeric() and not dtype.is_decimal()
+        or dtype in (pl.Boolean, pl.Null) or _is_text(dtype)
+    )
 
 
 def _arrow_is_text(arrow_type) -> bool:
@@ -1451,7 +1508,10 @@ def _stream_csv(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
             if first:
                 fixed = _FixedColumns(chunk.columns, "CSV header")
             else:
-                fixed.report_new(chunk.columns, rows_written, chunk.height)
+                fixed.report_new(
+                    chunk.columns, rows_written, chunk.height,
+                    lambda col: _polars_array_storable(chunk.schema[col]),
+                )
                 chunk = chunk.with_columns([
                     pl.lit(None).alias(c) for c in fixed.columns if c not in chunk.columns
                 ]).select(fixed.columns)
@@ -1747,7 +1807,8 @@ class _RldsFeatures:
             if col in self._failed:
                 continue
             series = chunk[col]
-            if col not in self._kinds:
+            typed_now = col not in self._kinds
+            if typed_now:
                 kind = self._kind_of(series.dtype)
                 if kind is None:
                     continue
@@ -1758,15 +1819,29 @@ class _RldsFeatures:
             except _ColumnError as e:
                 kind = self._kinds[col]
                 self._failed.add(col)
-                self.failures.append(ExportColumnFailure(
-                    column=col, error_type=e.error_type, kind=e.kind,
-                    message=(
-                        f"{series.dtype} values from row {start} on don't fit "
-                        f"its {self._LIST_NAMES[kind]} feature (set by "
-                        f"{self._first_dtypes[col]} values in an earlier "
-                        f"chunk), so the steps from row {start} on leave it out"
-                    ),
-                ))
+                if typed_now:
+                    # No step carries it yet, so it is not in the file at
+                    # all. Only UInt64 values past int64's range get here,
+                    # and Parquet stores those.
+                    failure = ExportColumnFailure(
+                        column=col, error_type=e.error_type, kind=FAILURE_UNSTORABLE,
+                        message=(
+                            f"{series.dtype} values past int64's range can't be "
+                            f"written as an {self._LIST_NAMES[kind]} feature, so "
+                            f"no step has it"
+                        ),
+                    )
+                else:
+                    failure = ExportColumnFailure(
+                        column=col, error_type=e.error_type, kind=e.kind,
+                        message=(
+                            f"{series.dtype} values from row {start} on don't fit "
+                            f"its {self._LIST_NAMES[kind]} feature (set by "
+                            f"{self._first_dtypes[col]} values in an earlier "
+                            f"chunk), so the steps from row {start} on leave it out"
+                        ),
+                    )
+                self.failures.append(failure)
                 continue
             out.append((_rlds_key(col), self._makers[self._kinds[col]], values))
         absent = [

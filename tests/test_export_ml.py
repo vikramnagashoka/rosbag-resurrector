@@ -269,6 +269,27 @@ def test_rlds_type_change_is_left_out_and_reported(rlds_steps, tmp_path):
     assert "export to" not in text
 
 
+def test_rlds_first_chunk_overflow_is_not_in_the_file(rlds_steps, tmp_path):
+    """Would catch: UInt64 values past int64's range in the chunk that
+    types a column reported as "set by UInt64 values in an earlier chunk"
+    (there is none) and "in that file", when no step carries it. Parquet
+    stores such values, so the message suggests it."""
+    from resurrector.core.export import FAILURE_UNSTORABLE
+
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [0, 1], "u": pl.Series([1, 2**63 + 5], dtype=pl.UInt64)}),
+        pl.DataFrame({"timestamp_ns": [2], "u": pl.Series([3], dtype=pl.UInt64)}),
+    ]
+    steps, error = rlds_steps(chunks, tmp_path)
+    assert len(steps) == 3
+    assert _column(steps, "u") == [None, None, None]
+    assert [(f.column, f.kind) for f in error.failures] == [("u", FAILURE_UNSTORABLE)]
+    assert "earlier chunk" not in error.failures[0].message
+    text = " ".join(str(error).split())
+    assert "These columns are not in that file" in text
+    assert "export to Parquet" in text
+
+
 @pytest.mark.skipif(not tf_available, reason="tensorflow not installed")
 def test_rlds_joint_state_parses_with_a_typed_spec(tmp_dir, monkeypatch):
     """The verifier's late.mcap case end to end: JointState velocity first

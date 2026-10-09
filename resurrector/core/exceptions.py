@@ -10,6 +10,7 @@ that was crossed.
 from __future__ import annotations
 
 import os
+import shlex
 
 
 class ResurrectorError(Exception):
@@ -179,16 +180,20 @@ class LeRobotFrameShapeError(ResurrectorError, ValueError):
             if image_problem:
                 need += f", and PNG images can't hold them either: {image_problem}"
             else:
+                # The CLI, dashboard and BagFrame.export always encode video;
+                # only a direct export_lerobot() call can choose PNG.
                 alternative = (" PNG images take frames this size; to store them instead, "
-                               "use the Python API: export_lerobot(..., use_videos=False).")
+                               "call the Python API: from resurrector.core.lerobot_export "
+                               "import export_lerobot; export_lerobot([BagFrame(bag)], "
+                               "topics, output_dir, use_videos=False).")
         else:
             need = f"{image_problem}; PNG images need a height of 2 or at least 4 pixels"
         hint = ""
         if (h, w) == (1, 1):
-            where = f" ({bag})" if bag else ""
+            regen = (f"`resurrector demo -o {shlex.quote(os.fspath(bag))}`" if bag
+                     else "`resurrector demo` (or `resurrector demo -o <bag>` for another path)")
             hint = (" 1x1 frames usually mean a demo bag written by an install without "
-                    f"Pillow: regenerate the bag{where}; for the default sample, run "
-                    "`resurrector demo`.")
+                    f"Pillow: regenerate it with {regen}.")
         super().__init__(
             f"Camera topic {topic!r} has {h}x{w} (height x width) frames: "
             f"{need}. Leave the topic out of the export or resize its "

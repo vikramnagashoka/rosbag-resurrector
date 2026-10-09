@@ -29,8 +29,14 @@ from typer.testing import CliRunner
 import resurrector
 import resurrector.core.export as export_mod
 from resurrector.cli.main import app as cli_app
-from resurrector.core.dataset import BagRef, DatasetManager, parquet_version_hint
+from resurrector.core.dataset import (
+    BagRef,
+    DatasetManager,
+    parquet_version_hint,
+    version_format_hint,
+)
 from resurrector.core.export import (
+    FAILURE_LATE_COLUMN,
     FAILURE_UNSTORABLE,
     ExportColumnFailure,
     ExportError,
@@ -40,14 +46,20 @@ from resurrector.ingest.indexer import BagIndex
 from resurrector.ingest.parser import parse_bag
 from resurrector.ingest.scanner import scan_path
 
+# What the real CSV writer reports for a column first seen in a later chunk.
 LATE_COLUMN_REASON = (
-    "first appears after row 50000, but the CSV header was written from "
-    "the first chunk"
+    "first appears at row 50000, after the CSV header took its columns "
+    "from the first chunk, so it is not in the file"
 )
 CSV_FAILURES = [
-    ExportColumnFailure(column="position.6", error_type="ValueError", message=LATE_COLUMN_REASON),
-    ExportColumnFailure(column="velocity.6", error_type="ValueError", message=LATE_COLUMN_REASON),
+    ExportColumnFailure(column=c, error_type="ValueError", message=LATE_COLUMN_REASON,
+                        kind=FAILURE_LATE_COLUMN)
+    for c in ("position.6", "velocity.6")
 ]
+HDF5_ZARR_ADVICE = (
+    "To keep a column that first appears after the first chunk, export to "
+    "HDF5 or Zarr, which fill the rows before it with missing values."
+)
 H5_FAILURES = [
     ExportColumnFailure(
         column="points", error_type="TypeError",
@@ -148,8 +160,9 @@ class TestMessage:
             f"  - velocity.6: ValueError: {LATE_COLUMN_REASON}\n"
             "These columns are not in that file; every other column is complete. "
             "The export stopped there, so any later topics, splits or bags were "
-            "not exported."
+            f"not exported. {HDF5_ZARR_ADVICE}"
         )
+        assert err.suggested_formats == ["hdf5", "zarr"]
         # Public attributes keep their shape.
         assert err.failures == CSV_FAILURES
         assert err.output == out
@@ -167,6 +180,18 @@ class TestMessage:
         assert err.suggests_parquet is suggests
         assert str(err).endswith(PARQUET_ADVICE) is suggests
         _assert_explains(str(err), out, H5_FAILURES)
+
+    def test_dataset_hint_names_the_suggested_formats_and_quotes_the_name(self):
+        """Would catch: a hint that only knows Parquet (a late CSV/Parquet
+        column needs HDF5 or Zarr), or one that pastes a dataset name with
+        a space into the command unquoted, so running it fails with
+        "Got unexpected extra argument(s)"."""
+        assert version_format_hint("pick place", ["hdf5", "zarr"]) == (
+            "A dataset version's format is set when the version is added. To get "
+            "HDF5 or Zarr, add a version with the same bags and settings and "
+            "-f hdf5 or -f zarr, then export that version: resurrector dataset "
+            "add-version 'pick place' <new-version> -b <bag> ... -f hdf5"
+        )
 
     def test_dataset_parquet_hint_word_for_word(self):
         """Would catch: the hint telling a dataset user to "export to
@@ -261,8 +286,10 @@ class TestCli:
         assert isinstance(result.exception, SystemExit), repr(result.exception)
         assert result.stdout == ""
         _assert_explains(result.stderr, written[0], CSV_FAILURES)
-        # Parquet wouldn't help a CSV failure, so no add-version advice.
-        assert DATASET_HINT not in _flat(result.output)
+        # Parquet can't add a late column either; HDF5 or Zarr can, and only
+        # a new version switches the format.
+        assert "-f parquet" not in _flat(result.output)
+        assert version_format_hint("pick-place", ["hdf5", "zarr"]) in _flat(result.stderr)
 
     def test_dataset_export_says_how_to_get_parquet(self, bag, tmp_dir, failing_writer):
         """Would catch: advice to "export to Parquet" that this command
@@ -366,7 +393,8 @@ class TestCliProcess:
                     path = output_path / f"{{name}}.csv"
                     path.touch()
                     raise ExportError(
-                        [ExportColumnFailure(c, "ValueError", {LATE_COLUMN_REASON!r})
+                        [ExportColumnFailure(c, "ValueError", {LATE_COLUMN_REASON!r},
+                                             kind={FAILURE_LATE_COLUMN!r})
                          for c in ("position.6", "velocity.6")],
                         path,
                     )
@@ -407,7 +435,7 @@ class TestCliProcess:
                     path.touch()
                     raise ExportError(
                         [ExportColumnFailure({failure.column!r}, {failure.error_type!r},
-                                             {failure.message!r})],
+                                             {failure.message!r}, kind={failure.kind!r})],
                         path,
                     )
 
@@ -517,8 +545,12 @@ class TestApi:
             json={"output_dir": str(tmp_dir / "ds")},
         )
         message = _assert_structured_422(r, written, CSV_FAILURES)
-        # Parquet wouldn't help a CSV failure, so no add-version advice.
-        assert message == str(ExportError(list(CSV_FAILURES), written[0]))
+        # A late CSV column is kept by HDF5 or Zarr, which only a new
+        # version can switch to.
+        assert message == (
+            f"{ExportError(list(CSV_FAILURES), written[0])}\n"
+            f"{version_format_hint('pick-place', ['hdf5', 'zarr'])}"
+        )
 
     def test_dataset_export_says_how_to_get_parquet(self, api, bag, tmp_dir, failing_writer):
         """Would catch: the Datasets page telling the user to "export to
@@ -536,6 +568,27 @@ class TestApi:
             f"{ExportError(list(H5_FAILURES), written[0])}\n"
             f"{parquet_version_hint('pick-place')}"
         )
+
+    def test_dataset_export_frame_error_returns_400(self, api, bag, tmp_dir, monkeypatch):
+        """Would catch: a LeRobot frame error (a ValueError) on a dataset
+        version answered as 404 Not Found, as if the version were missing;
+        the single-bag export route answers it with 400."""
+        from resurrector.core.exceptions import LeRobotFrameShapeError
+
+        _make_version(tmp_dir / "index.db", bag, "csv")
+        err = LeRobotFrameShapeError("/camera/rgb", (1, 1, 3), True, min_width=25, min_height=4)
+
+        def refuse(self, *args, **kwargs):
+            raise err
+
+        monkeypatch.setattr(DatasetManager, "export_version", refuse)
+        client, _ = api
+        r = client.post(
+            "/api/datasets/pick-place/versions/1.0/export",
+            json={"output_dir": str(tmp_dir / "ds")},
+        )
+        assert r.status_code == 400, r.text
+        assert r.json() == {"detail": str(err)}
 
     @pytest.mark.parametrize(("name", "version", "detail"), [
         ("nosuch", "1.0", "Dataset 'nosuch' not found"),

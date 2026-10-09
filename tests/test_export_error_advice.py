@@ -174,6 +174,20 @@ def _chunks(case: str) -> list[pl.DataFrame]:
             pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0], "v": d}),
             pl.DataFrame({"timestamp_ns": [3], "y": [3.0]}),
         ],
+        "binary-late": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+            pl.DataFrame({"timestamp_ns": [3], "y": [3.0],
+                          "v": pl.Series([b"x"], dtype=pl.Binary)}),
+        ],
+        "datetime-late": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+            pl.DataFrame({"timestamp_ns": [3], "y": [3.0], "v": d[:1]}),
+        ],
+        "null-then-binary": [
+            pl.DataFrame({"timestamp_ns": [1], "y": [1.0], "v": [None]}),
+            pl.DataFrame({"timestamp_ns": [2], "y": [2.0],
+                          "v": pl.Series([b"x"], dtype=pl.Binary)}),
+        ],
     }[case]
 
 
@@ -194,6 +208,12 @@ REAL_CASES = {
     ("hdf5", "datetime-absent-later"): (FAILURE_UNSTORABLE, False, "parquet"),
     ("zarr", "datetime-absent-later"): (FAILURE_NO_MISSING_VALUE, False, None),
     ("numpy", "datetime-absent-later"): (FAILURE_NO_MISSING_VALUE, False, None),
+    # A late or untyped column HDF5 and Zarr can't hold either: no advice
+    # rather than sending the user to a format that fails it too.
+    ("csv", "binary-late"): (FAILURE_LATE_COLUMN, False, None),
+    ("parquet", "binary-late"): (FAILURE_LATE_COLUMN, False, None),
+    ("parquet", "datetime-late"): (FAILURE_LATE_COLUMN, False, None),
+    ("parquet", "null-then-binary"): (FAILURE_UNTYPED, True, None),
 }
 
 

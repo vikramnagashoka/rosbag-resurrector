@@ -142,7 +142,8 @@ export function capabilitiesFor(env: ExportEnv): Record<string, Capability> {
 export const EXPORT_FAILED_FILE =
   '/data/exports/pick_and_place_session_2026_10_08_with_the_new_gripper_calibration_and_long_arm/joint_states.csv'
 const LATE_COLUMN_REASON =
-  'first appears after row 50000, but the CSV header was written from the first chunk'
+  'first appears at row 50000, after the CSV header took its columns from the first chunk, ' +
+  'so it is not in the file'
 export const EXPORT_FAILED_COLUMN_LINES = [
   `  - position.6: ValueError: ${LATE_COLUMN_REASON}`,
   `  - velocity.6: ValueError: ${LATE_COLUMN_REASON}`,
@@ -151,7 +152,9 @@ export const EXPORT_COLUMN_FAILURES_MESSAGE =
   `2 column(s) could not be written to ${EXPORT_FAILED_FILE}:\n` +
   `${EXPORT_FAILED_COLUMN_LINES.join('\n')}\n` +
   'These columns are not in that file; every other column is complete. ' +
-  'The export stopped there, so any later topics, splits or bags were not exported.'
+  'The export stopped there, so any later topics, splits or bags were not exported. ' +
+  'To keep a column that first appears after the first chunk, export to HDF5 or Zarr, ' +
+  'which fill the rows before it with missing values.'
 export const EXPORT_COLUMN_FAILURES_BODY = {
   detail: {
     kind: 'export_column_failures',
