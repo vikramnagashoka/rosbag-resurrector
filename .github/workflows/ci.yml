@@ -240,11 +240,12 @@ jobs:
         # The `slow` marker is excluded from the default `pytest` run
         # via pyproject.toml addopts; we re-enable it here. The suite
         # builds a 100s synthetic bag and asserts every advertised-as-
-        # bounded workflow stays under its peak-RSS budget. A skip would
+        # bounded workflow stays under its peak-RSS budget, and checks
+        # HDF5 export peak RSS stays flat in the row count. A skip would
         # leave a bound unchecked, so the step fails on one.
         run: |
           set -o pipefail
-          pytest tests/test_streaming_oom.py -m slow -v -rs | tee memory.log
+          pytest tests/test_streaming_oom.py tests/test_hdf5_memory.py -m slow -v -rs | tee memory.log
           ! grep -q "SKIPPED" memory.log
 
   frontend-build:

@@ -245,9 +245,12 @@ class TopicView:
             # Streaming downsample of a large topic to 1 Hz
             buckets = []
             for chunk in bf["/imu/data"].iter_chunks(chunk_size=10_000):
-                ds = chunk.group_by_dynamic("timestamp_ns", every="1s").mean()
+                ds = chunk.group_by_dynamic(
+                    "timestamp_ns", every=f"{10**9}i",  # integer ns index
+                ).agg(pl.exclude("timestamp_ns").mean())
                 buckets.append(ds)
-            full = pl.concat(buckets)
+            # Chunks can have different columns, so concatenate diagonally.
+            full = pl.concat(buckets, how="diagonal_relaxed")
         """
         buffer: list[dict[str, Any]] = []
         for msg in self.iter_messages():

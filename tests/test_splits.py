@@ -247,6 +247,37 @@ class TestSplitExportRandom:
         assert ma["splits"]["x"]["rows"] == mb["splits"]["x"]["rows"]
         assert ma["splits"]["y"]["rows"] == mb["splits"]["y"]["rows"]
 
+    def test_topic_whose_columns_change_between_chunks(self, tmp_dir, monkeypatch):
+        """Would catch: ``ShapeError: unable to vstack, column names don't
+        match`` when JointState velocity starts in the second chunk and
+        effort stops before the last one (the chunks were joined with a
+        vertical concat). Every row lands in exactly one split, with the
+        values to_polars() gives it."""
+        import polars as pl
+
+        from resurrector.core import bag_frame as bag_frame_module
+        from resurrector.core.bag_frame import BagFrame
+        from tests.fixtures.changing_columns import write_joint_state_bag
+
+        bag = write_joint_state_bag(tmp_dir / "js.mcap", 400, range(150, 400), 200)
+        real = bag_frame_module.TopicView.iter_chunks
+        monkeypatch.setattr(
+            bag_frame_module.TopicView, "iter_chunks",
+            lambda self, chunk_size=150: real(self, chunk_size),
+        )
+        bf = BagFrame(bag)
+        out = tmp_dir / "random_js"
+        split_export(
+            bag_frame=bf, topics=["/joint_states"], output=out,
+            split={"train": 0.5, "val": 0.5}, strategy="random", format="parquet",
+        )
+        parts = [pl.read_parquet(out / name / "joint_states.parquet") for name in ("train", "val")]
+        assert all(p.height for p in parts)
+        got = pl.concat(parts, how="diagonal_relaxed").sort("timestamp_ns")
+        want = bf["/joint_states"].to_polars()
+        assert got.height == want.height == 400
+        assert got.select(want.columns).equals(want)
+
 
 # ---------------------------------------------------------------------------
 # Stratified — should raise NotImplementedError

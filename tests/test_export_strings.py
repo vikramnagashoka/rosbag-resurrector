@@ -461,7 +461,10 @@ def test_non_string_object_columns_fail_clearly(fmt, tmp_path, bad):
         _WRITERS[fmt](iter(chunks), tmp_path, "t")
     [failure] = exc.value.failures
     assert failure.column == "bad"
-    assert "Parquet" in failure.message
+    assert failure.kind == "unstorable"
+    # The Parquet advice is the summary's, once (test_export_error_advice.py).
+    assert "Parquet" not in failure.message
+    assert str(exc.value).count("export to Parquet") == 1
     got = _read(fmt, tmp_path, "t")
     assert "bad" not in got
     assert got["s"] == ["a", ""]

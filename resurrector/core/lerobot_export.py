@@ -192,16 +192,26 @@ def numeric_columns(schema: pl.Schema) -> list[str]:
 def asof_on_grid(
     chunks: Iterable[pl.DataFrame],
     grid: np.ndarray,
-    value_cols: Sequence[str],
+    value_cols: Sequence[str] | None,
 ) -> pl.DataFrame:
     """Streaming backward as-of resample of time-ordered chunks onto ``grid``.
 
-    Equivalent to ``grid.join_asof(full_topic, strategy="backward")`` but
-    holds only the current chunk plus a one-row carry from the previous
-    chunk, so memory is bounded by chunk size rather than topic size.
-    A grid point is resolved once a chunk ends at or after it.
+    Equivalent to ``grid.join_asof(full_topic, strategy="backward")``,
+    where ``full_topic`` combines the chunks the way
+    :meth:`TopicView.to_polars` does (a column a chunk lacks is null in
+    its rows), but holds only the current chunk plus a one-row carry from
+    the previous chunk, so memory is bounded by chunk size rather than
+    topic size. A grid point is resolved once a chunk ends at or after it.
+
+    ``value_cols`` names the columns to resample; one a chunk lacks is
+    null at the grid points whose latest sample is in that chunk. With
+    ``None``, every :func:`numeric_columns` column of any chunk is
+    resampled, in the order first seen; one that first appears in a later
+    chunk is null at the grid points resolved before it. Either way the
+    result is the same for any chunking of the topic.
     """
-    cols = ["timestamp_ns", *value_cols]
+    cols = None if value_cols is None else ["timestamp_ns", *value_cols]
+    seen: list[str] = ["timestamp_ns"]
     parts: list[pl.DataFrame] = []
     carry: pl.DataFrame | None = None
     gi = 0
@@ -215,27 +225,33 @@ def asof_on_grid(
     for chunk in chunks:
         if chunk.height == 0:
             continue
+        if value_cols is None:
+            seen.extend(c for c in numeric_columns(chunk.schema) if c not in seen)
+        wanted = seen if cols is None else cols
         chunk = (
-            chunk.select(cols)
+            chunk.select([
+                pl.col(c) if c in chunk.columns else pl.lit(None).alias(c)
+                for c in wanted
+            ])
             .with_columns(pl.col("timestamp_ns").cast(pl.Int64))
             .sort("timestamp_ns")
         )
         hi = int(np.searchsorted(grid, chunk["timestamp_ns"][-1], side="right"))
         if hi > gi:
-            src = chunk if carry is None else pl.concat([carry, chunk], how="vertical_relaxed")
+            src = chunk if carry is None else pl.concat([carry, chunk], how="diagonal_relaxed")
             _resolve(hi, src)
         carry = chunk.tail(1)
 
     if gi < len(grid):
         if carry is None:
-            carry = pl.DataFrame(schema={c: pl.Float64 for c in cols}).with_columns(
+            carry = pl.DataFrame(schema={c: pl.Float64 for c in cols or seen}).with_columns(
                 pl.col("timestamp_ns").cast(pl.Int64)
             )
         _resolve(len(grid), carry)
 
     if not parts:
         return pl.DataFrame({"timestamp_ns": grid})
-    return pl.concat(parts, how="vertical_relaxed")
+    return pl.concat(parts, how="diagonal_relaxed")
 
 
 def to_rgb(arr: np.ndarray, encoding: str | None) -> np.ndarray:
@@ -334,25 +350,46 @@ class _Episode:
 def _resample_topics(
     bf: "BagFrame", topics: Sequence[str], grid: np.ndarray,
 ) -> tuple[np.ndarray, list[str]]:
+    """Every numeric field of each topic on ``grid``, as float32 columns.
+
+    Fields come from every chunk, not just the first, so one a driver
+    starts publishing late (JointState velocity) is kept, and one it
+    stops publishing doesn't fail the export; where chunks start and end
+    doesn't change the result. A frame whose latest sample lacks a field
+    holds the field's previous value or, before its first value, its
+    first value, with a warning naming the frames filled that way: NaN
+    would make LeRobot's statistics for the field NaN. Fields with no
+    value at any frame are dropped.
+    """
     blocks: list[np.ndarray] = []
     names: list[str] = []
     for topic in topics:
-        view = bf[topic]
-        chunks = iter(view.iter_chunks())
+        chunks = iter(bf[topic].iter_chunks())
         first = next(chunks, None)
         if first is None:
-            continue
-        cols = numeric_columns(first.schema)
-        if not cols:
-            logger.warning("Topic %s has no numeric fields; skipped for LeRobot", topic)
             continue
 
         def _all(first=first, rest=chunks):
             yield first
             yield from rest
 
-        df = asof_on_grid(_all(), grid, cols).drop("timestamp_ns")
-        df = df.select([c for c in cols if df[c].null_count() < df.height])
+        df = asof_on_grid(_all(), grid, None).drop("timestamp_ns")
+        cols = [c for c in df.columns if df[c].null_count() < df.height]
+        if not cols:
+            logger.warning("Topic %s has no numeric fields; skipped for LeRobot", topic)
+            continue
+        df = df.select(cols)
+        late = {c: int(df[c].is_not_null().arg_true()[0]) for c in cols}
+        late = {c: n for c, n in late.items() if n}
+        if late:
+            logger.warning(
+                "Topic %s: %s; those frames hold the field's first value, "
+                "which comes later in time",
+                topic, ", ".join(
+                    f"{c} has no value in the first {n} of {df.height} frames"
+                    for c, n in late.items()
+                ),
+            )
         df = df.fill_null(strategy="forward").fill_null(strategy="backward")
         blocks.append(df.cast(pl.Float32).to_numpy())
         names.extend(_label(topic, c) for c in df.columns)
