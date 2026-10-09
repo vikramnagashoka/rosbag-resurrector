@@ -8,6 +8,129 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ## [Unreleased]
 
+### What's new
+
+Zarr export works on real bags, exports keep every column lined up with its
+timestamps when a topic's fields change partway through, a failed export
+says which columns failed and why, and a plain `pip install` shows camera
+frames in the dashboard.
+
+### Fixed
+
+**Exports**
+
+- Zarr export writes string columns (`header.frame_id`, `format`,
+  `encoding`) as variable-length UTF-8, on zarr 2 and zarr 3. Before,
+  `-f zarr` failed on every stamped topic and the `multimodal` preset
+  always failed.
+- Rows stay aligned when a topic's fields change between chunks (a
+  JointState driver that starts or stops publishing velocity). HDF5 and
+  `.npz` wrote such a column shorter than the rest, so its values sat
+  against the wrong timestamps; CSV wrote them under the wrong header; and
+  Parquet failed with a raw pyarrow schema error. HDF5, Zarr and `.npz` now
+  fill the missing rows (NaN, or `""` for text). CSV and Parquet keep the
+  first chunk's columns and report a column that first appears later.
+- `iter_chunks()`, which every export and `to_polars()` read through, no
+  longer drops a field first seen after row 100 of a chunk, or truncates a
+  field that is an integer in the first 100 rows and a float later (2.5
+  became 2). `materialize_ipc_cache()` no longer fails with "Tried to write
+  record batch with different schema" on such topics, and a random
+  train/val split no longer fails with `ShapeError`.
+- A missing string is written as `""` in HDF5, Zarr and `.npz`; HDF5 wrote
+  the text `"None"`. `.npz` string columns load with `np.load`'s default
+  `allow_pickle=False`.
+- A float column whose first chunk is all null stays float64 in HDF5 and
+  Zarr (it became float32, so 16777217.0 read back as 16777216.0).
+- A column that fails in HDF5 or Zarr is removed from the file instead of
+  being left shorter than the others.
+- A Parquet column whose type changes in a later chunk is cast only when
+  every value survives the cast; otherwise it is reported and is null from
+  that row on, instead of failing the export with a pyarrow error.
+- HDF5 export memory no longer grows with row count. HDF5 2.0 (bundled with
+  h5py 3.16) caches up to 8 MiB of written chunks per column, so a 1M-row,
+  31-column export peaked near 290 MB and a synced export grew from about
+  110 MB at 100k rows to 175 MB at 300k. The writer now uses a 64 KiB cache
+  per column with 1024-row chunks: about 40 MB at 1M rows, and 82 MB / 84 MB
+  for the synced export. File layout, size and speed are unchanged.
+- RLDS keeps one feature type per column, taken from its dtype, and never
+  writes the text `"None"`: a missing float is NaN, a missing string is
+  `b""`, and a missing integer or boolean leaves the feature out of that
+  step.
+- LeRobot export no longer fails with `ColumnNotFoundError` when a topic
+  stops publishing a field, and keeps a field that starts in a later chunk
+  (it was dropped). Frames before a field's first value hold that value,
+  frames after its last value hold the last one, and both are logged.
+- LeRobot export refuses camera frames it would store wrong, with a clear
+  error before anything is written: 16-bit, 32-bit and float frames (a cast
+  to 8 bits wrapped 16-bit depth values, 300 becoming 44), and frame sizes
+  LeRobot mishandles (1 or 3 pixels high, or below the video encoder's
+  25 x 4 minimum, which ended in a `FileNotFoundError` traceback, a
+  transposed image or a hung encoder). Gray+alpha frames now export as gray,
+  1-bit frames as black and white, and bags whose fields are first seen in
+  a different order can share one dataset.
+- A failed export lists every column that couldn't be written with its
+  reason, says whether each is still in the file, and names a format that
+  would keep it (Parquet for list, struct and binary columns in
+  HDF5/Zarr/NumPy; HDF5 or Zarr for a column that first appears after the
+  first chunk of a CSV or Parquet export). Before, the CLI ended in a
+  traceback and the dashboard showed "Export failed: Internal Server
+  Error". `resurrector export` and `resurrector dataset export` print it to
+  stderr and exit 1; dataset export also says how to get the other format
+  (a new version with `-f`).
+
+**Dashboard and install**
+
+- Pillow is a base dependency. On a plain `pip install
+  rosbag-resurrector`, every camera frame and Library thumbnail returned
+  HTTP 500 and `BagFrame` couldn't decode CompressedImage topics.
+- `resurrector demo` on an install without Pillow wrote 1x1 placeholder
+  camera frames; it now always writes real frames, never leaves a
+  half-written bag behind, and regenerates a 1x1 sample left by 0.8.5 on
+  its own. The examples do the same for their sample bag.
+- Bag export, trim and dataset-version export return 422 with the failed
+  columns instead of a bare 500. The export dialogs, the trim popover and
+  both Datasets pages keep the explanation on screen, one column per line,
+  and screen readers announce it once. A Datasets-page error stays visible
+  when you select another dataset and goes away when that version or its
+  dataset is deleted.
+- Dataset-version export answers an unknown dataset or version with 404
+  (was 500) and a LeRobot frame error with 400.
+- `resurrector doctor` checks Pillow under "Core install".
+
+### Changed
+
+- `ExportError` is a `ResurrectorError`, and its message changed: it used
+  to be "Failed to serialize N column(s) to PATH: col1, col2". Its
+  `failures` and `output` attributes are unchanged. `ExportColumnFailure`
+  gains `kind` and `array_storable` fields (with defaults), and
+  `ExportError` gains `suggested_formats` and `suggests_parquet`.
+- List, struct, binary and decimal columns now fail in HDF5, Zarr and
+  `.npz` with a message pointing to Parquet. Before, `.npz` pickled them
+  (unloadable without `allow_pickle=True`) and HDF5 wrote decimals as text.
+  The built-in message decoders don't produce these columns.
+- `.npz` text columns are fixed-width unicode, as wide as the column's
+  longest string; a warning names any column over 256 MB.
+- `LeRobotFrameShapeError` moved to `resurrector.core.exceptions` (still
+  importable from `resurrector.core.lerobot_export`), next to the new
+  `LeRobotFrameFormatError`.
+- `[vision-lite]` now only adds OpenCV, for MP4 video export.
+
+### Test infrastructure
+
+- CI's `Extras (all-exports)` job reruns the Zarr string and alignment
+  tests under zarr 2; the memory-regression job installs zarr and runs the
+  HDF5 memory test, and fails if any of them skip. A fast test on every PR
+  checks the HDF5 chunk cache.
+- `wheel-smoke` runs the smoke tests from outside the checkout, so they
+  test the installed wheel.
+
+### Test counts
+
+- Backend: **1652 passed** (was 1292), plus a memory-regression tier of 20
+  (was 16)
+- Frontend unit: **101 passed** (was 80)
+- E2E: **55 behavioural** (was 47) plus 7 visual
+
 ## [0.8.5] — 2026-10-07
 
 ### What's new
