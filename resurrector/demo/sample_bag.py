@@ -4,7 +4,8 @@ Generate synthetic MCAP files with realistic robotics data for testing.
 Creates bags with:
 - IMU data at 200Hz (accelerometer + gyroscope + orientation quaternion)
 - Joint states at 100Hz (6-DOF robot arm: positions, velocities, efforts)
-- Camera images at 30Hz (640x480 RGB, synthetic colored frames)
+- Camera images at 30Hz (raw RGB, 64x48 by default, synthetic colored frames)
+- Compressed camera images at 10Hz (JPEG, same size and colors)
 - Lidar scans at 10Hz (2D laser scan, 360 points per scan)
 - TF transforms (base_link -> arm_link chain)
 
@@ -17,15 +18,23 @@ Also generates "unhealthy" bags with:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import os
 import struct
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, Iterator
 
 import numpy as np
 from mcap.writer import Writer
+
+# Written into every generated bag's MCAP header; stale_sample_reason()
+# uses it to recognise a bag as ours before regenerating it.
+GENERATOR_LIBRARY = "rosbag-resurrector-testgen"
 
 # ROS2 CDR serialization helpers
 # We write raw CDR-encoded messages so we don't need actual ROS2 installed.
@@ -242,39 +251,33 @@ def _encode_compressed_image(
     return _cdr_encapsulate(header + body)
 
 
-def _make_test_jpeg(width: int, height: int, r: int, g: int, b: int) -> bytes:
-    """Create a minimal JPEG image for testing. Requires Pillow."""
+def _require_pillow():
+    """Return ``PIL.Image``, or a one-line ImportError naming the fix.
+
+    No placeholder fallback: Pillow is a base dependency, and the old
+    hard-coded 1x1 grayscale JPEG broke consumers that trust the frame
+    size (LeRobot export rejected it as a single-channel image).
+    """
     try:
         from PIL import Image as PILImage
-        import io
-        img = PILImage.new("RGB", (width, height), (r, g, b))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=50)
-        return buf.getvalue()
-    except ImportError:
-        # Fallback: return a minimal valid JPEG (1x1 red pixel)
-        return (
-            b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01'
-            b'\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06'
-            b'\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b'
-            b'\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c'
-            b'\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0'
-            b'\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4'
-            b'\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00'
-            b'\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06'
-            b'\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03'
-            b'\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02'
-            b'\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07"q\x142\x81'
-            b'\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16'
-            b'\x17\x18\x19\x1a%&\'()*456789:CDEFGHIJSTUVWXYZcdefghij'
-            b'stuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94'
-            b'\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8'
-            b'\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3'
-            b'\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7'
-            b'\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea'
-            b'\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00'
-            b'\x08\x01\x01\x00\x00?\x00T\xdb\xa8\xa1 \x03\xff\xd9'
-        )
+    except ImportError as e:
+        # Only reachable on a partial install (e.g. pip --no-deps).
+        raise ImportError(
+            "Synthetic camera frames require Pillow, which "
+            "rosbag-resurrector depends on but this environment lacks. "
+            "Install with: pip install Pillow"
+        ) from e
+    return PILImage
+
+
+def _make_test_jpeg(width: int, height: int, r: int, g: int, b: int) -> bytes:
+    """Encode a solid-colour ``width`` x ``height`` RGB JPEG."""
+    import io
+
+    img = _require_pillow().new("RGB", (width, height), (r, g, b))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=50)
+    return buf.getvalue()
 
 
 @dataclass
@@ -308,20 +311,47 @@ class BagConfig:
     partial_end_early_sec: float = 3.0
 
 
+@contextlib.contextmanager
+def _atomic_output(path: Path) -> Iterator[BinaryIO]:
+    """Write to a temp file beside ``path``; rename it onto ``path`` on success.
+
+    An MCAP cut off mid-write has no summary, and every later reader
+    (including ``resurrector demo``'s "already exists" path) fails on it.
+    The rename keeps ``path`` either absent, the previous complete file,
+    or the new complete file. The temp name ends in ``.tmp`` so scanners
+    looking for ``*.mcap`` never pick it up.
+    """
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(tmp, "xb") as f:
+            yield f
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Path:
-    """Generate a synthetic MCAP bag file."""
+    """Generate a synthetic MCAP bag file.
+
+    The file appears at ``output_path`` only once it is complete. Raises
+    ImportError before touching the disk if camera frames are enabled
+    and Pillow is missing.
+    """
     if config is None:
         config = BagConfig()
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if config.include_compressed:
+        _require_pillow()
 
     rng = np.random.default_rng(42)
     joint_names = [f"joint_{i}" for i in range(config.num_joints)]
 
-    with open(output_path, "wb") as f:
+    with _atomic_output(output_path) as f:
         writer = Writer(f)
-        writer.start(profile="ros2", library="rosbag-resurrector-testgen")
+        writer.start(profile="ros2", library=GENERATOR_LIBRARY)
 
         # Register schemas and channels
         schema_ids = {}
@@ -525,7 +555,7 @@ def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Pa
         writer.add_metadata(
             "resurrector_test",
             {
-                "generator": "rosbag-resurrector-testgen",
+                "generator": GENERATOR_LIBRARY,
                 "duration_sec": str(config.duration_sec),
                 "description": "Synthetic test bag",
             },
@@ -534,6 +564,52 @@ def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Pa
         writer.finish()
 
     return output_path
+
+
+def stale_sample_reason(path: str | Path) -> str | None:
+    """Why an existing sample bag at ``path`` should be regenerated, or None.
+
+    Flags a bag this generator wrote that is empty, cut off mid-write, or
+    whose ``/camera/compressed`` frames are the 1x1 grayscale placeholders
+    that installs without Pillow used to write (LeRobot export and the
+    dashboard's frame views break on those). Reads the MCAP header and the
+    first compressed frame only. A file whose header names another writer
+    is never flagged, so a user's own bag is never overwritten.
+    """
+    from mcap.reader import make_reader
+
+    from resurrector.ingest.parser import MCAPParser, get_compressed_image_array
+
+    path = Path(path)
+    if path.stat().st_size == 0:
+        return "it is empty"
+    try:
+        with open(path, "rb") as f:
+            library = make_reader(f).get_header().library
+    except Exception:
+        return None
+    if library != GENERATOR_LIBRARY:
+        return None
+    try:
+        # Reading starts with the summary at the end of the file, so a
+        # bag cut off mid-write fails here.
+        msgs = MCAPParser(path).read_messages(topics=["/camera/compressed"])
+        with contextlib.closing(msgs):
+            msg = next(msgs, None)
+    except Exception:
+        return "it is incomplete (an earlier run was interrupted)"
+    if msg is None:
+        return None
+    try:
+        frame = get_compressed_image_array(msg)
+    except ImportError:
+        return None  # can't check without Pillow, and couldn't regenerate either
+    if frame is None:
+        return "its camera frames don't decode"
+    if frame.ndim != 3:
+        h, w = frame.shape[:2]
+        return f"its camera frames are {w}x{h} placeholders from an install without Pillow"
+    return None
 
 
 def generate_test_suite(output_dir: str | Path = "tests/fixtures") -> dict[str, Path]:

@@ -45,7 +45,8 @@ def main() -> None:
             if i >= 1:
                 break
     except ImportError as e:
-        print(f"  [SKIP] JPEG decoding needs Pillow: pip install 'rosbag-resurrector[vision-lite]'")
+        # Pillow ships with the base install; only a partial one lacks it.
+        print("  [SKIP] JPEG decoding needs Pillow, which this environment lacks: pip install Pillow")
         print(f"         ({e})")
 
     section("Export first 5 frames as PNGs")
@@ -57,7 +58,7 @@ def main() -> None:
         for p in saved:
             print(f"    {p.name}  ({p.stat().st_size // 1024} KB)")
     except ImportError as e:
-        print(f"  [SKIP] PNG export needs Pillow: pip install 'rosbag-resurrector[vision-lite]'")
+        print("  [SKIP] PNG export needs Pillow, which this environment lacks: pip install Pillow")
         print(f"         ({e})")
 
     section("Export same topic as an MP4 video")

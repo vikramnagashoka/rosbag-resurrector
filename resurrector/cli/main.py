@@ -568,7 +568,7 @@ def export(
           resurrector export bag.mcap --preset lerobot --downsample 60 \\
               -o ./lerobot_60hz
     """
-    from resurrector.core.export import PRESETS
+    from resurrector.core.export import PRESETS, ExportError
 
     # --list-presets short-circuits to a table dump and exits
     if list_presets_flag:
@@ -621,7 +621,7 @@ def export(
         split_dict = {}
         for item in split:
             if "=" not in item:
-                console.print(
+                err_console.print(
                     f"[red]Invalid --split entry {rich_escape(repr(item))}; expected NAME=RATIO "
                     f"(e.g. train=0.8)[/red]"
                 )
@@ -630,9 +630,11 @@ def export(
             try:
                 split_dict[k.strip()] = float(v.strip())
             except ValueError:
-                console.print(f"[red]--split {rich_escape(repr(item))}: ratio must be numeric[/red]")
+                err_console.print(f"[red]--split {rich_escape(repr(item))}: ratio must be numeric[/red]")
                 raise typer.Exit(2)
 
+    # Errors go to stderr, unwrapped: an ExportError has one failed column
+    # per line, which hard wrapping at 80 columns would break up.
     try:
         result_path = bf.export(
             topics=topics,
@@ -647,14 +649,17 @@ def export(
             task=task,
             action_topics=action_topic,
         )
+    except ExportError as e:
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        raise typer.Exit(1)
     except (ValueError, FileExistsError) as e:
-        console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except ImportError as e:
-        console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
+        err_console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
         raise typer.Exit(1)
     except NotImplementedError as e:
-        console.print(f"[red]{rich_escape(str(e))}[/red]")
+        err_console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Exported to {result_path}[/green]")
@@ -1466,7 +1471,7 @@ def dataset_export(
         help="Version to export (must exist via `dataset add-version`). e.g. 1.0",
     )],
     output: Annotated[Path, typer.Option("--output", "-o",
-        help="Output directory; the version writes into <output>/<name>/<version>/. "
+        help="Output directory; the version writes into OUTPUT/NAME/VERSION/. "
              "e.g. -o ./datasets",
     )] = Path("./datasets"),
     db: Annotated[Optional[Path], typer.Option("--db",
@@ -1483,11 +1488,33 @@ def dataset_export(
     Example:
       resurrector dataset export pick-place-experiments 1.0 -o ./datasets
     """
-    from resurrector.core.dataset import DatasetManager
+    from resurrector.core.dataset import DatasetManager, version_format_hint
+    from resurrector.core.export import ExportError
     mgr = DatasetManager(db)
-    result = mgr.export_version(name, version, str(output))
+    try:
+        result = mgr.export_version(name, version, str(output))
+    except ExportError as e:
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        if e.suggested_formats:
+            # This command has no --format: the version pins it.
+            err_console.print(rich_escape(version_format_hint(name, e.suggested_formats)))
+        raise typer.Exit(1)
+    except KeyError as e:
+        # Unknown dataset or version. str(KeyError) would quote the message.
+        err_console.print(f"[red]Export failed: {rich_escape(str(e.args[0] if e.args else e))}[/red]")
+        raise typer.Exit(1)
+    except (ValueError, FileExistsError) as e:
+        # LeRobot's frame guards (LeRobotFrameShapeError / FormatError are
+        # ValueErrors), an undecodable camera, an existing LeRobot target:
+        # one line, as `resurrector export` prints them.
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    except ImportError as e:
+        err_console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
+        raise typer.Exit(1)
+    finally:
+        mgr.close()
     console.print(f"[green]Exported to {result}[/green]")
-    mgr.close()
 
 
 @dataset_app.command("list")
@@ -2069,10 +2096,10 @@ def doctor():
     """Verify the install: prints a pass/warn/fail grid for every dependency.
 
     Two tables: "Core install" (Python version, MCAP parser, DuckDB
-    index, Polars, FastAPI — all required and bundled) and "Optional
-    extras" (image parsing, video export, CLIP local + OpenAI search,
-    live ROS 2 bridge, watch mode, Zarr / LeRobot / RLDS export, mcap CLI,
-    ros2 CLI).
+    index, Polars, FastAPI, image decoding via Pillow — all required and
+    bundled) and "Optional extras" (MP4 video export, CLIP local + OpenAI
+    search, live ROS 2 bridge, watch mode, Zarr / LeRobot / RLDS export,
+    mcap CLI, ros2 CLI).
     Each row tells you exactly what to install if missing — for example:
 
       pip install 'rosbag-resurrector[vision]'
@@ -2128,10 +2155,14 @@ def demo(
 ):
     """Generate or download a sample bag and walk through the basic workflow.
 
-    Default: generates a 5-second synthetic bag (fast, good for smoke tests
-    but cameras contain colored noise — bad for visual demos like CLIP
-    search). Pass --download to fetch a real-data MCAP bag with actual
-    camera footage instead.
+    Default: generates a 5-second synthetic bag (fast, good for smoke tests,
+    but the camera frames are solid colours that change over time — bad
+    for visual demos like CLIP search). Pass --download to fetch a
+    real-data MCAP bag with actual camera footage instead.
+
+    An existing sample is reused unless --force is given, or it is broken
+    (cut off mid-write, or the 1x1 placeholder frames an install without
+    Pillow used to write), in which case it is regenerated.
 
     Examples:
       resurrector demo --full                          # synthetic + walkthrough
@@ -2144,16 +2175,29 @@ def demo(
         return
 
     # Default path: generate synthetic bag
-    from resurrector.demo.sample_bag import generate_bag, BagConfig
+    from resurrector.demo.sample_bag import (
+        BagConfig, generate_bag, stale_sample_reason,
+    )
 
     output = output or Path.home() / ".resurrector" / "demo_sample.mcap"
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    if output.exists() and not force:
+    reuse = output.exists() and not force
+    stale = reuse and stale_sample_reason(output)
+    if reuse and not stale:
         console.print(f"[dim]Sample already exists at {output} (use --force to regenerate)[/dim]")
     else:
+        if stale:
+            console.print(
+                f"[yellow]Regenerating {rich_escape(str(output))}: {stale}.[/yellow]",
+                soft_wrap=True,
+            )
         console.print(f"[cyan]Generating demo bag at {output}...[/cyan]")
-        generate_bag(output, BagConfig(duration_sec=5.0))
+        try:
+            generate_bag(output, BagConfig(duration_sec=5.0))
+        except ImportError as e:
+            console.print(f"[red]{rich_escape(str(e))}[/red]", soft_wrap=True)
+            raise typer.Exit(code=1)
         console.print(f"[green][OK] Created {output.stat().st_size // 1024} KB bag[/green]\n")
 
     console.print("[cyan]Opening with BagFrame...[/cyan]")

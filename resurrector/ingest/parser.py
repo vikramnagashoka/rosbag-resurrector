@@ -593,7 +593,7 @@ def _parse_compressed_image(buf: bytes) -> dict[str, Any]:
 def get_compressed_image_array(msg: Message) -> np.ndarray | None:
     """Decode a CompressedImage message (JPEG/PNG) to a numpy array.
 
-    Requires Pillow: pip install 'rosbag-resurrector[vision-lite]'
+    Uses Pillow, a base dependency.
     """
     if msg.raw_data is None or "format" not in msg.data:
         return None
@@ -603,11 +603,14 @@ def get_compressed_image_array(msg: Message) -> np.ndarray | None:
 
     try:
         from PIL import Image as PILImage
-    except ImportError:
+    except ImportError as e:
+        # Only reachable on a partial install (e.g. pip --no-deps), so
+        # point at the missing package, not an extra.
         raise ImportError(
-            "CompressedImage decoding requires Pillow. "
-            "Install with: pip install 'rosbag-resurrector[vision-lite]'"
-        )
+            "CompressedImage decoding requires Pillow, which "
+            "rosbag-resurrector depends on but this environment lacks. "
+            "Install with: pip install Pillow"
+        ) from e
 
     import io
 

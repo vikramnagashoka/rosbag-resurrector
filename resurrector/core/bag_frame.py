@@ -194,7 +194,7 @@ class TopicView:
 
         Decodes each frame to an HxWxC NumPy array (uint8). Handles both
         ``sensor_msgs/msg/Image`` (raw, encoding-aware) and
-        ``sensor_msgs/msg/CompressedImage`` (JPEG/PNG via OpenCV).
+        ``sensor_msgs/msg/CompressedImage`` (JPEG/PNG via Pillow).
 
         Raises:
             TypeError: If this topic is not an image type — see
@@ -235,16 +235,22 @@ class TopicView:
 
         Yields:
             ``pl.DataFrame`` with up to ``chunk_size`` rows and a
-            ``timestamp_ns`` column plus one column per leaf message field.
+            ``timestamp_ns`` column plus one column per leaf message field
+            that appears anywhere in that chunk. A field missing from some
+            messages (an empty JointState ``velocity``) is null there; the
+            column set can differ between chunks.
 
         Example::
 
             # Streaming downsample of a large topic to 1 Hz
             buckets = []
             for chunk in bf["/imu/data"].iter_chunks(chunk_size=10_000):
-                ds = chunk.group_by_dynamic("timestamp_ns", every="1s").mean()
+                ds = chunk.group_by_dynamic(
+                    "timestamp_ns", every=f"{10**9}i",  # integer ns index
+                ).agg(pl.exclude("timestamp_ns").mean())
                 buckets.append(ds)
-            full = pl.concat(buckets)
+            # Chunks can have different columns, so concatenate diagonally.
+            full = pl.concat(buckets, how="diagonal_relaxed")
         """
         buffer: list[dict[str, Any]] = []
         for msg in self.iter_messages():
@@ -252,10 +258,10 @@ class TopicView:
             _flatten_dict(msg.data, row)
             buffer.append(row)
             if len(buffer) >= chunk_size:
-                yield pl.DataFrame(buffer)
+                yield _rows_to_frame(buffer)
                 buffer = []
         if buffer:
-            yield pl.DataFrame(buffer)
+            yield _rows_to_frame(buffer)
 
     def materialize_ipc_cache(self, chunk_size: int = 50_000) -> "IpcCache":
         """Stream the topic to a temporary Arrow IPC file and return a handle.
@@ -269,6 +275,12 @@ class TopicView:
         (or when the cache is used as a context manager). This
         replaces the v0.3.x ``to_lazy_polars()`` method, which leaked
         the temp file.
+
+        Chunks are combined the way :meth:`to_polars` combines them: a
+        column missing from a chunk is null there, and a chunk that adds
+        a column or widens a dtype (int, then float) widens the file.
+        Widening rewrites the rows already cached, one batch at a time,
+        so memory stays bounded by ``chunk_size``.
 
         Examples
         --------
@@ -289,35 +301,54 @@ class TopicView:
         import tempfile
         import pyarrow.ipc as ipc
 
-        tmp = tempfile.NamedTemporaryFile(
-            prefix=f"resurrector_{self._topic_name.lstrip('/').replace('/', '_')}_",
-            suffix=".arrow",
-            delete=False,
-        )
-        tmp.close()
-        tmp_path = Path(tmp.name)
+        made: list[Path] = []
 
+        def new_path() -> Path:
+            tmp = tempfile.NamedTemporaryFile(
+                prefix=f"resurrector_{self._topic_name.lstrip('/').replace('/', '_')}_",
+                suffix=".arrow",
+                delete=False,
+            )
+            tmp.close()
+            made.append(Path(tmp.name))
+            return made[-1]
+
+        tmp_path = new_path()
         writer = None
-        wrote_any = False
+        schema = None
         try:
             for chunk in self.iter_chunks(chunk_size):
                 if chunk.height == 0:
                     continue
+                if schema is not None and chunk.schema != schema:
+                    chunk = _combine_chunks(chunk, schema)
+                    if chunk.schema != schema:
+                        # An IPC file has one schema, so a new column or a
+                        # wider dtype means rewriting the rows cached so far.
+                        writer.close()
+                        writer = None
+                        old, tmp_path = tmp_path, new_path()
+                        writer = _rewrite_ipc(old, tmp_path, chunk.schema)
+                        old.unlink()
+                schema = chunk.schema
                 table = chunk.to_arrow()
                 if writer is None:
                     writer = ipc.new_file(str(tmp_path), table.schema)
                 writer.write_table(table)
-                wrote_any = True
-        finally:
+        except BaseException:
             if writer is not None:
                 writer.close()
+            for path in made:
+                path.unlink(missing_ok=True)
+            raise
 
-        if not wrote_any:
+        if writer is None:
             # Empty topic — delete the placeholder file immediately and
             # return a cache that scans to an empty LazyFrame.
             tmp_path.unlink(missing_ok=True)
             return IpcCache(path=None, _empty=True)
 
+        writer.close()
         return IpcCache(path=tmp_path)
 
     def to_polars(self, force: bool = False) -> pl.DataFrame:
@@ -1052,6 +1083,46 @@ def _format_size(size_bytes: int) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} PB"
+
+
+def _combine_chunks(chunk: pl.DataFrame, schema) -> pl.DataFrame:
+    """``chunk`` with every column of ``schema`` and its own, each as the
+    supertype of the two dtypes, a missing one null: how
+    :meth:`TopicView.to_polars` combines chunks."""
+    return pl.concat([pl.DataFrame(schema=schema), chunk], how="diagonal_relaxed")
+
+
+def _rewrite_ipc(src: Path, dst: Path, schema):
+    """Copy Arrow IPC file ``src`` to ``dst`` with each batch widened to
+    ``schema``, one batch in memory at a time. Returns the open writer,
+    so the caller can keep appending."""
+    import pyarrow as pa
+    import pyarrow.ipc as ipc
+
+    writer = None
+    try:
+        with pa.OSFile(str(src), "rb") as source:
+            reader = ipc.open_file(source)
+            for i in range(reader.num_record_batches):
+                batch = pl.from_arrow(reader.get_batch(i))
+                table = _combine_chunks(batch, schema).to_arrow()
+                if writer is None:
+                    writer = ipc.new_file(str(dst), table.schema)
+                writer.write_table(table)
+    except BaseException:
+        if writer is not None:
+            writer.close()
+        raise
+    return writer
+
+
+def _rows_to_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    """One DataFrame from flattened message rows, its schema inferred
+    from every row. polars' default reads only the first 100: a field
+    first seen after that is dropped, an int-then-float field is
+    truncated to int, a bool-then-int field turns 3 into False, and a
+    null-then-str field raises."""
+    return pl.DataFrame(rows, infer_schema_length=None)
 
 
 def _flatten_dict(d: dict, out: dict, prefix: str = "") -> None:

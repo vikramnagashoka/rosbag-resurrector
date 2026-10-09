@@ -118,22 +118,22 @@ def test_density_bounded(large_bag):
 
 
 def test_lerobot_grid_resample_bounded(large_bag):
-    """LeRobot's as-of resampler streams chunks onto the frame grid.
-
-    Runs with a small chunk size so the topic spans many chunks; the
-    streaming path must not accumulate them. Doesn't need LeRobot itself.
+    """LeRobot's resampler streams chunks onto the frame grid, through the
+    path export uses (``_resample_topics``, which finds each topic's
+    columns as it goes). Doesn't need LeRobot itself.
+    (test_export_lerobot_columns.py::test_resample_topics_streams_its_chunks
+    checks the streaming itself; this bag is too small for a whole-topic
+    copy to show in RSS.)
     """
-    from resurrector.core.lerobot_export import asof_on_grid, build_grid, numeric_columns
+    from resurrector.core.lerobot_export import _resample_topics, build_grid
 
     bf = BagFrame(large_bag)
-    view = bf["/imu/data"]
-    cols = numeric_columns(next(iter(view.iter_chunks(1_000))).schema)
     grid = build_grid(int(bf.metadata.start_time_ns), int(bf.metadata.end_time_ns), 30)
-    delta_mb, df = _peak_rss_delta_mb(
-        lambda: asof_on_grid(view.iter_chunks(1_000), grid, cols),
+    delta_mb, (state, names) = _peak_rss_delta_mb(
+        lambda: _resample_topics(bf, ["/imu/data"], grid),
     )
-    assert df.height == len(grid)
-    assert delta_mb < 100, f"asof_on_grid RSS delta {delta_mb:.1f} MB > 100 MB"
+    assert state.shape == (len(grid), len(names)) and names
+    assert delta_mb < 100, f"_resample_topics RSS delta {delta_mb:.1f} MB > 100 MB"
 
 
 def test_stream_bucketed_minmax_bounded(large_bag):
@@ -216,20 +216,26 @@ try:
         output_dir=out, sync=True,
         downsample_hz=float(downsample) if downsample != "none" else None,
     )
-except ExportError as e:  # Zarr can't store the header.frame_id strings
+except ExportError as e:
     failed = sorted(f.column for f in e.failures)
 delta_mb = (peak_bytes() - before) / 2**20
+strings = "joint_states__header.frame_id"
 if fmt == "parquet":
     import pyarrow.parquet as pq
-    rows = pq.read_metadata(f"{out}/synced.parquet").num_rows
+    rows = string_rows = pq.read_metadata(f"{out}/synced.parquet").num_rows
 elif fmt == "hdf5":
     import h5py
     with h5py.File(f"{out}/synced.h5", "r") as f:
         rows = f["synced/timestamp_ns"].shape[0]
+        string_rows = f["synced"][strings].shape[0]
 else:
     import zarr
-    rows = zarr.open_group(f"{out}/synced.zarr", mode="r")["timestamp_ns"].shape[0]
-print(json.dumps({"delta_mb": delta_mb, "rows": rows, "failed": failed}))
+    group = zarr.open_group(f"{out}/synced.zarr", mode="r")
+    rows = group["timestamp_ns"].shape[0]
+    string_rows = group[strings].shape[0]
+print(json.dumps({
+    "delta_mb": delta_mb, "rows": rows, "string_rows": string_rows, "failed": failed,
+}))
 """
 
 
@@ -252,7 +258,7 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, fmt, downsample):
     this bag that path peaked around 500 MB (and grows with the bag);
     the streamed path stays near 70 MB, the same at 3x the rows. HDF5
     and Zarr (the multimodal preset) go through the same stream plus a
-    per-chunk dtype conversion.
+    per-chunk dtype conversion, the header.frame_id strings included.
     """
     import resurrector
 
@@ -274,10 +280,8 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, fmt, downsample):
 
     expected_rows = 100_000 if downsample == "none" else 5_000
     assert abs(result["rows"] - expected_rows) <= 1
-    if fmt == "zarr":
-        assert all(c.endswith("header.frame_id") for c in result["failed"])
-    else:
-        assert result["failed"] == []
+    assert result["failed"] == []
+    assert result["string_rows"] == result["rows"]
     assert result["delta_mb"] < 200, (
         f"synced export peak RSS delta {result['delta_mb']:.1f} MB > 200 MB"
     )
@@ -314,29 +318,22 @@ def test_hdf5_export_bounded(large_bag):
 
 
 def test_zarr_export_bounded(large_bag):
-    """Streaming Zarr export appends to chunked arrays per chunk.
+    """Streaming Zarr export appends to chunked arrays per chunk, the
+    header.frame_id strings (variable-length UTF-8) included.
 
     Skips if zarr (in [all-exports]) isn't installed in this venv.
-    Zarr can't store variable-length strings (e.g. header.frame_id) so
-    we expect ExportError listing those columns — but the streaming
-    write itself must still be memory-bounded for the numeric ones.
     """
-    pytest.importorskip("zarr")
-    from resurrector.core.export import ExportError
+    zarr = pytest.importorskip("zarr")
     bf = BagFrame(large_bag)
-    def _do_zarr_export(d):
-        try:
-            Exporter().export(
+    with tempfile.TemporaryDirectory() as d:
+        delta_mb, _ = _peak_rss_delta_mb(
+            lambda: Exporter().export(
                 bag_frame=bf, topics=["/imu/data"], format="zarr",
                 output_dir=str(d),
-            )
-        except ExportError:
-            # Expected — string columns can't go into zarr; the streaming
-            # writer correctly catches this per-column. Memory budget is
-            # the load-bearing assertion here.
-            pass
-    with tempfile.TemporaryDirectory() as d:
-        delta_mb, _ = _peak_rss_delta_mb(lambda: _do_zarr_export(d))
+            ),
+        )
+        frame_ids = zarr.open(f"{d}/imu_data.zarr", mode="r")["header.frame_id"]
+        assert frame_ids.shape[0] == bf["/imu/data"].message_count
     assert delta_mb < 150, f"zarr export RSS delta {delta_mb:.1f} MB > 150 MB"
 
 
@@ -367,6 +364,142 @@ def test_numpy_export_under_cap_bounded(large_bag):
     # NumPy isn't streaming — bounded by total array size, not chunk
     # size. For 20K IMU rows this is ~few MB; loose budget for safety.
     assert delta_mb < 200, f"numpy export RSS delta {delta_mb:.1f} MB > 200 MB"
+
+
+_NPZ_TEXT_CHILD = """
+import json, resource, sys
+from pathlib import Path
+import polars as pl
+from resurrector.core.export import _stream_numpy
+
+out, rows, chunk, width = Path(sys.argv[1]), 150_000, 50_000, 500
+
+def chunks():
+    for start in range(0, rows, chunk):
+        s = ["base_link"] * chunk
+        s[0] = "x" * width
+        yield pl.DataFrame({"timestamp_ns": range(start, start + chunk), "s": s})
+
+def peak_bytes():
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru if sys.platform == "darwin" else ru * 1024
+
+before = peak_bytes()
+_stream_numpy(chunks(), out, "t")
+print(json.dumps({
+    "delta_mb": (peak_bytes() - before) / 2**20,
+    "fixed_mb": rows * width * 4 / 2**20,
+}))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ru_maxrss is POSIX-only")
+def test_npz_text_column_holds_one_fixed_width_copy(tmp_path):
+    """``.npz`` text is fixed width, so a column costs rows x its longest
+    value, unavoidably. Writing it must not cost that twice: per-chunk
+    ``<U`` arrays plus their concatenation peaked near 2x here (each chunk
+    holds one 500-character value); the column filled part by part from
+    object arrays stays near 1x.
+    """
+    import resurrector
+
+    src_root = str(Path(resurrector.__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (src_root, env.get("PYTHONPATH")) if p
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _NPZ_TEXT_CHILD, str(tmp_path)],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["delta_mb"] < 1.5 * result["fixed_mb"], (
+        f".npz text export peak RSS delta {result['delta_mb']:.0f} MB for a "
+        f"{result['fixed_mb']:.0f} MB fixed-width column"
+    )
+
+
+_WIDE_TYPE = "resurrector_test/msg/Wide"
+_WIDE_ROWS, _WIDE_LATE_FROM, _WIDE_COLS = 120_000, 100_000, 50
+
+_IPC_WIDEN_CHILD = f"""
+import json, resource, struct, sys
+import polars as pl
+from resurrector.core.bag_frame import BagFrame
+from resurrector.ingest.parser import register_decoder
+
+def decode(data):
+    (i,) = struct.unpack_from("<I", data, 4)
+    row = {{f"f{{k}}": float(i + k) for k in range({_WIDE_COLS})}}
+    if i >= {_WIDE_LATE_FROM}:
+        row["late"] = float(i)
+    return row
+
+register_decoder("{_WIDE_TYPE}", decode)
+
+def peak_bytes():
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru if sys.platform == "darwin" else ru * 1024
+
+view = BagFrame(sys.argv[1])["/wide"]
+view.message_count
+before = peak_bytes()
+with view.materialize_ipc_cache(chunk_size=2_000) as cache:
+    delta_mb = (peak_bytes() - before) / 2**20
+    late = cache.scan().select(pl.col("late").drop_nulls().len()).collect().item()
+    rows = cache.scan().select(pl.len()).collect().item()
+print(json.dumps({{"delta_mb": delta_mb, "rows": rows, "late": late}}))
+"""
+
+
+@pytest.fixture(scope="session")
+def wide_bag(tmp_path_factory):
+    """/wide: 50 float fields per message, plus ``late`` from message
+    100 000 on, so the IPC cache is widened after 100k rows."""
+    import struct
+
+    from mcap.writer import Writer
+
+    path = tmp_path_factory.mktemp("oom_wide") / "wide.mcap"
+    with open(path, "wb") as f:
+        writer = Writer(f)
+        writer.start(profile="ros2", library="resurrector-test")
+        sid = writer.register_schema(name=_WIDE_TYPE, encoding="ros2msg", data=b"uint32 i\n")
+        cid = writer.register_channel(topic="/wide", message_encoding="cdr", schema_id=sid)
+        for i in range(_WIDE_ROWS):
+            t = 1_700_000_000_000_000_000 + i * 1_000_000
+            writer.add_message(cid, log_time=t, publish_time=t,
+                               data=b"\x00\x01\x00\x00" + struct.pack("<I", i))
+        writer.finish()
+    yield path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ru_maxrss is POSIX-only")
+def test_ipc_cache_widening_bounded(wide_bag):
+    """A column that first appears after 100k rows widens the cached IPC
+    file, which rewrites those rows. The rewrite goes a batch at a time:
+    about 59 MB here against 48 MB with no widening, the same at 300k
+    rows. Reading the cached rows back whole peaked at 125 MB here and
+    251 MB at 300k rows."""
+    import resurrector
+
+    src_root = str(Path(resurrector.__file__).resolve().parents[1])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (src_root, env.get("PYTHONPATH")) if p
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _IPC_WIDEN_CHILD, str(wide_bag)],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["rows"] == _WIDE_ROWS
+    assert result["late"] == _WIDE_ROWS - _WIDE_LATE_FROM
+    assert result["delta_mb"] < 90, (
+        f"IPC cache widening peak RSS delta {result['delta_mb']:.1f} MB > 90 MB"
+    )
 
 
 def test_numpy_export_over_cap_raises(large_bag, monkeypatch):

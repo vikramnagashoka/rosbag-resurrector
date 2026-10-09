@@ -170,16 +170,13 @@ def run_all_checks() -> list[CheckResult]:
         _check_module("duckdb", "DuckDB index", "pip install duckdb (should be bundled)"),
         _check_module("polars", "Polars", "pip install polars (should be bundled)"),
         _check_module("fastapi", "Dashboard backend", "pip install fastapi uvicorn"),
+        # Import name is PIL, pip name is Pillow.
+        _check_module("PIL", "Image decoding", "pip install Pillow (should be bundled)"),
         _check_index_path(),
         _check_allowed_roots(),
         # --- optional extras ---
         # Quote the package spec so zsh (default on macOS) doesn't try
         # to glob the [extras] brackets and refuse the command.
-        _check_module(
-            "PIL", "Image/frame parsing",
-            "pip install 'rosbag-resurrector[vision-lite]'",
-            tier="optional",
-        ),
         _check_module(
             "cv2", "Video export",
             "pip install 'rosbag-resurrector[vision-lite]'",

@@ -21,10 +21,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from _common import ensure_output_dir, header, section
+from _common import ensure_output_dir, generate_bag_or_exit, header, section
 
 import resurrector
-from resurrector.demo.sample_bag import generate_bag, BagConfig
+from resurrector.demo.sample_bag import BagConfig
 
 
 def main() -> None:
@@ -37,7 +37,7 @@ def main() -> None:
         p = out / f"v06_concat_bag{i}.mcap"
         if p.exists():
             p.unlink()
-        generate_bag(p, BagConfig(duration_sec=dur, imu_hz=100.0))
+        generate_bag_or_exit(p, BagConfig(duration_sec=dur, imu_hz=100.0))
         bag_paths.append(p)
         print(f"    bag{i}: {dur:.1f}s @ 100Hz IMU → {p.name}")
 
@@ -76,7 +76,7 @@ def main() -> None:
     no_tf = out / "v06_concat_no_tf.mcap"
     if no_tf.exists():
         no_tf.unlink()
-    generate_bag(no_tf, BagConfig(duration_sec=0.2, include_tf=False))
+    generate_bag_or_exit(no_tf, BagConfig(duration_sec=0.2, include_tf=False))
     bf_partial = resurrector.concatenate_bags([bag_paths[0], no_tf], mode="index")
     tf_view = bf_partial["/tf"]
     print(f"  /tf is present in {tf_view.n_bags_with_topic} of {bf_partial.n_bags} bags")

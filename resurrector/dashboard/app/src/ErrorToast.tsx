@@ -6,8 +6,15 @@
 // We render at most 3 stacked toasts at a time; older ones age out
 // automatically after 8 seconds so the screen doesn't fill with
 // rate-limit warnings during bursty operations.
+//
+// Every toast is a role="alert", and it is the one copy of its message
+// screen readers announce. Pages that also keep the message on screen
+// (ExportFailure, an export dialog's "Exported to" line) render that copy
+// without a live role. The provider sits at the root, so the toast is
+// announced even when the page or dialog that started the request has
+// been closed by the time it fails.
 
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import React, { createContext, useCallback, useContext, useState } from 'react'
 
 type Level = 'error' | 'warn' | 'info'
 
@@ -57,6 +64,7 @@ export function ErrorToastProvider({ children }: { children: React.ReactNode }) 
           <div
             key={t.id}
             role="alert"
+            data-testid="toast"
             style={{
               background: t.level === 'error' ? '#f85149' : t.level === 'warn' ? '#d29922' : '#388bfd',
               color: '#fff',
@@ -68,6 +76,9 @@ export function ErrorToastProvider({ children }: { children: React.ReactNode }) 
               fontSize: 13,
               lineHeight: 1.4,
               pointerEvents: 'auto',
+              // Keep a multi-line message's line breaks; wrap long paths.
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
             }}
           >
             {t.message}
@@ -87,25 +98,26 @@ export function useErrorToast() {
 // Convenience wrapper: runs an async thunk and pushes any ApiError to
 // the toast. Returns the resolved value or null on failure, so callers
 // can do `const data = await runWithToast(toast, () => api.listBags())`.
+// `onError` gets the same message (without the prefix) for callers that
+// also keep it on screen, since a toast is gone after 8 seconds. The
+// toast still announces it: the caller may have unmounted, or not be
+// showing its copy.
 import { ApiError } from './api'
 
 export async function runWithToast<T>(
   toast: Ctx,
   fn: () => Promise<T>,
-  opts?: { successMessage?: string; errorPrefix?: string },
+  opts?: { successMessage?: string; errorPrefix?: string; onError?: (message: string) => void },
 ): Promise<T | null> {
   try {
     const result = await fn()
     if (opts?.successMessage) toast.push('info', opts.successMessage)
     return result
   } catch (e) {
-    if (e instanceof ApiError) {
-      const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
-      toast.push('error', `${prefix}${e.message}`)
-    } else {
-      const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
-      toast.push('error', `${prefix}${String(e)}`)
-    }
+    const message = e instanceof ApiError ? e.message : String(e)
+    const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
+    toast.push('error', `${prefix}${message}`)
+    opts?.onError?.(message)
     return null
   }
 }

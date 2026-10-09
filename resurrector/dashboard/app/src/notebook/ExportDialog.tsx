@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useState } from 'react'
 import { api, ExportPreset } from '../api'
 import { useCapabilities } from '../components/InstallBanner'
+import ExportFailure from '../components/ExportFailure'
 import { runWithToast, useErrorToast } from '../ErrorToast'
 import {
   LEROBOT_DEFAULT_FPS,
@@ -49,6 +50,7 @@ export default function ExportDialog({
   const [outputDir, setOutputDir] = useState('./export')
   const [exporting, setExporting] = useState(false)
   const [result, setResult] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const toast = useErrorToast()
   const presetId = useId()
   const stuckNoteId = useId()
@@ -83,13 +85,17 @@ export default function ExportDialog({
 
   async function handleExport() {
     setExporting(true)
+    setResult(null)
+    setError(null)
     const r = await runWithToast(
       toast,
       () => api.exportBag(bagId, {
         topics: selectedTopics, format, output_dir: outputDir,
         ...syncAndRateParams(format, sync, downsampleHz), preset: selectedPreset || undefined,
       }),
-      { errorPrefix: 'Export failed' },
+      // Kept in the dialog too (ExportFailure): a failed-columns error
+      // lists each column and what to do.
+      { errorPrefix: 'Export failed', onError: setError },
     )
     if (r) { setResult(r.output_path); toast.push('info', `Exported to ${r.output_path}`) }
     setExporting(false)
@@ -243,7 +249,9 @@ export default function ExportDialog({
         </label>
         {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
-        {result && <div className="nb-export-result" role="status">Exported to {result}</div>}
+        {/* No live role: the success toast is the copy that's announced. */}
+        {result && <div className="nb-export-result" data-testid="export-result">Exported to {result}</div>}
+        {error && <ExportFailure className="nb-export-error" message={`Export failed: ${error}`} />}
 
         <div className="nb-modal-actions">
           <button className="nb-btn" onClick={onClose}>Close</button>

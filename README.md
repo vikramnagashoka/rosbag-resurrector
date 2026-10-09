@@ -198,7 +198,7 @@ Install only what you need:
 ```bash
 pip install 'rosbag-resurrector[vision]'        # local CLIP semantic search (~2GB model)
 pip install 'rosbag-resurrector[vision-openai]' # OpenAI-backed semantic search (lighter)
-pip install 'rosbag-resurrector[vision-lite]'   # image/video parsing, no ML
+pip install 'rosbag-resurrector[vision-lite]'   # MP4 video export via OpenCV (image decoding needs no extra)
 pip install 'rosbag-resurrector[bridge-live]'   # live ROS 2 topic bridge (requires rclpy)
 pip install 'rosbag-resurrector[watch]'         # auto-index new bags as they appear
 pip install 'rosbag-resurrector[all-exports]'   # Zarr + RLDS (RLDS needs tensorflow: Python 3.10-3.13, 3.10-3.12 on Intel macOS, not Windows ARM64)
@@ -297,7 +297,7 @@ bf  # Renders interactive HTML table with health badges and topic groups
 
 ### Video & Image Support
 
-Full support for both raw and compressed image topics:
+Raw and compressed (JPEG/PNG) image topics decode on the base install, no extra needed:
 
 ```python
 # Iterate frames from any image topic
@@ -318,7 +318,7 @@ bf["/camera/rgb"].is_image_topic  # True
 # Export as numbered PNG files
 resurrector export-frames experiment.mcap --topic /camera/rgb --output ./frames
 
-# Export as MP4 video
+# Export as MP4 video (needs OpenCV: pip install 'rosbag-resurrector[vision-lite]')
 resurrector export-frames experiment.mcap --topic /camera/rgb --video --output video.mp4 --fps 30
 ```
 
@@ -346,9 +346,6 @@ pip install 'rosbag-resurrector[vision]'
 
 # Option 2: OpenAI API (lighter install, requires API key)
 pip install 'rosbag-resurrector[vision-openai]'
-
-# Option 3: Just image parsing + video export, no ML
-pip install 'rosbag-resurrector[vision-lite]'
 ```
 
 **Python API:**
@@ -508,6 +505,8 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 | **RLDS** | OpenX / RT-2 / robotic foundation models (TFRecord) | Chunk-streamed (v0.4.0+) |
 
 HDF5, Zarr and NumPy have no missing value for integers or booleans, so those columns are written as float64 with NaN marking a missing value (booleans as 1.0 / 0.0); `timestamp_ns` stays int64. Integers beyond ±2^53 lose precision there (a warning says so); Parquet writes each column's dtype unchanged, nulls included.
+
+String columns are written as text: variable-length UTF-8 in HDF5 and Zarr, fixed-width unicode in `.npz` (every row as wide as the column's longest string; a warning names any column over 256 MB). A missing string is written as an empty string. When a topic's fields change partway through, say a driver that starts publishing JointState velocity later, HDF5, Zarr and `.npz` fill the rows where a field is missing, so every column lines up with `timestamp_ns`; CSV and Parquet take their columns from the first chunk and report a column that first appears later. RLDS keeps one feature type per column: a missing float is NaN, a missing string is empty, and a missing integer or boolean is left out of that step; a column first seen after the first chunk (or null until then) is absent from the earlier steps, so read it with `VarLenFeature` or a default value. Zarr 3.0.x and 3.1.0 print zarr's own warning that variable-length strings aren't in the Zarr v3 spec yet; later versions don't.
 
 LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). Zarr and RLDS need `pip install 'rosbag-resurrector[all-exports]'`. RLDS writes TFRecords with tensorflow, which the extra installs only where tensorflow publishes stable wheels: Python 3.10-3.13 on Linux (x86_64, aarch64), Apple-silicon macOS, and Windows x64, and Python 3.10-3.12 on Intel macOS, where it installs tensorflow 2.16 (the last Intel-macOS release, which needs numpy below 2). Elsewhere (Python 3.14, for one) the extra installs Zarr only, and `resurrector doctor` says why RLDS is unavailable.
 

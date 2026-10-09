@@ -13,10 +13,16 @@ Our job is the mapping from a bag to LeRobot frames:
   so every frame must sit on an exact ``1/fps`` grid. Topics are resampled
   onto that grid with a backward as-of join: each frame gets the latest
   sample at or before its grid time. That is causal (no future sample
-  leaks into a frame, which matters for policy training).
+  leaks into a frame, which matters for policy training), with one logged
+  exception: a field missing from a topic's first frames (a driver that
+  starts publishing JointState velocity late) takes its first later value
+  there, because a NaN would make LeRobot's statistics for it NaN.
 - **Grid bounds** are ``[max(first_ts), min(last_ts)]`` across the selected
   topics, so no topic is ever extrapolated before it starts or held past
-  the point where it stopped publishing.
+  the point where it stopped publishing. A field that stops for good
+  while its topic keeps publishing is held at its last value, also
+  logged; one missing from some samples in between keeps its previous
+  value, as the as-of join does.
 - ``observation.state`` = numeric fields of non-image topics (minus header
   stamps), ``action`` = numeric fields of ``action_topics`` if given, and
   ``observation.images.<topic>`` = one video stream per image topic.
@@ -41,6 +47,11 @@ from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
 import numpy as np
 import polars as pl
+
+from resurrector.core.exceptions import (  # noqa: F401  (re-exported)
+    LeRobotFrameFormatError,
+    LeRobotFrameShapeError,
+)
 
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import BagFrame, TopicView
@@ -89,6 +100,36 @@ def lerobot_available() -> bool:
     return True
 
 
+# Smallest frames LeRobot's default AV1 encoder (libsvtav1) handles,
+# measured with LeRobot 0.6.1 / PyAV 15.1 (SVT-AV1 3.0.0): it refuses
+# (avcodec_open2 error) a height or width under 4, and for widths 4-24 it
+# never returns from save_episode(), whatever the height or frame count.
+MIN_VIDEO_WIDTH = 25
+MIN_VIDEO_HEIGHT = 4
+
+
+def check_frame_shape(
+    topic: str,
+    shape: tuple[int, ...],
+    use_videos: bool,
+    bag: str | os.PathLike | None = None,
+) -> None:
+    """Raise :class:`LeRobotFrameShapeError` if LeRobot would mishandle ``shape``.
+
+    ``shape`` is a decoded ``(H, W, 3)`` frame as handed to ``add_frame``;
+    ``bag`` (the source bag's path) only goes into the error message.
+    """
+    h, w = shape[:2]
+    bad = h in (1, 3) or (
+        use_videos and (h < MIN_VIDEO_HEIGHT or w < MIN_VIDEO_WIDTH)
+    )
+    if bad:
+        raise LeRobotFrameShapeError(
+            topic, shape, use_videos,
+            min_width=MIN_VIDEO_WIDTH, min_height=MIN_VIDEO_HEIGHT, bag=bag,
+        )
+
+
 @dataclass
 class LeRobotExportResult:
     path: Path
@@ -124,16 +165,26 @@ def numeric_columns(schema: pl.Schema) -> list[str]:
 def asof_on_grid(
     chunks: Iterable[pl.DataFrame],
     grid: np.ndarray,
-    value_cols: Sequence[str],
+    value_cols: Sequence[str] | None,
 ) -> pl.DataFrame:
     """Streaming backward as-of resample of time-ordered chunks onto ``grid``.
 
-    Equivalent to ``grid.join_asof(full_topic, strategy="backward")`` but
-    holds only the current chunk plus a one-row carry from the previous
-    chunk, so memory is bounded by chunk size rather than topic size.
-    A grid point is resolved once a chunk ends at or after it.
+    Equivalent to ``grid.join_asof(full_topic, strategy="backward")``,
+    where ``full_topic`` combines the chunks the way
+    :meth:`TopicView.to_polars` does (a column a chunk lacks is null in
+    its rows), but holds only the current chunk plus a one-row carry from
+    the previous chunk, so memory is bounded by chunk size rather than
+    topic size. A grid point is resolved once a chunk ends at or after it.
+
+    ``value_cols`` names the columns to resample; one a chunk lacks is
+    null at the grid points whose latest sample is in that chunk. With
+    ``None``, every :func:`numeric_columns` column of any chunk is
+    resampled, in the order first seen; one that first appears in a later
+    chunk is null at the grid points resolved before it. Either way the
+    result is the same for any chunking of the topic.
     """
-    cols = ["timestamp_ns", *value_cols]
+    cols = None if value_cols is None else ["timestamp_ns", *value_cols]
+    seen: list[str] = ["timestamp_ns"]
     parts: list[pl.DataFrame] = []
     carry: pl.DataFrame | None = None
     gi = 0
@@ -147,40 +198,62 @@ def asof_on_grid(
     for chunk in chunks:
         if chunk.height == 0:
             continue
+        if value_cols is None:
+            seen.extend(c for c in numeric_columns(chunk.schema) if c not in seen)
+        wanted = seen if cols is None else cols
         chunk = (
-            chunk.select(cols)
+            chunk.select([
+                pl.col(c) if c in chunk.columns else pl.lit(None).alias(c)
+                for c in wanted
+            ])
             .with_columns(pl.col("timestamp_ns").cast(pl.Int64))
             .sort("timestamp_ns")
         )
         hi = int(np.searchsorted(grid, chunk["timestamp_ns"][-1], side="right"))
         if hi > gi:
-            src = chunk if carry is None else pl.concat([carry, chunk], how="vertical_relaxed")
+            src = chunk if carry is None else pl.concat([carry, chunk], how="diagonal_relaxed")
             _resolve(hi, src)
         carry = chunk.tail(1)
 
     if gi < len(grid):
         if carry is None:
-            carry = pl.DataFrame(schema={c: pl.Float64 for c in cols}).with_columns(
+            carry = pl.DataFrame(schema={c: pl.Float64 for c in cols or seen}).with_columns(
                 pl.col("timestamp_ns").cast(pl.Int64)
             )
         _resolve(len(grid), carry)
 
     if not parts:
         return pl.DataFrame({"timestamp_ns": grid})
-    return pl.concat(parts, how="vertical_relaxed")
+    return pl.concat(parts, how="diagonal_relaxed")
 
 
-def to_rgb(arr: np.ndarray, encoding: str | None) -> np.ndarray:
-    """Normalize a decoded camera frame to HxWx3 uint8 RGB."""
+def to_rgb(arr: np.ndarray, encoding: str | None, topic: str | None = None) -> np.ndarray:
+    """Normalize a decoded camera frame to HxWx3 uint8 RGB, losslessly.
+
+    Gray is replicated to three channels, gray+alpha (a PNG "LA" frame)
+    and RGBA/BGRA drop alpha, BGR is reversed, and 1-bit frames become
+    0/255. Any other dtype (16-bit, 32-bit, float) or layout raises
+    :class:`LeRobotFrameFormatError` naming ``topic``: an 8-bit cast would
+    wrap the values and scaling would flatten them (see the class).
+    """
+    if arr.dtype == np.bool_:
+        arr = arr.astype(np.uint8) * 255
+    if arr.dtype != np.uint8:
+        raise LeRobotFrameFormatError(topic, arr.dtype, arr.shape)
+    if arr.ndim == 3 and arr.shape[-1] in (1, 2):
+        arr = arr[..., 0]
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
-    elif arr.shape[-1] == 4:
+    elif arr.ndim == 3 and arr.shape[-1] == 4:
         arr = arr[..., :3]
         if encoding and encoding.startswith("bgra"):
             arr = arr[..., ::-1]
-    elif encoding and encoding.startswith("bgr"):
-        arr = arr[..., ::-1]
-    return np.ascontiguousarray(arr, dtype=np.uint8)
+    elif arr.ndim == 3 and arr.shape[-1] == 3:
+        if encoding and encoding.startswith("bgr"):
+            arr = arr[..., ::-1]
+    else:
+        raise LeRobotFrameFormatError(topic, arr.dtype, arr.shape)
+    return np.ascontiguousarray(arr)
 
 
 def _decode_frame(view: "TopicView", msg) -> np.ndarray | None:
@@ -188,24 +261,31 @@ def _decode_frame(view: "TopicView", msg) -> np.ndarray | None:
 
     if view.message_type == "sensor_msgs/msg/CompressedImage":
         arr = get_compressed_image_array(msg)
-        return None if arr is None else to_rgb(arr, None)
+        return None if arr is None else to_rgb(arr, None, view.name)
     arr = get_image_array(msg)
-    return None if arr is None else to_rgb(arr, msg.data.get("encoding"))
+    return None if arr is None else to_rgb(arr, msg.data.get("encoding"), view.name)
 
 
 def frames_on_grid(view: "TopicView", grid: np.ndarray) -> Iterator[np.ndarray]:
     """Yield one RGB frame per grid point (latest frame at or before it)."""
     msgs = iter(view.iter_messages())
     current: np.ndarray | None = None
+    undecoded = None
     pending = next(msgs, None)
     for t in grid:
         while pending is not None and pending.timestamp_ns <= t:
             frame = _decode_frame(view, pending)
             if frame is not None:
                 current = frame
+            else:
+                undecoded = pending
             pending = next(msgs, None)
         if current is None:
-            raise ValueError(f"No decodable frame on {view.name} at or before {t}")
+            # The encoding is what a user needs to see: raw 16UC1 / mono16
+            # / rgb16 frames, for one, don't decode at all.
+            enc = undecoded and (undecoded.data.get("encoding") or undecoded.data.get("format"))
+            detail = f" (frame encoding {enc!r})" if enc else ""
+            raise ValueError(f"No decodable frame on {view.name} at or before {t}{detail}")
         yield current
 
 
@@ -266,31 +346,81 @@ class _Episode:
 def _resample_topics(
     bf: "BagFrame", topics: Sequence[str], grid: np.ndarray,
 ) -> tuple[np.ndarray, list[str]]:
+    """Every numeric field of each topic on ``grid``, as float32 columns.
+
+    Fields come from every chunk, not just the first, so one a driver
+    starts publishing late (JointState velocity) is kept, and one it
+    stops publishing doesn't fail the export; where chunks start and end
+    doesn't change the result. A frame whose latest sample lacks a field
+    holds the field's previous value or, before its first value, its
+    first value, with a warning naming the frames filled that way: NaN
+    would make LeRobot's statistics for the field NaN. Fields with no
+    value at any frame are dropped.
+    """
     blocks: list[np.ndarray] = []
     names: list[str] = []
     for topic in topics:
-        view = bf[topic]
-        chunks = iter(view.iter_chunks())
+        chunks = iter(bf[topic].iter_chunks())
         first = next(chunks, None)
         if first is None:
-            continue
-        cols = numeric_columns(first.schema)
-        if not cols:
-            logger.warning("Topic %s has no numeric fields; skipped for LeRobot", topic)
             continue
 
         def _all(first=first, rest=chunks):
             yield first
             yield from rest
 
-        df = asof_on_grid(_all(), grid, cols).drop("timestamp_ns")
-        df = df.select([c for c in cols if df[c].null_count() < df.height])
+        df = asof_on_grid(_all(), grid, None).drop("timestamp_ns")
+        cols = [c for c in df.columns if df[c].null_count() < df.height]
+        if not cols:
+            logger.warning("Topic %s has no numeric fields; skipped for LeRobot", topic)
+            continue
+        df = df.select(cols)
+        late = {c: int(df[c].is_not_null().arg_true()[0]) for c in cols}
+        late = {c: n for c, n in late.items() if n}
+        if late:
+            logger.warning(
+                "Topic %s: %s; those frames hold the field's first value, "
+                "which comes later in time",
+                topic, ", ".join(
+                    f"{c} has no value in the first {n} of {df.height} frames"
+                    for c, n in late.items()
+                ),
+            )
+        stopped = {c: int(df[c].is_not_null().arg_true()[-1]) + 1 for c in cols}
+        stopped = {c: n for c, n in stopped.items() if n < df.height}
+        if stopped:
+            logger.warning(
+                "Topic %s: %s; those frames hold the field's last value",
+                topic, ", ".join(
+                    f"{c} has no value after frame {n - 1} of {df.height}"
+                    for c, n in stopped.items()
+                ),
+            )
         df = df.fill_null(strategy="forward").fill_null(strategy="backward")
         blocks.append(df.cast(pl.Float32).to_numpy())
         names.extend(_label(topic, c) for c in df.columns)
     if not blocks:
         return np.zeros((len(grid), 0), dtype=np.float32), []
     return np.concatenate(blocks, axis=1).astype(np.float32), names
+
+
+def _match_field_order(ep: _Episode, names: tuple[list[str], list[str]]) -> _Episode:
+    """``ep`` with its state and action columns in the order of ``names``
+    (the first episode's), when it has the same fields in another order.
+
+    Fields are ordered as first seen, so a bag whose driver started
+    publishing a field later than in the first bag lists the same fields
+    differently. Different field sets are left alone, so the feature check
+    still refuses them.
+    """
+    def _reorder(values, have, want):
+        if values is None or have == want or sorted(have) != sorted(want):
+            return values, have
+        return values[:, [have.index(n) for n in want]], list(want)
+
+    state, state_names = _reorder(ep.state, ep.state_names, names[0])
+    action, action_names = _reorder(ep.action, ep.action_names, names[1])
+    return _Episode(ep.grid, state, action, state_names, action_names, ep.image_views)
 
 
 def _plan_episode(
@@ -420,6 +550,13 @@ def export_lerobot(
     Raises:
         ImportError: LeRobot isn't installed (see :data:`INSTALL_HINT`).
         FileExistsError: ``output_dir`` exists and is non-empty.
+        LeRobotFrameShapeError: A camera's frames are a size LeRobot
+            mishandles (see the class); for the first bag, raised before
+            ``output_dir`` exists.
+        LeRobotFrameFormatError: A camera's pixels aren't 8-bit (16-bit,
+            float, ...) and can't become RGB losslessly; usually raised on
+            the topic's first frame, before ``output_dir`` exists.
+        Either error on a later frame or bag removes the partial dataset.
         ValueError: No overlapping data, or episodes disagree on features.
     """
     LeRobotDataset = import_lerobot_dataset()
@@ -445,9 +582,14 @@ def export_lerobot(
         for bf in bags:
             sel = list(topics) if topics else list(bf.topic_names)
             ep = _plan_episode(bf, sel, action_topics, fps)
+            if first_names is not None:
+                ep = _match_field_order(ep, first_names)
             streams = {_camera_key(v.name): frames_on_grid(v, ep.grid) for v in ep.image_views}
             firsts = {k: next(it) for k, it in streams.items()}
             cam_shapes = {k: tuple(int(x) for x in f.shape) for k, f in firsts.items()}
+            for v in ep.image_views:
+                check_frame_shape(v.name, cam_shapes[_camera_key(v.name)], use_videos,
+                                  bag=getattr(bf, "path", None))
             feats = _features(ep, cam_shapes, use_videos)
 
             if dataset is None:

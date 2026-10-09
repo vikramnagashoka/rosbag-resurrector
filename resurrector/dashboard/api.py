@@ -21,6 +21,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
+from resurrector.core.exceptions import LeRobotFrameFormatError, LeRobotFrameShapeError
+from resurrector.core.export import ExportError
+
 app = FastAPI(
     title="RosBag Resurrector",
     description="Interactive dashboard for rosbag analysis",
@@ -675,6 +678,53 @@ async def list_export_presets() -> list[dict[str, Any]]:
     return out
 
 
+def _export_error_detail(exc: ExportError, message: str | None = None) -> dict[str, Any]:
+    """The 422 ``detail`` for an :class:`ExportError`. ``message``
+    defaults to the exception's own text."""
+    return {
+        "kind": "export_column_failures",
+        "message": str(exc) if message is None else message,
+        "output": str(exc.output),
+        "failures": [
+            {"column": f.column, "error_type": f.error_type, "message": f.message}
+            for f in exc.failures
+        ],
+    }
+
+
+def _capability_unavailable(e: ImportError) -> HTTPException:
+    """A missing optional extra (LeRobot, Zarr, tensorflow) as a structured
+    503, so the UI can render the install banner instead of a generic
+    error toast. Every export route uses it."""
+    from resurrector.core.capabilities import get_capabilities
+    cap_name = "lerobot" if "lerobot" in str(e) else "all_exports"
+    cap = get_capabilities()[cap_name]
+    return HTTPException(
+        status_code=503,
+        detail={
+            "kind": "capability_unavailable",
+            "capability": cap_name,
+            "install_command": cap.install_command,
+            "description": cap.description,
+            "message": str(e),
+        },
+    )
+
+
+@app.exception_handler(ExportError)
+async def _export_error_handler(request: Request, exc: ExportError) -> JSONResponse:
+    """The chosen format couldn't store some columns: 422 with the
+    reasons, not a bare 500.
+
+    Bag export and trim raise it; dataset-version export adds a hint of
+    its own (see ``export_dataset_version_api``). The dashboard's
+    ApiError shows ``detail.message`` (the exception's own message: each
+    column with its reason, which of them are or aren't in the file, and
+    what to do); ``output`` and ``failures`` are for API callers.
+    """
+    return JSONResponse(status_code=422, content={"detail": _export_error_detail(exc)})
+
+
 @app.post("/api/bags/{bag_id}/export")
 async def export_bag(
     bag_id: int,
@@ -691,8 +741,10 @@ async def export_bag(
     (parquet / hdf5 / csv / numpy / zarr / lerobot / rlds); chunk-streaming
     formats stay bounded by chunk size, while lerobot holds one episode's
     frame grid and ignores ``sync``. Returns 503 (``capability_unavailable``)
-    when an export's extra is missing and 409 when a lerobot target
-    directory isn't empty. ``output_dir`` is validated against
+    when an export's extra is missing, 409 when a lerobot target
+    directory isn't empty, and 422 (``export_column_failures``, see
+    ``_export_error_handler``) when the chosen format can't store some
+    columns. ``output_dir`` is validated against
     ``RESURRECTOR_ALLOWED_ROOTS`` to prevent writing outside trusted
     locations.
 
@@ -729,21 +781,7 @@ async def export_bag(
             # LeRobot refuses to write into a non-empty directory.
             raise HTTPException(409, str(e))
         except ImportError as e:
-            # Missing optional extra: structured 503 so the UI can render
-            # the install banner instead of a generic error toast.
-            from resurrector.core.capabilities import get_capabilities
-            cap_name = "lerobot" if "lerobot" in str(e) else "all_exports"
-            cap = get_capabilities()[cap_name]
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "kind": "capability_unavailable",
-                    "capability": cap_name,
-                    "install_command": cap.install_command,
-                    "description": cap.description,
-                    "message": str(e),
-                },
-            )
+            raise _capability_unavailable(e)
         return {"status": "completed", "output_path": str(output_path)}
     finally:
         index.close()
@@ -1639,7 +1677,13 @@ async def export_dataset_version_api(
     downsample / format settings, and writes data + manifest +
     auto-README + reproducibility config under
     ``<output_dir>/<dataset>/<version>/``. Synchronous; large datasets
-    block the request.
+    block the request. Returns 404 for an unknown dataset or version; 400
+    when LeRobot can't store a camera's frames; 409 when the target exists;
+    503 (``capability_unavailable``) when the version's format needs an
+    extra that isn't installed; and 422 (``export_column_failures``, see
+    ``_export_error_handler``) when the format can't store some columns,
+    with a hint naming the format that would keep them
+    (``ExportError.suggested_formats``), since a version's format is fixed.
     """
     payload = payload or {}
     output_dir = payload.get("output_dir", "./datasets")
@@ -1647,10 +1691,33 @@ async def export_dataset_version_api(
     validated = _validate_path(str(Path(output_dir).resolve().parent))  # dir may not exist yet
     mgr = _get_dataset_manager()
     try:
+        # Checked up front: export_version raises KeyError for these, but
+        # so can the export itself (a topic missing from a bag), which
+        # stays a 500.
+        ds = mgr.get_dataset(name)
+        if ds is None:
+            raise HTTPException(404, f"Dataset '{name}' not found")
+        if not any(v["version"] == version for v in ds["versions"]):
+            raise HTTPException(404, f"Version '{version}' not found for dataset '{name}'")
         try:
             path = mgr.export_version(name, version, output_dir=output_dir)
+        except (LeRobotFrameShapeError, LeRobotFrameFormatError) as e:
+            # ValueErrors too, but about the bag's frames, not a missing
+            # version: 400, as the single-bag export route returns.
+            raise HTTPException(400, str(e))
         except ValueError as e:
             raise HTTPException(404, str(e))
+        except FileExistsError as e:
+            raise HTTPException(409, str(e))
+        except ImportError as e:
+            raise _capability_unavailable(e)
+        except ExportError as e:
+            message = str(e)
+            if e.suggested_formats:
+                # The version pins the format; this route can't change it.
+                from resurrector.core.dataset import version_format_hint
+                message += "\n" + version_format_hint(name, e.suggested_formats)
+            raise HTTPException(422, _export_error_detail(e, message))
         except Exception as e:
             # Transactional cleanup: user sees the error; partial files may exist
             # but live under a dataset-named subdir that we don't remove to avoid
@@ -2133,6 +2200,8 @@ async def trim_bag_api(bag_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         "format": "mcap" | "parquet" | "csv" | "hdf5" | "numpy" | "zarr" | "mp4",
         "output_path": "/path/to/output"
       }
+
+    Columns that fail to serialize return 422 (see ``_export_error_handler``).
     """
     from resurrector.core.trim import trim_to_format
 
@@ -2179,6 +2248,8 @@ async def trim_bag_api(bag_id: int, payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(400, str(e))
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
+        except ImportError as e:
+            raise _capability_unavailable(e)
         return {
             "bag_id": bag_id,
             "format": format_str,

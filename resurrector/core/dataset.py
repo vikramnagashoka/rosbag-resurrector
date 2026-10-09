@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -564,3 +565,38 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+_FORMAT_LABELS = {"parquet": "Parquet", "hdf5": "HDF5", "zarr": "Zarr"}
+
+
+def version_format_hint(name: str, formats: list[str]) -> str:
+    """What to do when exporting a version of dataset ``name`` failed with
+    an :class:`~resurrector.core.export.ExportError` that suggests
+    ``formats`` (its ``suggested_formats``, e.g. ``["parquet"]`` or
+    ``["hdf5", "zarr"]``).
+
+    ``resurrector dataset export`` and the dashboard's dataset-version
+    export both show it. Neither can change the format: it is fixed when
+    the version is added, so the way to another format is a new version.
+    """
+    label = " or ".join(_FORMAT_LABELS.get(f, f) for f in formats)
+    flags = " or ".join(f"-f {f}" for f in formats)
+    if name.startswith("-"):
+        # Quoting doesn't stop a leading dash reading as an option; "--"
+        # does, so the positionals go after it.
+        command = (f"resurrector dataset add-version -b <bag> ... -f {formats[0]} "
+                   f"-- {shlex.quote(name)} <new-version>")
+    else:
+        command = (f"resurrector dataset add-version {shlex.quote(name)} "
+                   f"<new-version> -b <bag> ... -f {formats[0]}")
+    return (
+        f"A dataset version's format is set when the version is added. To get "
+        f"{label}, add a version with the same bags and settings and {flags}, "
+        f"then export that version: {command}"
+    )
+
+
+def parquet_version_hint(name: str) -> str:
+    """:func:`version_format_hint` for Parquet."""
+    return version_format_hint(name, ["parquet"])

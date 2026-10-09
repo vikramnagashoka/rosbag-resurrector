@@ -142,14 +142,20 @@ def generate_scene_bag(output_path: str | Path) -> Path:
     - /tf: 5 messages at 100 ms intervals with world → base_link
       (translation x sweeps from 0 → 0.4)
     - /lidar/points: 3 PointCloud2 messages with 100 points each
+
+    Like ``generate_bag``, the file appears at ``output_path`` only once
+    it is complete (examples/23 reuses an existing scene bag, so a
+    truncated one would break it on every later run).
     """
     from mcap.writer import Writer
+
+    from resurrector.demo.sample_bag import _atomic_output
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     base_ns = 1_700_000_000_000_000_000
 
-    with open(output_path, "wb") as f:
+    with _atomic_output(output_path) as f:
         writer = Writer(f)
         writer.start(profile="ros2", library="resurrector-test-scene")
 

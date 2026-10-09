@@ -270,8 +270,7 @@ def test_synced_hdf5_zarr_int_columns_unmatched_after_first_chunk(
 
     failed = _export_gap(bf, topics, fmt, tmp_path)
     strings = {c for c, dt in expected.schema.items() if dt == pl.String}
-    # Zarr has no variable-length strings; that's the only loss allowed.
-    assert failed == (strings if fmt == "zarr" else set())
+    assert failed == set()
 
     got = _read_columns(tmp_path, fmt)
     assert got[stamp][0] == expected[stamp][0] > 1.6e9
@@ -303,7 +302,7 @@ def test_synced_hdf5_zarr_bool_column_unmatched_after_first_chunk(
 
     failed = _export_gap(bf, GAP_TOPICS, fmt, tmp_path)
     strings = {c for c, dt in expected.schema.items() if dt == pl.String}
-    assert failed == (strings if fmt == "zarr" else set())
+    assert failed == set()
 
     got = _read_columns(tmp_path, fmt)
     np.testing.assert_array_equal(got["flag__data"][:GAP_MATCHED], [1.0, 0.0] * 4)

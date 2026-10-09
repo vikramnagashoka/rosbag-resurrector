@@ -29,21 +29,52 @@ SAMPLE_BAG = Path.home() / ".resurrector" / "explore_sample.mcap"
 OUTPUT_DIR = Path.cwd() / "_exploration_output"
 
 
-def ensure_sample_bag(duration_sec: float = 5.0) -> Path:
-    """Create the demo bag if it doesn't already exist; return its path.
+def generate_bag_or_exit(path: Path, config=None) -> Path:
+    """``generate_bag``, but a generator that can't run exits cleanly.
 
-    Uses the same fixture generator the test suite uses, so the data
-    is realistic (IMU 200Hz, joint states 100Hz, camera 30Hz, lidar
-    10Hz, compressed image 10Hz, plus a TF tree).
+    On a partial install without Pillow the generator raises a one-line
+    ImportError naming the fix; print that and exit 1 instead of dumping
+    a traceback on someone running the examples as a smoke test.
     """
-    SAMPLE_BAG.parent.mkdir(parents=True, exist_ok=True)
-    if SAMPLE_BAG.exists():
-        return SAMPLE_BAG
-    print(f"  Generating demo bag at {SAMPLE_BAG} (~{int(duration_sec)}s)...")
-    from resurrector.demo.sample_bag import BagConfig, generate_bag
-    generate_bag(SAMPLE_BAG, BagConfig(duration_sec=duration_sec))
-    print(f"  [OK] Created {SAMPLE_BAG.stat().st_size // 1024} KB bag\n")
-    return SAMPLE_BAG
+    from resurrector.demo.sample_bag import generate_bag
+
+    try:
+        return generate_bag(path, config)
+    except ImportError as e:
+        print(f"  [ERROR] Can't generate the sample bag: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+
+def ensure_bag(path: Path, duration_sec: float = 5.0) -> Path:
+    """Reuse the synthetic bag at ``path`` unless it is stale; return its path.
+
+    Stale means ``stale_sample_reason`` flags it: empty, cut off by an
+    interrupted run, or holding the 1x1 placeholder frames that installs
+    without Pillow used to write. Those are regenerated.
+    """
+    from resurrector.demo.sample_bag import BagConfig, stale_sample_reason
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        stale = stale_sample_reason(path)
+        if stale is None:
+            return path
+        print(f"  Regenerating {path}: {stale}.")
+    else:
+        print(f"  Generating demo bag at {path} (~{int(duration_sec)}s)...")
+    generate_bag_or_exit(path, BagConfig(duration_sec=duration_sec))
+    print(f"  [OK] Created {path.stat().st_size // 1024} KB bag\n")
+    return path
+
+
+def ensure_sample_bag(duration_sec: float = 5.0) -> Path:
+    """The shared demo bag at ``SAMPLE_BAG``, created or regenerated as needed.
+
+    Uses the same generator the test suite uses, so the data is
+    realistic (IMU 200Hz, joint states 100Hz, camera 30Hz, lidar 10Hz,
+    compressed image 10Hz, plus a TF tree).
+    """
+    return ensure_bag(SAMPLE_BAG, duration_sec)
 
 
 def header(title: str) -> None:
