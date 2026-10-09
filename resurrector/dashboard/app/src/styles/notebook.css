@@ -1024,6 +1024,8 @@
   font-size: 12.5px; margin-top: 12px;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* Above the Datasets grid, not under a form. */
+.nb-ds-export-error { margin: 0 0 18px; }
 
 /* Help & Docs page (warm) */
 .nb-doc { max-width: 860px; }

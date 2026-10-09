@@ -6,8 +6,15 @@
 // We render at most 3 stacked toasts at a time; older ones age out
 // automatically after 8 seconds so the screen doesn't fill with
 // rate-limit warnings during bursty operations.
+//
+// Every toast is a role="alert", and it is the one copy of its message
+// screen readers announce. Pages that also keep the message on screen
+// (ExportFailure, an export dialog's "Exported to" line) render that copy
+// without a live role. The provider sits at the root, so the toast is
+// announced even when the page or dialog that started the request has
+// been closed by the time it fails.
 
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import React, { createContext, useCallback, useContext, useState } from 'react'
 
 type Level = 'error' | 'warn' | 'info'
 
@@ -15,17 +22,10 @@ interface Toast {
   id: number
   level: Level
   message: string
-  announce: boolean
-}
-
-interface PushOptions {
-  // false: the caller shows the same message on the page with its own
-  // role="alert", so a screen reader would read it twice.
-  announce?: boolean
 }
 
 interface Ctx {
-  push: (level: Level, message: string, opts?: PushOptions) => void
+  push: (level: Level, message: string) => void
 }
 
 const ErrorToastContext = createContext<Ctx | null>(null)
@@ -34,11 +34,10 @@ let idCounter = 0
 export function ErrorToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([])
 
-  const push = useCallback((level: Level, message: string, opts?: PushOptions) => {
+  const push = useCallback((level: Level, message: string) => {
     const id = ++idCounter
-    const announce = opts?.announce ?? true
     setToasts(prev => {
-      const next = [...prev, { id, level, message, announce }]
+      const next = [...prev, { id, level, message }]
       return next.slice(-3)
     })
     setTimeout(() => {
@@ -64,7 +63,7 @@ export function ErrorToastProvider({ children }: { children: React.ReactNode }) 
         {toasts.map(t => (
           <div
             key={t.id}
-            role={t.announce ? 'alert' : undefined}
+            role="alert"
             data-testid="toast"
             style={{
               background: t.level === 'error' ? '#f85149' : t.level === 'warn' ? '#d29922' : '#388bfd',
@@ -100,8 +99,9 @@ export function useErrorToast() {
 // the toast. Returns the resolved value or null on failure, so callers
 // can do `const data = await runWithToast(toast, () => api.listBags())`.
 // `onError` gets the same message (without the prefix) for callers that
-// also keep it on screen, since a toast is gone after 8 seconds. Those
-// callers announce it themselves, so the toast is then silent.
+// also keep it on screen, since a toast is gone after 8 seconds. The
+// toast still announces it: the caller may have unmounted, or not be
+// showing its copy.
 import { ApiError } from './api'
 
 export async function runWithToast<T>(
@@ -116,7 +116,7 @@ export async function runWithToast<T>(
   } catch (e) {
     const message = e instanceof ApiError ? e.message : String(e)
     const prefix = opts?.errorPrefix ? `${opts.errorPrefix}: ` : ''
-    toast.push('error', `${prefix}${message}`, { announce: !opts?.onError })
+    toast.push('error', `${prefix}${message}`)
     opts?.onError?.(message)
     return null
   }

@@ -16,7 +16,6 @@ illustrative.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,9 +26,10 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+import resurrector
 import resurrector.core.export as export_mod
 from resurrector.cli.main import app as cli_app
-from resurrector.core.dataset import BagRef, DatasetManager
+from resurrector.core.dataset import BagRef, DatasetManager, parquet_version_hint
 from resurrector.core.export import ExportColumnFailure, ExportError
 from resurrector.demo.sample_bag import BagConfig, generate_bag
 from resurrector.ingest.indexer import BagIndex
@@ -162,6 +162,18 @@ class TestMessage:
         assert str(err).endswith(PARQUET_ADVICE) is suggests
         _assert_explains(str(err), out, H5_FAILURES)
 
+    def test_dataset_parquet_hint_word_for_word(self):
+        """Would catch: the hint telling a dataset user to "export to
+        Parquet", which neither `dataset export` nor the Datasets page can
+        do, since the version pins the format. The CLI and the dashboard
+        both print this one helper's text (see TestCli and TestApi)."""
+        assert parquet_version_hint("pick-place") == (
+            "A dataset version's format is set when the version is added. To get "
+            "Parquet, add a version with the same bags and settings and -f parquet, "
+            "then export that version: resurrector dataset add-version pick-place "
+            "<new-version> -b <bag> ... -f parquet"
+        )
+
 
 class TestCli:
     @pytest.mark.parametrize(("extra_args", "failed_file"), [
@@ -186,12 +198,51 @@ class TestCli:
         # An uncaught ExportError would be here instead of SystemExit.
         assert isinstance(result.exception, SystemExit), repr(result.exception)
         assert written == [out / failed_file]
-        assert _flat(result.output).startswith("Export failed: ")
-        _assert_explains(result.output, written[0], CSV_FAILURES)
+        assert result.stdout == ""
+        assert _flat(result.stderr).startswith("Export failed: ")
+        _assert_explains(result.stderr, written[0], CSV_FAILURES)
+
+    @pytest.mark.parametrize(("extra_args", "writer_error", "exit_code", "expected"), [
+        (["--preset", "no-such-preset"], None, 1,
+         "Export failed: Unknown preset 'no-such-preset'. Available: "),
+        (["--split", "train"], None, 2,
+         "Invalid --split entry 'train'; expected NAME=RATIO (e.g. train=0.8)"),
+        (["--split", "train=most"], None, 2,
+         "--split 'train=most': ratio must be numeric"),
+        (["--split", "train=1.0", "--split-strategy", "stratified"], None, 1,
+         "stratified split is not yet supported"),
+        ([], FileExistsError("/data/out/imu_data.csv already exists"), 1,
+         "Export failed: /data/out/imu_data.csv already exists"),
+        ([], ImportError("CSV export needs csvkit: pip install csvkit"), 1,
+         "CSV export needs csvkit: pip install csvkit"),
+    ], ids=["unknown-preset", "split-no-ratio", "split-bad-ratio", "stratified",
+            "file-exists", "missing-dependency"])
+    def test_other_export_errors_go_to_stderr(
+        self, bag, tmp_dir, monkeypatch, extra_args, writer_error, exit_code, expected,
+    ):
+        """Would catch: one of ``resurrector export``'s other error paths
+        (bad preset or --split, a split strategy that doesn't exist yet, an
+        existing output, a missing optional dependency) still printing to
+        stdout, where ``2>`` misses it and a pipeline reads it as data."""
+        if writer_error is not None:
+            def failing(chunks, output_path, name):
+                raise writer_error
+            monkeypatch.setattr(export_mod, "_stream_csv", failing)
+        result = CliRunner().invoke(
+            cli_app,
+            ["export", str(bag), "-t", "/imu/data", "-f", "csv",
+             "-o", str(tmp_dir / "out"), *extra_args],
+            env={"COLUMNS": "400"},
+        )
+        assert result.exit_code == exit_code, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert result.stdout == ""
+        assert expected in _flat(result.stderr)
 
     def test_dataset_export_prints_reasons_and_exits_1(self, bag, tmp_dir, failing_writer):
         """Would catch: ``resurrector dataset export`` tracing back on the
-        same ExportError (it runs the same exporter per bag)."""
+        same ExportError (it runs the same exporter per bag), or printing
+        it to stdout."""
         written = failing_writer("csv")
         db = tmp_dir / "index.db"
         _make_version(db, bag, "csv")
@@ -202,7 +253,8 @@ class TestCli:
         )
         assert result.exit_code == 1, result.output
         assert isinstance(result.exception, SystemExit), repr(result.exception)
-        _assert_explains(result.output, written[0], CSV_FAILURES)
+        assert result.stdout == ""
+        _assert_explains(result.stderr, written[0], CSV_FAILURES)
         # Parquet wouldn't help a CSV failure, so no add-version advice.
         assert DATASET_HINT not in _flat(result.output)
 
@@ -218,15 +270,11 @@ class TestCli:
             env={"COLUMNS": "400"},
         )
         assert result.exit_code == 1, result.output
-        flat = _flat(result.output)
-        _assert_explains(result.output, written[0], H5_FAILURES)
+        assert result.stdout == ""
+        flat = _flat(result.stderr)
+        _assert_explains(result.stderr, written[0], H5_FAILURES)
         assert PARQUET_ADVICE in flat
-        assert (
-            "A dataset version's format is set when the version is added. To get "
-            "Parquet, add a version with the same bags and settings and -f parquet, "
-            "then export that version: resurrector dataset add-version pick-place "
-            "<new-version> -b <bag> ... -f parquet"
-        ) in flat
+        assert parquet_version_hint("pick-place") in flat
 
     def test_dataset_export_unknown_dataset(self, tmp_dir):
         """Would catch: an unknown dataset ending in a KeyError traceback,
@@ -239,7 +287,14 @@ class TestCli:
         )
         assert result.exit_code == 1, result.output
         assert isinstance(result.exception, SystemExit), repr(result.exception)
-        assert _flat(result.output) == "Export failed: Dataset 'nosuch' not found"
+        assert result.stdout == ""
+        assert _flat(result.stderr) == "Export failed: Dataset 'nosuch' not found"
+
+
+# The checkout this test process imports `resurrector` from. Subprocesses
+# get it first on PYTHONPATH so they run the code under test, not whatever
+# checkout the venv was installed from (often another worktree).
+CHECKOUT = Path(resurrector.__file__).resolve().parents[1]
 
 
 def _cli_env() -> dict[str, str]:
@@ -248,7 +303,25 @@ def _cli_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items()
            if k not in ("COLUMNS", "LINES", "FORCE_COLOR", "TTY_COMPATIBLE")}
     env["NO_COLOR"] = "1"
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(CHECKOUT), os.environ.get("PYTHONPATH")) if p
+    )
     return env
+
+
+def _run_cli(args: list[str], cwd: Path, script: str | None = None) -> subprocess.CompletedProcess:
+    """``python -m resurrector.cli.main ARGS`` in a fresh process, from
+    ``cwd`` (not the checkout, so the current directory can't pick which
+    code runs). ``script`` runs first, to fake a writer; then the module
+    runs as ``-m`` would run it."""
+    if script is None:
+        cmd = [sys.executable, "-m", "resurrector.cli.main"]
+    else:
+        run_main = 'import runpy; runpy.run_module("resurrector.cli.main", run_name="__main__", alter_sys=True)'
+        cmd = [sys.executable, "-c", textwrap.dedent(script) + "\n" + run_main]
+    return subprocess.run(
+        [*cmd, *args], capture_output=True, text=True, env=_cli_env(), cwd=cwd, timeout=300,
+    )
 
 
 class TestCliProcess:
@@ -256,39 +329,48 @@ class TestCliProcess:
     code, and a real traceback if anything escapes. CliRunner can't show
     any of these (it mixes the streams and keeps exceptions)."""
 
+    def test_subprocess_runs_this_checkout(self, tmp_dir):
+        """Would catch: these tests running the CLI of whatever checkout
+        the venv's ``resurrector`` points at (a venv installed from the
+        main repo, tests run from a worktree), so a regression in the code
+        under test passes, or a fix there fails."""
+        proc = subprocess.run(
+            [sys.executable, "-c", "import resurrector; print(resurrector.__file__)"],
+            capture_output=True, text=True, env=_cli_env(), cwd=tmp_dir, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert Path(proc.stdout.strip()).resolve() == Path(resurrector.__file__).resolve()
+
     def test_export_error_goes_to_stderr_one_column_per_line(self, bag, tmp_dir):
         """Would catch: the error going to stdout (scripts redirecting
         2> get nothing), Rich hard-wrapping it at 80 columns so a column's
         line breaks in two, or a traceback."""
         out = tmp_dir / "out"
         # The real app with the CSV writer failing; nothing else faked.
-        script = textwrap.dedent(f"""
-            import resurrector.core.export as export_mod
-            from resurrector.core.export import ExportColumnFailure, ExportError
+        proc = _run_cli(
+            ["export", str(bag), "-t", "/imu/data", "-f", "csv", "-o", str(out)],
+            cwd=tmp_dir,
+            script=f"""
+                import resurrector.core.export as export_mod
+                from resurrector.core.export import ExportColumnFailure, ExportError
 
-            def failing(chunks, output_path, name):
-                for _ in chunks:
-                    pass
-                path = output_path / f"{{name}}.csv"
-                path.touch()
-                raise ExportError(
-                    [ExportColumnFailure(c, "ValueError", {LATE_COLUMN_REASON!r})
-                     for c in ("position.6", "velocity.6")],
-                    path,
-                )
+                def failing(chunks, output_path, name):
+                    for _ in chunks:
+                        pass
+                    path = output_path / f"{{name}}.csv"
+                    path.touch()
+                    raise ExportError(
+                        [ExportColumnFailure(c, "ValueError", {LATE_COLUMN_REASON!r})
+                         for c in ("position.6", "velocity.6")],
+                        path,
+                    )
 
-            export_mod._stream_csv = failing
-            from resurrector.cli.main import app
-            app(prog_name="resurrector")
-        """)
-        proc = subprocess.run(
-            [sys.executable, "-c", script,
-             "export", str(bag), "-t", "/imu/data", "-f", "csv", "-o", str(out)],
-            capture_output=True, text=True, env=_cli_env(), timeout=300,
+                export_mod._stream_csv = failing
+            """,
         )
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "Traceback" not in proc.stdout + proc.stderr
-        assert "Export failed" not in proc.stdout
+        assert proc.stdout == ""
         expected = ExportError(list(CSV_FAILURES), out / "imu_data.csv")
         assert f"Export failed: {expected}" in proc.stderr
         lines = proc.stderr.splitlines()
@@ -297,15 +379,57 @@ class TestCliProcess:
             assert len(line) > 80  # long enough that a hard wrap would split it
             assert line in lines
 
+    def test_dataset_export_error_goes_to_stderr_with_hint(self, bag, tmp_dir):
+        """Would catch: ``resurrector dataset export`` printing the failed
+        columns or the add-version hint to stdout, hard-wrapping either at
+        80 columns, or tracing back. CliRunner mixes the streams, so only a
+        real process shows which one each line went to."""
+        db = tmp_dir / "index.db"
+        _make_version(db, bag, "hdf5")
+        failure = H5_FAILURES[0]
+        proc = _run_cli(
+            ["dataset", "export", "pick-place", "1.0", "-o", str(tmp_dir / "ds"), "--db", str(db)],
+            cwd=tmp_dir,
+            script=f"""
+                import resurrector.core.export as export_mod
+                from resurrector.core.export import ExportColumnFailure, ExportError
+
+                def failing(chunks, output_path, name):
+                    for _ in chunks:
+                        pass
+                    path = output_path / f"{{name}}.h5"
+                    path.touch()
+                    raise ExportError(
+                        [ExportColumnFailure({failure.column!r}, {failure.error_type!r},
+                                             {failure.message!r})],
+                        path,
+                    )
+
+                export_mod._stream_hdf5 = failing
+            """,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stdout + proc.stderr
+        assert proc.stdout == ""
+        [written] = (tmp_dir / "ds").rglob("*.h5")
+        expected = ExportError(list(H5_FAILURES), written)
+        assert expected.suggests_parquet
+        assert f"Export failed: {expected}" in proc.stderr
+        lines = proc.stderr.splitlines()
+        line = f"  - {failure.column}: {failure.error_type}: {failure.message}"
+        hint = parquet_version_hint("pick-place")
+        for whole in (line, hint):
+            assert len(whole) > 80  # long enough that a hard wrap would split it
+            assert whole in lines
+        assert lines[-1] == hint
+
     def test_dataset_export_unknown_dataset_real_cli(self, tmp_dir):
-        """Would catch: the installed ``resurrector`` command tracing back
-        on an unknown dataset, or printing the error to stdout."""
-        exe = shutil.which("resurrector", path=str(Path(sys.executable).parent))
-        cmd = [exe] if exe else [sys.executable, "-m", "resurrector.cli.main"]
-        proc = subprocess.run(
-            [*cmd, "dataset", "export", "nosuch", "1.0",
+        """Would catch: the CLI tracing back on an unknown dataset, or
+        printing the error to stdout."""
+        proc = _run_cli(
+            ["dataset", "export", "nosuch", "1.0",
              "-o", str(tmp_dir / "ds"), "--db", str(tmp_dir / "index.db")],
-            capture_output=True, text=True, env=_cli_env(), timeout=300,
+            cwd=tmp_dir,
         )
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "Traceback" not in proc.stdout + proc.stderr
@@ -401,12 +525,10 @@ class TestApi:
             json={"output_dir": str(tmp_dir / "ds")},
         )
         message = _assert_structured_422(r, written, H5_FAILURES)
+        # The same hint `resurrector dataset export` prints.
         assert message == (
             f"{ExportError(list(H5_FAILURES), written[0])}\n"
-            "A dataset version's format is set when the version is added. To get "
-            "Parquet, add a version with the same bags and settings and format "
-            "parquet, then export that version: resurrector dataset add-version "
-            "pick-place <new-version> -b <bag> ... -f parquet"
+            f"{parquet_version_hint('pick-place')}"
         )
 
     @pytest.mark.parametrize(("name", "version", "detail"), [

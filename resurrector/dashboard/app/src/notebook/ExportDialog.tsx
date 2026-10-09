@@ -249,7 +249,8 @@ export default function ExportDialog({
         </label>
         {lerobot && <div id={syncNoteId} className="nb-export-hint">{LEROBOT_SYNC_NOTE}</div>}
 
-        {result && <div className="nb-export-result" role="status">Exported to {result}</div>}
+        {/* No live role: the success toast is the copy that's announced. */}
+        {result && <div className="nb-export-result" data-testid="export-result">Exported to {result}</div>}
         {error && <ExportFailure className="nb-export-error" message={`Export failed: ${error}`} />}
 
         <div className="nb-modal-actions">

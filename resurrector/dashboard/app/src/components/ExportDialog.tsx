@@ -358,9 +358,10 @@ export default function ExportDialog({ bagId, availableTopics, onClose }: Props)
           </div>
         )}
 
+        {/* No live role: the success toast is the copy that's announced. */}
         {result && (
           <div
-            role="status"
+            data-testid="export-result"
             style={{
               background: '#0d2818',
               border: '1px solid #238636',

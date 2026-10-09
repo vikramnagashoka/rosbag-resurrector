@@ -2,11 +2,21 @@
 //
 // Export, trim and dataset-version export answer a failed-columns 422
 // with one line per column plus what to do: more than an 8-second toast
-// can show. Callers pass the same message to runWithToast's `onError`,
-// which makes the toast silent, so this block is the copy screen readers
-// announce (once) and the one that stays.
+// can show. Callers pass the same message to runWithToast's `onError`
+// and show it here, where it stays. It has no live role: the toast is
+// the copy screen readers announce, so the message is read once, and
+// still read if this block never renders (its dialog was closed while
+// the export ran).
 
 import React, { useEffect, useRef } from 'react'
+
+// A Datasets page's failed export. The page keeps which version it was,
+// to drop the error when that version or its dataset is deleted.
+export interface DatasetExportError {
+  name: string
+  version: string
+  message: string
+}
 
 // Red-on-dark block for the classic (dark) pages. The notebook pages use
 // the .nb-export-error class instead.
@@ -33,7 +43,7 @@ export default function ExportFailure({ message, className, style }: {
   return (
     <div
       ref={ref}
-      role="alert"
+      data-testid="export-failure"
       className={className}
       style={{
         // One failed column per line; long paths wrap instead of overflowing.

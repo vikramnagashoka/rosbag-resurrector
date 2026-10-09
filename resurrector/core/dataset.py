@@ -564,3 +564,19 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def parquet_version_hint(name: str) -> str:
+    """What to do when exporting a version of dataset ``name`` failed with
+    an :class:`~resurrector.core.export.ExportError` that suggests Parquet.
+
+    ``resurrector dataset export`` and the dashboard's dataset-version
+    export both show it. Neither can change the format: it is fixed when
+    the version is added, so the way to Parquet is a new version.
+    """
+    return (
+        "A dataset version's format is set when the version is added. To get "
+        "Parquet, add a version with the same bags and settings and -f parquet, "
+        f"then export that version: resurrector dataset add-version {name} "
+        "<new-version> -b <bag> ... -f parquet"
+    )
