@@ -397,7 +397,7 @@ class TestCLISplit:
             "--split", "no_equals_sign",
         ])
         assert result.exit_code != 0
-        assert "Invalid --split" in result.stdout or "expected NAME=RATIO" in result.stdout
+        assert "Invalid --split" in result.stderr or "expected NAME=RATIO" in result.stderr
 
     def test_cli_split_bad_ratio_exits(self, synth_bag, tmp_dir):
         runner = CliRunner()
@@ -419,4 +419,4 @@ class TestCLISplit:
             "--split-strategy", "stratified",
         ])
         assert result.exit_code != 0
-        assert "stratified" in result.stdout.lower()
+        assert "stratified" in result.stderr.lower()

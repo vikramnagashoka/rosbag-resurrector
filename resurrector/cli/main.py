@@ -621,7 +621,7 @@ def export(
         split_dict = {}
         for item in split:
             if "=" not in item:
-                console.print(
+                err_console.print(
                     f"[red]Invalid --split entry {rich_escape(repr(item))}; expected NAME=RATIO "
                     f"(e.g. train=0.8)[/red]"
                 )
@@ -630,9 +630,11 @@ def export(
             try:
                 split_dict[k.strip()] = float(v.strip())
             except ValueError:
-                console.print(f"[red]--split {rich_escape(repr(item))}: ratio must be numeric[/red]")
+                err_console.print(f"[red]--split {rich_escape(repr(item))}: ratio must be numeric[/red]")
                 raise typer.Exit(2)
 
+    # Errors go to stderr, unwrapped: an ExportError has one failed column
+    # per line, which hard wrapping at 80 columns would break up.
     try:
         result_path = bf.export(
             topics=topics,
@@ -648,18 +650,16 @@ def export(
             action_topics=action_topic,
         )
     except ExportError as e:
-        # stderr, unwrapped: the message has one failed column per line,
-        # which hard wrapping at 80 columns would break up.
         err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except (ValueError, FileExistsError) as e:
-        console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except ImportError as e:
-        console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
+        err_console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")
         raise typer.Exit(1)
     except NotImplementedError as e:
-        console.print(f"[red]{rich_escape(str(e))}[/red]")
+        err_console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
     console.print(f"[green]Exported to {result_path}[/green]")
@@ -1462,15 +1462,6 @@ def dataset_add_version(
     mgr.close()
 
 
-def _dataset_parquet_hint(name: str) -> str:
-    return (
-        "A dataset version's format is set when the version is added. To get "
-        "Parquet, add a version with the same bags and settings and -f parquet, "
-        f"then export that version: resurrector dataset add-version {name} "
-        "<new-version> -b <bag> ... -f parquet"
-    )
-
-
 @dataset_app.command("export")
 def dataset_export(
     name: Annotated[str, typer.Argument(
@@ -1497,7 +1488,7 @@ def dataset_export(
     Example:
       resurrector dataset export pick-place-experiments 1.0 -o ./datasets
     """
-    from resurrector.core.dataset import DatasetManager
+    from resurrector.core.dataset import DatasetManager, parquet_version_hint
     from resurrector.core.export import ExportError
     mgr = DatasetManager(db)
     try:
@@ -1506,7 +1497,7 @@ def dataset_export(
         err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         if e.suggests_parquet:
             # This command has no --format: the version pins it.
-            err_console.print(rich_escape(_dataset_parquet_hint(name)))
+            err_console.print(rich_escape(parquet_version_hint(name)))
         raise typer.Exit(1)
     except KeyError as e:
         # Unknown dataset or version. str(KeyError) would quote the message.

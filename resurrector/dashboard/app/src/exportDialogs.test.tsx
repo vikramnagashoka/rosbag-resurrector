@@ -80,10 +80,52 @@ describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
     renderDialog(Dialog)
     fireEvent.click(exportButton())
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Exported to /data/exports/run_7')
+    expect(await screen.findByTestId('export-result')).toHaveTextContent('Exported to /data/exports/run_7')
     const toasts = screen.getAllByRole('alert').map(a => a.textContent)
     expect(toasts).toContain('Exported to /data/exports/run_7')
     expect(toasts.join('\n')).not.toContain('undefined')
+  })
+
+  it('announces a success once: the toast, not the dialog line too', async () => {
+    // Would catch: a screen reader reading "Exported to ..." twice, once
+    // from the dialog's line (a role="status") and once from the toast.
+    renderDialog(Dialog)
+    fireEvent.click(exportButton())
+
+    const line = await within(dialogBox()).findByTestId('export-result')
+    expect(line).not.toHaveAttribute('role')
+    expect(line).not.toHaveAttribute('aria-live')
+    expect(screen.queryAllByRole('status')).toEqual([])
+    const announced = screen.getAllByRole('alert').filter(a => a.textContent?.includes('/data/exports/run_7'))
+    expect(announced).toHaveLength(1)
+    expect(announced[0]).toHaveAttribute('data-testid', 'toast')
+  })
+
+  it.each([
+    ['fails', 'Export failed: ' + EXPORT_COLUMN_FAILURES_MESSAGE],
+    ['succeeds', 'Exported to /data/exports/run_7'],
+  ])('announces it once when the dialog was closed before the export %s', async (outcome, expected) => {
+    // Would catch: a failure (or success) nobody hears because the dialog
+    // that would have shown it was closed while the export ran, the toast
+    // having been made silent on the assumption the dialog shows it.
+    let settle!: () => void
+    exportBag.mockImplementationOnce(() => new Promise((resolve, reject) => {
+      settle = outcome === 'fails'
+        ? () => reject(new ApiError(422, EXPORT_COLUMN_FAILURES_BODY, 'POST /api/bags/7/export failed (422)'))
+        : () => resolve(BACKEND_EXPORT_RESPONSE)
+    }))
+    const { rerender } = renderDialog(Dialog)
+    fireEvent.click(exportButton())
+    await waitFor(() => expect(exportBag).toHaveBeenCalledTimes(1))
+    // Close the dialog; the toast provider stays, as it does in the app.
+    rerender(<ErrorToastProvider>{null}</ErrorToastProvider>)
+    expect(screen.queryByRole('heading', { name: /^Export data$/i })).toBeNull()
+
+    settle()
+    const toast = await screen.findByRole('alert')
+    expect(toast).toHaveAttribute('data-testid', 'toast')
+    expect(toast.textContent).toBe(expected)
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
   })
 
   it('keeps a failed-columns error in the dialog, one column per line', async () => {
@@ -104,26 +146,28 @@ describe.each(dialogs)('%s export dialog', (_name, Dialog) => {
     renderDialog(Dialog)
 
     fireEvent.click(exportButton())
-    expect(await within(dialogBox()).findByRole('status')).toHaveTextContent('Exported to /data/exports/run_7')
+    expect(await within(dialogBox()).findByTestId('export-result')).toHaveTextContent('Exported to /data/exports/run_7')
 
     fireEvent.click(exportButton())
     const expected = `Export failed: ${EXPORT_COLUMN_FAILURES_MESSAGE}`
-    const inDialog = await within(dialogBox()).findByRole('alert')
+    const inDialog = await within(dialogBox()).findByTestId('export-failure')
     // textContent keeps the newlines the dialog's pre-wrap shows.
     expect(inDialog.textContent).toBe(expected)
     expect(inDialog.style.whiteSpace).toBe('pre-wrap')
-    expect(within(dialogBox()).queryByRole('status')).toBeNull()
-    // Announced once, by the dialog; the toast shows it silently.
-    const alerts = screen.getAllByRole('alert').map(a => a.textContent)
-    expect(alerts.filter(t => t === expected)).toHaveLength(1)
-    expect(screen.getAllByTestId('toast').map(t => t.textContent)).toContain(expected)
+    expect(within(dialogBox()).queryByTestId('export-result')).toBeNull()
+    // Announced once, by the toast; the dialog's copy isn't a live region.
+    expect(inDialog).not.toHaveAttribute('role')
+    expect(inDialog).not.toHaveAttribute('aria-live')
+    const announced = screen.getAllByRole('alert').filter(a => a.textContent === expected)
+    expect(announced).toHaveLength(1)
+    expect(announced[0]).toHaveAttribute('data-testid', 'toast')
     expect(document.body.textContent).not.toContain('[object Object]')
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
     expect(scrollIntoView.mock.contexts).toContain(inDialog)
 
     fireEvent.click(exportButton())
-    expect(await within(dialogBox()).findByRole('status')).toHaveTextContent('Exported to /data/exports/run_7')
-    expect(within(dialogBox()).queryByRole('alert')).toBeNull()
+    expect(await within(dialogBox()).findByTestId('export-result')).toHaveTextContent('Exported to /data/exports/run_7')
+    expect(within(dialogBox()).queryByTestId('export-failure')).toBeNull()
   })
 
   it('blocks a LeRobot export whose fps rounds below 1, then sends 1 for 0.5', async () => {

@@ -1698,13 +1698,8 @@ async def export_dataset_version_api(
             message = str(e)
             if e.suggests_parquet:
                 # The version pins the format; this route can't change it.
-                message += (
-                    "\nA dataset version's format is set when the version is "
-                    "added. To get Parquet, add a version with the same bags "
-                    "and settings and format parquet, then export that "
-                    f"version: resurrector dataset add-version {name} "
-                    "<new-version> -b <bag> ... -f parquet"
-                )
+                from resurrector.core.dataset import parquet_version_hint
+                message += "\n" + parquet_version_hint(name)
             raise HTTPException(422, _export_error_detail(e, message))
         except Exception as e:
             # Transactional cleanup: user sees the error; partial files may exist

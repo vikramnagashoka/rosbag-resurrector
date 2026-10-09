@@ -283,4 +283,4 @@ class TestCLIPresets:
             "-o", str(tmp_dir / "should_not_exist"),
         ])
         assert result.exit_code != 0
-        assert "Unknown preset" in result.stdout or "no-such-preset" in result.stdout
+        assert "Unknown preset" in result.stderr or "no-such-preset" in result.stderr

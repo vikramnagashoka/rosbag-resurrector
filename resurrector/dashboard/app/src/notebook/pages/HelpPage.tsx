@@ -137,7 +137,7 @@ bf.export(topics=["/imu/data"], format="parquet", output="./out", sync=True)`}</
           <Block>{`export RESURRECTOR_ALLOWED_ROOTS=/data/bags:/mnt/recordings
 resurrector dashboard`}</Block>
           <h3 className="nb-doc-h3">“Search returns blank frames”</h3>
-          <p>CLIP needs real camera footage, not the synthetic demo's noise frames. Index a real bag and re-run.</p>
+          <p>CLIP needs real camera footage, not the synthetic demo's frames, which are solid colors that change over time. Index a real bag and re-run.</p>
         </section>
 
         <section className="nb-panel nb-doc-card" id="links">
