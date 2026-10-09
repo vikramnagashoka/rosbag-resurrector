@@ -1336,18 +1336,27 @@ class _FixedColumns:
     def report_new(
         self, chunk_columns: Sequence[str], start: int, rows: int,
         array_storable: Callable[[str], bool] = lambda col: True,
+        first_value: Callable[[str], int | None] = lambda col: 0,
     ) -> None:
         """Report columns first seen in a chunk of ``rows`` rows that
-        starts at row ``start``. A 0-row chunk loses no values.
-        ``array_storable(col)`` says whether HDF5 and Zarr could hold the
-        column's type in this chunk."""
+        starts at row ``start``. ``array_storable(col)`` says whether HDF5
+        and Zarr could hold the column's type in this chunk.
+        ``first_value(col)`` is the offset of the column's first non-null
+        value in the chunk: a chunk holds every column any of its rows
+        has, so the column can start partway through it. A column with no
+        values here (None, or a 0-row chunk) loses nothing by being left
+        out, so it is reported from the chunk where it has one."""
         if rows == 0:
             return
         for col in chunk_columns:
             if col not in self._names and col not in self.failed:
+                offset = first_value(col)
+                if offset is None:
+                    continue
+                row = start + offset
                 self.fail(
                     col, "ValueError", FAILURE_LATE_COLUMN,
-                    f"first appears at row {start}, after the {self._file_kind} "
+                    f"first appears at row {row}, after the {self._file_kind} "
                     f"took its columns from the first chunk, so it is not in "
                     f"the file",
                     array_storable=array_storable(col),
@@ -1401,6 +1410,7 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
     fixed.report_new(
         table.column_names, start, table.num_rows,
         lambda col: _arrow_array_storable(table.schema.field(col).type),
+        lambda col: _arrow_first_valid(table.column(col)),
     )
     present = set(table.column_names)
     arrays = []
@@ -1442,6 +1452,14 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
+def _arrow_first_valid(column) -> int | None:
+    """Index of the first non-null value in an Arrow column, or None."""
+    import pyarrow.compute as pc
+
+    index = pc.index(pc.is_valid(column), True).as_py()
+    return None if index < 0 else index
+
+
 def _arrow_array_storable(arrow_type) -> bool:
     """True if HDF5 and Zarr can hold a column of this Arrow type when it
     first appears in a later chunk: numbers and booleans (as float64 with
@@ -1461,6 +1479,13 @@ def _polars_array_storable(dtype) -> bool:
         dtype.is_numeric() and not dtype.is_decimal()
         or dtype in (pl.Boolean, pl.Null) or _is_text(dtype)
     )
+
+
+def _polars_first_valid(series) -> int | None:
+    """:func:`_arrow_first_valid` for a polars Series."""
+    if series.null_count() == series.len():
+        return None
+    return int(series.is_not_null().arg_max())
 
 
 def _arrow_is_text(arrow_type) -> bool:
@@ -1513,6 +1538,7 @@ def _stream_csv(chunks: Iterable, output_path: Path, name: str) -> ExportResult:
                 fixed.report_new(
                     chunk.columns, rows_written, chunk.height,
                     lambda col: _polars_array_storable(chunk.schema[col]),
+                    lambda col: _polars_first_valid(chunk[col]),
                 )
                 chunk = chunk.with_columns([
                     pl.lit(None).alias(c) for c in fixed.columns if c not in chunk.columns

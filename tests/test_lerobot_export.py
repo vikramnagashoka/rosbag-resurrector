@@ -301,12 +301,27 @@ class TestFrameShapeGuard:
         which rewrites ~/.resurrector/demo_sample.mcap, not the bag they
         exported (e.g. a dashboard-generated demo_<ts>.mcap), or naming
         the bag without a command that regenerates it."""
-        bag = tmp_dir / "my demo 123.mcap"
+        bag = generate_bag(tmp_dir / "my demo 123.mcap", BagConfig(duration_sec=0.5))
         msg = self._msg((1, 1, 3), bag=bag)
         assert f"regenerate it with `resurrector demo -o '{bag}'`" in msg
         assert "--force" not in msg
         assert "`resurrector demo` (or `resurrector demo -o <bag>`" in self._msg((1, 1, 3))
         assert "resurrector demo" not in self._msg((1, 64, 3), bag=bag)
+
+    def test_one_by_one_hint_never_names_a_bag_from_another_writer(self, tmp_dir):
+        """Would catch: telling a user to run `resurrector demo -o
+        <their recording>` (demo then offers --force, which replaces the
+        recording with synthetic data). Only bags the demo generator wrote
+        get the hint."""
+        from PIL import Image
+
+        theirs = _png_camera_bag(tmp_dir / "robot_run.mcap", Image.new("RGB", (1, 1)))
+        not_mcap = tmp_dir / "notes.mcap"
+        not_mcap.write_text("not an mcap")
+        for bag in (theirs, not_mcap, tmp_dir / "missing.mcap"):
+            msg = self._msg((1, 1, 3), bag=bag)
+            assert "resurrector demo" not in msg, bag
+            assert "Leave the topic out of the export" in msg
 
 
 class TestStartMethodProbe:
@@ -452,6 +467,17 @@ class TestGuardsRunBeforeLeRobot:
         with pytest.raises(LeRobotFrameShapeError) as exc:
             export_lerobot([BagFrame(bag)], ["/camera/rgb"], tmp_dir / "lr")
         assert f"regenerate it with `resurrector demo -o {bag}`" in str(exc.value)
+        assert fake_lerobot.create == []
+
+    def test_one_by_one_message_spares_a_bag_from_another_writer(self, tmp_dir, fake_lerobot):
+        from PIL import Image
+
+        from resurrector.core.lerobot_export import export_lerobot
+
+        bag = _png_camera_bag(tmp_dir / "robot_run.mcap", Image.new("RGB", (1, 1)))
+        with pytest.raises(LeRobotFrameShapeError, match=r"1x1 \(height x width\)") as exc:
+            export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert "resurrector demo" not in str(exc.value)
         assert fake_lerobot.create == []
 
     def test_sixteen_bit_png_refused_before_create(self, tmp_dir, fake_lerobot):

@@ -160,6 +160,9 @@ JS_BAGS = {
     "velocity-late-in-first-chunk": (120, 200),
     # velocity is absent from the whole first chunk.
     "velocity-from-second-chunk": (150, 200),
+    # velocity starts partway through the second chunk, so CSV and Parquet
+    # must name row 170, not the chunk's first row.
+    "velocity-mid-second-chunk": (170, 200),
 }
 
 
@@ -192,7 +195,7 @@ def test_cli_export_keeps_joint_state_rows_aligned(joint_bag, tmp_path, monkeypa
         assert result.exit_code == 1, result.output
         flat = " ".join(result.output.split())
         assert "velocity.0" in result.output and "velocity.1" in result.output
-        assert f"first appears at row {JS_CHUNK}" in flat
+        assert f"first appears at row {velocity_from}," in flat
         # Parquet can't add a late column either; HDF5 and Zarr can.
         assert "export to Parquet" not in flat
         assert "export to HDF5 or Zarr" in flat
@@ -450,6 +453,39 @@ def test_column_first_seen_later_is_reported(fmt, tmp_path):
     assert "first appears at row 2" in failures[0].message
     assert "not in the file" in failures[0].message
     assert cols == {"timestamp_ns": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0]}
+
+
+@pytest.mark.parametrize("fmt", TABLE_FORMATS)
+def test_late_column_names_the_row_of_its_first_value(fmt, tmp_path):
+    """Would catch: naming the chunk's first row (2) for a column whose
+    first value is at row 4. A chunk holds every column any of its rows
+    has, so the column is null in the rows before."""
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+        pl.DataFrame({"timestamp_ns": [3, 4, 5], "y": [3.0, 4.0, 5.0],
+                      "x": [None, None, 5.0]}),
+    ]
+    _, failures = _write(fmt, chunks, tmp_path)
+    assert [f.column for f in failures] == ["x"]
+    assert "first appears at row 4," in failures[0].message
+
+
+@pytest.mark.parametrize("fmt", TABLE_FORMATS)
+def test_late_column_all_null_where_it_first_appears(fmt, tmp_path):
+    """Would catch: naming row 2 for a column that is null throughout the
+    chunk it first appears in and first has a value at row 6."""
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+        pl.DataFrame({"timestamp_ns": [3, 4], "y": [3.0, 4.0],
+                      "x": pl.Series([None, None], dtype=pl.Float64)}),
+        pl.DataFrame({"timestamp_ns": [5, 6, 7], "y": [5.0, 6.0, 7.0],
+                      "x": [None, None, 7.0]}),
+    ]
+    cols, failures = _write(fmt, chunks, tmp_path)
+    assert [f.column for f in failures] == ["x"]
+    assert "first appears at row 6," in failures[0].message
+    assert cols == {"timestamp_ns": [1, 2, 3, 4, 5, 6, 7],
+                    "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]}
 
 
 @pytest.mark.parametrize("fmt", TABLE_FORMATS)

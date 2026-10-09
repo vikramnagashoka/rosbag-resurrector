@@ -421,8 +421,8 @@ hits = search("topic:/imu/data health:>=80 after:2026-04-01")`}</CodeBlock>
           <h3 style={h3Style}>"Search returns blank frames"</h3>
           <p style={pStyle}>
             CLIP works on real images, not the synthetic demo bag's frames, which are solid
-            colors that change over time. Index a real bag with actual camera footage — see the launch docs for a public dataset
-            recipe — and re-run the search.
+            colors that change over time. Index a real bag with actual camera footage
+            (<Code>resurrector demo --download</Code> fetches an 844 MB one) and re-run the search.
           </p>
 
           <h3 style={h3Style}>"403 from the dashboard scan input"</h3>

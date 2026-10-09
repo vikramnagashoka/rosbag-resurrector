@@ -856,6 +856,13 @@ class BagFrame:
                 Python 3.12+ for lerobot). Raised before anything is
                 written, split or not.
             FileExistsError: ``lerobot`` into a non-empty directory.
+            ExportError: The format couldn't write some columns (see
+                ``resurrector.core.export.ExportError``). Raised once that
+                file is written; later topics and splits are not exported.
+            LeRobotFrameShapeError, LeRobotFrameFormatError: ``lerobot``
+                with camera frames LeRobot can't store. Raised before the
+                dataset directory is created when the first frame shows
+                it; a later bad frame removes the partial dataset.
 
         Example::
 

@@ -117,16 +117,24 @@ def check_frame_shape(
     """Raise :class:`LeRobotFrameShapeError` if LeRobot would mishandle ``shape``.
 
     ``shape`` is a decoded ``(H, W, 3)`` frame as handed to ``add_frame``;
-    ``bag`` (the source bag's path) only goes into the error message.
+    ``bag`` (the source bag's path) is only used for the error message,
+    whose 1x1 hint says to regenerate the bag only if ``resurrector demo``
+    wrote it.
     """
     h, w = shape[:2]
     bad = h in (1, 3) or (
         use_videos and (h < MIN_VIDEO_HEIGHT or w < MIN_VIDEO_WIDTH)
     )
     if bad:
+        demo_sample = False
+        if bag is not None and (h, w) == (1, 1):
+            from resurrector.demo.sample_bag import written_by_generator
+
+            demo_sample = written_by_generator(bag)
         raise LeRobotFrameShapeError(
             topic, shape, use_videos,
             min_width=MIN_VIDEO_WIDTH, min_height=MIN_VIDEO_HEIGHT, bag=bag,
+            demo_sample=demo_sample,
         )
 
 

@@ -693,22 +693,31 @@ def _export_error_detail(exc: ExportError, message: str | None = None) -> dict[s
 
 
 def _capability_unavailable(e: ImportError) -> HTTPException:
-    """A missing optional extra (LeRobot, Zarr, tensorflow) as a structured
-    503, so the UI can render the install banner instead of a generic
-    error toast. Every export route uses it."""
+    """A missing optional extra as a structured 503 whose message names the
+    install command, instead of a bare 500. Every export route uses it.
+
+    ``capability``, ``install_command`` and ``description`` are added only
+    when the error names a known capability: LeRobot, or Zarr / tensorflow
+    from ``[all-exports]``. OpenCV for MP4 (``[vision-lite]``) isn't one,
+    so that 503 carries the message alone rather than the wrong extra.
+    """
     from resurrector.core.capabilities import get_capabilities
-    cap_name = "lerobot" if "lerobot" in str(e) else "all_exports"
-    cap = get_capabilities()[cap_name]
-    return HTTPException(
-        status_code=503,
-        detail={
-            "kind": "capability_unavailable",
-            "capability": cap_name,
-            "install_command": cap.install_command,
-            "description": cap.description,
-            "message": str(e),
-        },
-    )
+    message = str(e)
+    if "lerobot" in message:
+        cap_name = "lerobot"
+    elif any(k in message for k in ("all-exports", "zarr", "tensorflow")):
+        cap_name = "all_exports"
+    else:
+        cap_name = None
+    detail = {"kind": "capability_unavailable", "message": message}
+    if cap_name:
+        cap = get_capabilities()[cap_name]
+        detail.update(
+            capability=cap_name,
+            install_command=cap.install_command,
+            description=cap.description,
+        )
+    return HTTPException(status_code=503, detail=detail)
 
 
 @app.exception_handler(ExportError)

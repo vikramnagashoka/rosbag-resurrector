@@ -131,7 +131,7 @@ resurrector search-frames "robot arm reaching"
 
 # export to ML training format
 resurrector export ~/.resurrector/demo_sample.mcap \
-  --topics /imu/data /joint_states \
+  --topics /imu/data --topics /joint_states \
   --format parquet \
   --sync nearest \
   --output ./training_data/
@@ -506,11 +506,11 @@ Memory bounds vary by format — see [Performance contract](#performance-contrac
 
 HDF5, Zarr and NumPy have no missing value for integers or booleans, so those columns are written as float64 with NaN marking a missing value (booleans as 1.0 / 0.0); `timestamp_ns` stays int64. Integers beyond ±2^53 lose precision there (a warning says so); Parquet writes each column's dtype unchanged, nulls included.
 
-String columns are written as text: variable-length UTF-8 in HDF5 and Zarr, fixed-width unicode in `.npz` (every row as wide as the column's longest string; a warning names any column over 256 MB). A missing string is written as an empty string. When a topic's fields change partway through, say a driver that starts publishing JointState velocity later, HDF5, Zarr and `.npz` fill the rows where a field is missing, so every column lines up with `timestamp_ns`; CSV and Parquet take their columns from the first chunk and report a column that first appears later. RLDS keeps one feature type per column: a missing float is NaN, a missing string is empty, and a missing integer or boolean is left out of that step; a column first seen after the first chunk (or null until then) is absent from the earlier steps, so read it with `VarLenFeature` or a default value. Zarr 3.0.x and 3.1.0 print zarr's own warning that variable-length strings aren't in the Zarr v3 spec yet; later versions don't.
+String columns are written as text: variable-length UTF-8 in HDF5 and Zarr, fixed-width unicode in `.npz` (every row as wide as the column's longest string; a warning names any column over 256 MB). A missing string is written as an empty string. When a topic's fields change partway through, say a driver that starts publishing JointState velocity later, HDF5, Zarr and `.npz` fill the rows where a field is missing, so every column lines up with `timestamp_ns`; CSV and Parquet take their columns from the first chunk, so a column that first appears later is left out of the file and the export fails with `ExportError` naming it (CLI: exit 1) once that file is written; later topics, splits and bags are not exported. Export to HDF5 or Zarr to keep such a column. RLDS keeps one feature type per column: a missing float is NaN, a missing string is empty, and a missing integer or boolean is left out of that step; a column first seen after the first chunk (or null until then) is absent from the earlier steps, so read it with `VarLenFeature` or a default value. Zarr 3.0.x and 3.1.0 print zarr's own warning that variable-length strings aren't in the Zarr v3 spec yet; later versions don't.
 
 LeRobot needs `pip install 'rosbag-resurrector[lerobot]'` (Python 3.12+, LeRobot's own floor). Zarr and RLDS need `pip install 'rosbag-resurrector[all-exports]'`. RLDS writes TFRecords with tensorflow, which the extra installs only where tensorflow publishes stable wheels: Python 3.10-3.13 on Linux (x86_64, aarch64), Apple-silicon macOS, and Windows x64, and Python 3.10-3.12 on Intel macOS, where it installs tensorflow 2.16 (the last Intel-macOS release, which needs numpy below 2). Elsewhere (Python 3.14, for one) the extra installs Zarr only, and `resurrector doctor` says why RLDS is unavailable.
 
-**How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips test exports through `LeRobotDataset` and checks frame values against the source bag.
+**How LeRobot export maps a bag.** Every topic is resampled onto a uniform `fps` grid (default 30, set with `--downsample`) using the latest sample at or before each frame time, so no future data leaks into a frame. One exception, logged as a warning: a field missing from a topic's first frames (a driver that starts publishing JointState velocity late) holds its first value in those frames, since NaN would make LeRobot's statistics for that field NaN. The grid spans only the window where all selected topics overlap. Numeric fields become `observation.state`, image topics become `observation.images.<topic>` videos, and `--action-topic /cmd_vel` routes a topic into `action`. `--task "pick up the cube"` sets the task label. A multi-bag dataset version exports one episode per bag. CI round-trips test exports through `LeRobotDataset` and checks frame values against the source bag.
 
 ```bash
 resurrector export run.mcap --preset lerobot -o ./pick_cube \
@@ -611,7 +611,7 @@ resurrector list --after 2025-01-01 --has-topic /camera/rgb --min-health 70
 
 # Export
 resurrector export experiment.mcap \
-  --topics /imu/data /joint_states \
+  --topics /imu/data --topics /joint_states \
   --format parquet \
   --sync nearest \
   --output ./training_data/
@@ -620,7 +620,7 @@ resurrector export experiment.mcap \
 resurrector diff bag1.mcap bag2.mcap
 
 # Tag bags for organization
-resurrector tag experiment.mcap --add "task:pick_and_place" "robot:digit"
+resurrector tag experiment.mcap --add "task:pick_and_place" --add "robot:digit"
 
 # Watch a directory for new bags (auto-index on arrival)
 resurrector watch /path/to/recording/dir/ --interval 5
@@ -746,7 +746,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (348 tests, ~30 seconds)
+# Run tests (about 1,700; the slow memory-regression tier runs with -m slow)
 pytest tests/ -v
 
 # Build dashboard frontend
@@ -756,26 +756,26 @@ npm install && npm run build
 
 ### Test Coverage
 
-| Test Suite | Tests | Covers |
-|-----------|-------|--------|
-| test_integration | 5 | Full pipeline: scan → index → health → sync → export |
-| test_cli | 14 | All CLI commands including quicklook, watch, dataset |
-| test_api | 13 | FastAPI endpoints: CRUD, health, sync, search, export |
-| test_dataset | 14 | Dataset manager: create, version, export, manifest |
-| test_bag_frame | 13 | BagFrame API, time slicing, conversions |
-| test_ingest | 17 | Scanner, parser, indexer |
-| test_sync | 6 | All 3 sync methods |
-| test_health | 7 | Health checks, recommendations, caching |
-| test_health_config | 5 | Configurable thresholds, edge cases |
-| test_export | 8 | All export formats, downsampling |
-| test_topic_groups | 12 | Topic classification, custom patterns |
-| test_compressed_image | 7 | CompressedImage CDR parsing, decoding, iter_images |
-| test_export_frames | 5 | PNG/JPEG sequences, MP4 video, subsampling |
-| test_vision | 8 | FrameSampler, CLIPEmbedder, FrameSearchEngine (auto-skip) |
-| test_bridge_protocol | 6 | PlotJuggler encoding, key format, list expansion |
-| test_bridge_buffer | 7 | Ring buffer put/get, overflow, multi-consumer, threading |
-| test_bridge_playback | 11 | Playback engine: play, pause, resume, speed re-anchoring, topic filter, behind-schedule yielding, `--loop` with an empty filter, replay after a final-message pause |
-| test_bridge_server | 6 | REST API: topics, metadata, status, playback controls |
+| Test Suite | Covers |
+|-----------|--------|
+| test_integration | Full pipeline: scan → index → health → sync → export |
+| test_cli | All CLI commands including quicklook, watch, dataset |
+| test_api | FastAPI endpoints: CRUD, health, sync, search, export |
+| test_dataset | Dataset manager: create, version, export, manifest |
+| test_bag_frame | BagFrame API, time slicing, conversions |
+| test_ingest | Scanner, parser, indexer |
+| test_sync | All 3 sync methods |
+| test_health | Health checks, recommendations, caching |
+| test_health_config | Configurable thresholds, edge cases |
+| test_export | All export formats, downsampling |
+| test_topic_groups | Topic classification, custom patterns |
+| test_compressed_image | CompressedImage CDR parsing, decoding, iter_images |
+| test_export_frames | PNG/JPEG sequences, MP4 video, subsampling |
+| test_vision | FrameSampler, CLIPEmbedder, FrameSearchEngine (auto-skip) |
+| test_bridge_protocol | PlotJuggler encoding, key format, list expansion |
+| test_bridge_buffer | Ring buffer put/get, overflow, multi-consumer, threading |
+| test_bridge_playback | Playback engine: play, pause, resume, speed re-anchoring, topic filter, behind-schedule yielding, `--loop` with an empty filter, replay after a final-message pause |
+| test_bridge_server | REST API: topics, metadata, status, playback controls |
 
 ## Contributing
 

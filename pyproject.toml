@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rosbag-resurrector"
-version = "0.8.5"
+version = "0.8.6"
 description = "Stop letting your rosbag data rot. A pandas-like analysis tool for robotics bag files — no ROS install required."
 readme = "README.md"
 license = "MIT"
@@ -119,7 +119,7 @@ include = ["resurrector*"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 # Exclude `slow` from the default pytest run so PRs stay fast.
-# Run them via `pytest -m slow` (CI's wheel-smoke job does this).
+# Run them via `pytest -m slow` (CI's memory-regression job does this).
 addopts = "-m 'not slow'"
 markers = [
     "smoke: end-to-end smoke tests intended for the wheel-install CI job",

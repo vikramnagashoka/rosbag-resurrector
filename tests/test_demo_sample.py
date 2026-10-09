@@ -127,6 +127,16 @@ class TestStaleSampleReason:
                            BagConfig(duration_sec=0.5, include_compressed=False))
         assert stale_sample_reason(out) is None
 
+    def test_written_by_generator(self, tmp_path):
+        from resurrector.demo.sample_bag import written_by_generator
+        from resurrector.demo.scene_bag import generate_scene_bag
+
+        assert written_by_generator(generate_bag(tmp_path / "d.mcap", BagConfig(duration_sec=0.5)))
+        assert not written_by_generator(generate_scene_bag(tmp_path / "scene.mcap"))
+        (tmp_path / "notes.mcap").write_text("not an mcap")
+        assert not written_by_generator(tmp_path / "notes.mcap")
+        assert not written_by_generator(tmp_path / "missing.mcap")
+
     def test_files_from_other_writers_are_never_flagged(self, tmp_path):
         """A user's own bag (or any non-MCAP file) at the -o path must not
         be overwritten, even when it is broken."""
@@ -169,6 +179,33 @@ class TestDemoCommand:
         assert result.exit_code == 0, result.output
         assert "already exists" in result.output and "Regenerating" not in result.output
         assert out.read_bytes() == before
+
+    def test_bag_from_another_writer_is_left_alone(self, tmp_path):
+        """Would catch: answering `resurrector demo -o <their recording>`
+        with "Sample already exists ... (use --force to regenerate)", which
+        reads as advice to run --force and replace the recording."""
+        from resurrector.demo.scene_bag import generate_scene_bag
+
+        theirs = generate_scene_bag(tmp_path / "robot_run.mcap")
+        before = theirs.read_bytes()
+        result = self._demo("-o", str(theirs), "--full")
+        assert result.exit_code == 1, result.output
+        flat = " ".join(result.output.split())
+        assert "isn't a `resurrector demo` sample, so it was left as is" in flat
+        assert "already exists" not in flat and "to regenerate" not in flat
+        # Stops there: no walkthrough on their bag, nothing written beside it.
+        assert "Opening with BagFrame" not in flat
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["robot_run.mcap"]
+        assert theirs.read_bytes() == before
+
+    def test_non_bag_file_gets_one_line_not_a_traceback(self, tmp_path):
+        notes = tmp_path / "notes.mcap"
+        notes.write_text("my notes")
+        result = self._demo("-o", str(notes))
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert "left as is" in result.output
+        assert notes.read_text() == "my notes"
 
     def test_missing_pillow_prints_hint_not_traceback(self, tmp_path, monkeypatch):
         monkeypatch.setitem(sys.modules, "PIL", None)
