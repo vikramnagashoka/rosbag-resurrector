@@ -32,9 +32,10 @@ Parquet fix their columns from the first chunk: a column a later chunk
 lacks is written empty / null there, a column that first appears later
 is reported and left out, and a Parquet column whose later values can't
 be stored losslessly as the first chunk's type is reported and written
-as null from that chunk on. Reported columns raise :class:`ExportError`
-once the file is written; HDF5, Zarr and NumPy leave them out of the
-file.
+as null from that chunk on. No writer turns text into numbers or numbers
+into text. RLDS keeps one feature type per column (see
+:func:`_stream_rlds`). Reported columns raise :class:`ExportError` once
+the file is written; HDF5, Zarr and NumPy leave them out of the file.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, Sequenc
 import numpy as np
 import polars as pl
 
-from resurrector.core.exceptions import LargeTopicError
+from resurrector.core.exceptions import LargeTopicError, ResurrectorError
 
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import BagFrame
@@ -443,23 +444,83 @@ def apply_topic_filter(
     )
 
 
+# ExportColumnFailure.kind: what went wrong, which decides what
+# ExportError says about the column (see ExportError).
+FAILURE_UNSTORABLE = "unstorable"
+FAILURE_LATE_COLUMN = "late_column"
+FAILURE_UNTYPED = "untyped_first_chunk"
+FAILURE_TYPE_CHANGE = "type_change"
+FAILURE_NO_MISSING_VALUE = "no_missing_value"
+FAILURE_OTHER = "other"
+
+_FORMAT_BY_SUFFIX = {
+    ".parquet": "parquet", ".csv": "csv", ".h5": "hdf5", ".zarr": "zarr",
+    ".npz": "numpy", ".tfrecord": "rlds",
+}
+
+
 @dataclass
 class ExportColumnFailure:
-    """One column that failed to serialize during export."""
+    """One column that failed to serialize during export.
+
+    ``kind`` is one of the ``FAILURE_*`` constants (see
+    :class:`ExportError` for what each means per format); ``"other"``
+    when nothing more specific applies.
+    """
     column: str
     error_type: str
     message: str
+    kind: str = FAILURE_OTHER
 
 
-class ExportError(Exception):
-    """Raised when the chosen format can't store some columns.
+class _ColumnError(Exception):
+    """A column conversion failure that knows its reported error type
+    and :class:`ExportColumnFailure` kind."""
 
-    The failed columns are not in the output file; every other column is
-    complete. Inspect ``failures`` to see which columns failed and why.
+    def __init__(self, error_type: str, kind: str, message: str):
+        super().__init__(message)
+        self.error_type = error_type
+        self.kind = kind
 
-    The message names each column with its reason, says those columns
-    are not in the file and, for HDF5, Zarr and ``.npz``, points at
-    Parquet, so the CLI and the dashboard show ``str(error)`` as it is.
+
+def _column_failure(col: str, e: Exception, kind: str = FAILURE_OTHER) -> ExportColumnFailure:
+    """The failure record for ``e``; ``kind`` unless ``e`` carries its own."""
+    if isinstance(e, _ColumnError):
+        return ExportColumnFailure(col, e.error_type, str(e), e.kind)
+    return ExportColumnFailure(col, type(e).__name__, str(e), kind)
+
+
+class ExportError(ResurrectorError):
+    """Raised once a file is written when the chosen format couldn't
+    write some columns. Every column not in ``failures`` is complete.
+
+    What happened to a failed column depends on the format and on the
+    failure's ``kind``:
+
+    - HDF5, Zarr, ``.npz``: the column is removed from the file.
+      ``unstorable``: no numeric or string array holds it (lists,
+      structs, binary; datetimes in HDF5), and Parquet would store it.
+      ``type_change``: a later chunk's values don't fit the dtype an
+      earlier chunk set. ``no_missing_value``: rows where it is absent or
+      null need a filler its dtype doesn't have (``timestamp_ns``,
+      datetimes).
+    - CSV: ``late_column``, first seen after the header was written from
+      the first chunk; it is not in the file. HDF5 and Zarr add such
+      columns.
+    - Parquet: ``late_column`` as for CSV. ``untyped_first_chunk``: null
+      in all of the first chunk, so it stays in the file as all null
+      (HDF5 and Zarr keep its later values). ``type_change``: it stays in
+      the file, null from the failing chunk on.
+    - RLDS: ``type_change``; the feature is left out of the steps from
+      the failing chunk on.
+
+    The message lists each column with its reason, says which columns
+    are not in the file and which are in it without some values, that
+    the export stopped at this file, and which format would keep the
+    columns where one would: Parquet for ``unstorable``, HDF5 or Zarr for
+    ``late_column`` and ``untyped_first_chunk``. It never suggests the
+    format the file already is. The CLI and the dashboard show
+    ``str(error)`` as it is.
     """
 
     def __init__(self, failures: list[ExportColumnFailure], output: Path):
@@ -473,27 +534,79 @@ class ExportError(Exception):
         message = (
             f"{len(failures)} column(s) could not be written to {output}:\n"
             f"{reasons}\n"
-            "These columns are not in that file; every other column is "
-            "complete. The export stopped there, so any later topics, splits "
-            "or bags were not exported."
+            f"{self._file_sentence()} The export stopped there, so any later "
+            "topics, splits or bags were not exported."
         )
-        if self.suggests_parquet:
-            message += (
-                " To keep a column this format can't store, export to "
-                "Parquet, which stores every column type."
-            )
+        for advice in self._advice():
+            message += " " + advice
         super().__init__(message)
 
     @property
-    def suggests_parquet(self) -> bool:
-        """True when the message suggests Parquet: the failed file is
-        HDF5, Zarr or ``.npz``, which can't store every column type.
+    def format(self) -> str | None:
+        """The failed file's export format (``"parquet"``, ``"hdf5"``,
+        ...), from its suffix; None if the suffix isn't an export's."""
+        return _FORMAT_BY_SUFFIX.get(Path(self.output).suffix)
 
-        CSV and Parquet fix their columns from the first chunk, so their
-        failures are columns that appear or change type later, which
-        exporting to Parquet doesn't fix.
-        """
-        return Path(self.output).suffix in (".h5", ".zarr", ".npz")
+    def _kept(self, failure: ExportColumnFailure) -> bool:
+        """True if the failed column is still in the file, without some
+        of its values."""
+        if self.format == "parquet":
+            return failure.kind in (FAILURE_UNTYPED, FAILURE_TYPE_CHANGE)
+        return self.format == "rlds" and failure.kind == FAILURE_TYPE_CHANGE
+
+    def _file_sentence(self) -> str:
+        kept = [f.column for f in self.failures if self._kept(f)]
+        absent = [f.column for f in self.failures if not self._kept(f)]
+        if not kept:
+            return "These columns are not in that file; every other column is complete."
+        if not absent:
+            return (
+                "These columns are in that file but have no values where the "
+                "reasons above say; every other column is complete."
+            )
+        return (
+            f"{_names(absent)} not in that file, and {_names(kept)} in it but "
+            "without values where the reasons above say; every other column "
+            "is complete."
+        )
+
+    def _advice(self) -> list[str]:
+        advice = []
+        if self.suggests_parquet:
+            advice.append(
+                "To keep a column this format can't store, export to "
+                "Parquet, which stores every column type."
+            )
+        kinds = {f.kind for f in self.failures}
+        if kinds & {FAILURE_LATE_COLUMN, FAILURE_UNTYPED} and self.format not in ("hdf5", "zarr"):
+            when = (
+                "first appears, or first has values," if FAILURE_UNTYPED in kinds
+                else "first appears"
+            )
+            advice.append(
+                f"To keep a column that {when} after the first chunk, export "
+                "to HDF5 or Zarr, which fill the rows before it with missing "
+                "values."
+            )
+        return advice
+
+    @property
+    def suggests_parquet(self) -> bool:
+        """True when the message suggests Parquet: some column failed
+        because the format can't store its type (``unstorable``), and the
+        file isn't Parquet already. Parquet doesn't fix the other kinds:
+        it can't add a late column either, and it fails the same type
+        changes."""
+        return self.format != "parquet" and any(
+            f.kind == FAILURE_UNSTORABLE for f in self.failures
+        )
+
+
+def _names(columns: list[str]) -> str:
+    """``"a is"`` / ``"a and b are"`` / ``"a, b and c are"``."""
+    if len(columns) == 1:
+        return f"{columns[0]} is"
+    return f"{', '.join(columns[:-1])} and {columns[-1]} are"
 
 
 @dataclass
@@ -592,10 +705,14 @@ class Exporter:
                 engine (topics over ``LARGE_TOPIC_THRESHOLD``). Raised
                 mid-stream, so ``synced.<ext>`` may already be partly
                 written.
-            ExportError: Some columns couldn't be written (e.g. list,
-                struct or binary columns, or a column that first
-                appears after a CSV or Parquet file's columns were set
-                by its first chunk); the other columns are complete.
+            ExportError: The chosen format couldn't write some columns
+                (list, struct or binary columns in HDF5, Zarr or NumPy; a
+                column that first appears after a CSV or Parquet file's
+                columns were set by its first chunk; a type change
+                between chunks). Raised once that file is written; its
+                other columns are complete, and later topics are not
+                written. See :class:`ExportError` for what each format
+                does with the failed columns.
         """
         require_export_dependencies(format)
         output_path = Path(output_dir)
@@ -929,6 +1046,7 @@ class _NumpyColumns:
                     f"{self._first_dtypes[col]} has no missing value in this "
                     f"format to fill them with"
                 ),
+                kind=FAILURE_NO_MISSING_VALUE,
             )
         return _repeat_rows(*missing, rows), None
 
@@ -952,16 +1070,14 @@ class _NumpyColumns:
                 return iter((arr,)), None
             missing = _missing_value(target)
             if missing is None:
-                raise ValueError(
+                raise _ColumnError("ValueError", FAILURE_NO_MISSING_VALUE, (
                     f"absent or null in its first {held} rows, and "
                     f"{self._first_dtypes[col]} has no missing value in this "
                     f"format to fill them with"
-                )
+                ))
             return _held_then(_repeat_rows(*missing, held), arr), None
         except Exception as e:
-            return iter(()), ExportColumnFailure(
-                column=col, error_type=type(e).__name__, message=str(e),
-            )
+            return iter(()), _column_failure(col, e)
 
     def never_typed(self) -> Iterator[tuple[str, Iterator[np.ndarray]]]:
         """Columns that were null or absent in every chunk, as float64 NaN
@@ -977,31 +1093,33 @@ class _NumpyColumns:
         if target is None:
             first = self._first_dtypes[col]
             if dtype != first:
-                raise TypeError(
+                raise _ColumnError("TypeError", FAILURE_TYPE_CHANGE, (
                     f"column is {dtype} in this chunk but was {first} in an "
                     f"earlier one"
-                )
+                ))
             arr = series.to_numpy()
             if arr.dtype == object:
-                raise TypeError(
+                raise _ColumnError("TypeError", FAILURE_UNSTORABLE, (
                     f"{dtype} columns can't be written as a numeric or string "
-                    f"array; export to Parquet to keep them"
-                )
+                    f"array"
+                ))
             return arr
         if target == pl.String:
             if not (_is_text(dtype) or dtype == pl.Null):
-                raise TypeError(
+                raise _ColumnError("TypeError", FAILURE_TYPE_CHANGE, (
                     f"column is {dtype} in this chunk but was written as "
                     f"{target} from an earlier one"
-                )
+                ))
             return series.cast(pl.String).fill_null("").to_numpy()
         if not (dtype.is_numeric() or dtype == pl.Boolean or dtype == pl.Null):
-            raise TypeError(
+            raise _ColumnError("TypeError", FAILURE_TYPE_CHANGE, (
                 f"column is {dtype} in this chunk but was written as "
                 f"{target} from an earlier one"
-            )
+            ))
         if target == pl.Int64 and series.null_count():
-            raise ValueError(f"{col} has missing values")
+            raise _ColumnError(
+                "ValueError", FAILURE_NO_MISSING_VALUE, f"{col} has missing values",
+            )
         if (
             dtype.is_integer() and target == pl.Float64
             and col not in self._warned
@@ -1056,9 +1174,7 @@ def _write_numpy_columns(
                 append(col, arr, columns.is_text(col))
                 lengths[col] = lengths.get(col, 0) + len(arr)
         except Exception as e:
-            fail(ExportColumnFailure(
-                column=col, error_type=type(e).__name__, message=str(e),
-            ))
+            fail(_append_failure(col, e))
 
     for chunk in chunks:
         present = set(chunk.columns)
@@ -1089,9 +1205,7 @@ def _write_numpy_columns(
                 append(col, arr, columns.is_text(col))
                 lengths[col] = 0
             except Exception as e:
-                fail(ExportColumnFailure(
-                    column=col, error_type=type(e).__name__, message=str(e),
-                ))
+                fail(_append_failure(col, e))
     for col, rows in lengths.items():
         if col not in failed and rows != rows_written:
             fail(ExportColumnFailure(
@@ -1099,6 +1213,15 @@ def _write_numpy_columns(
                 message=f"{rows} rows written where the export has {rows_written}",
             ))
     return rows_written, failures
+
+
+def _append_failure(col: str, e: Exception) -> ExportColumnFailure:
+    # The array library refusing an array's dtype (h5py has no datetime
+    # type) raises TypeError; anything else (a full disk) isn't the
+    # column type's fault.
+    return _column_failure(
+        col, e, FAILURE_UNSTORABLE if isinstance(e, TypeError) else FAILURE_OTHER,
+    )
 
 
 def _is_text(dtype) -> bool:
@@ -1175,9 +1298,9 @@ class _FixedColumns:
         self.failures: list[ExportColumnFailure] = []
         self.failed: set[str] = set()
 
-    def fail(self, col: str, error_type: str, message: str) -> None:
+    def fail(self, col: str, error_type: str, kind: str, message: str) -> None:
         self.failures.append(ExportColumnFailure(
-            column=col, error_type=error_type, message=message,
+            column=col, error_type=error_type, message=message, kind=kind,
         ))
         self.failed.add(col)
 
@@ -1189,7 +1312,7 @@ class _FixedColumns:
         for col in chunk_columns:
             if col not in self._names and col not in self.failed:
                 self.fail(
-                    col, "ValueError",
+                    col, "ValueError", FAILURE_LATE_COLUMN,
                     f"first appears at row {start}, after the {self._file_kind} "
                     f"took its columns from the first chunk, so it is not in "
                     f"the file",
@@ -1202,7 +1325,10 @@ def _stream_parquet(chunks: Iterable, output_path: Path, name: str) -> ExportRes
     The schema comes from the first chunk (see :class:`_FixedColumns`).
     A later chunk whose column has another type is cast to the file's
     type only when every value survives the cast; otherwise the column
-    is reported and written as null from that chunk on.
+    is reported and written as null from that chunk on. Text and
+    non-text never convert into each other (Int64 values in a String
+    column, or "1.5" in a Float64 one, are reported), the same rule the
+    HDF5, Zarr and ``.npz`` writers apply.
     """
     import pyarrow.parquet as pq
 
@@ -1245,16 +1371,29 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
         if spec.name in present and spec.name not in fixed.failed:
             column = table.column(spec.name)
             if not column.type.equals(spec.type):
-                cast = _lossless_cast(column, spec.type)
+                text_mismatch = (
+                    not pa.types.is_null(spec.type)
+                    and not pa.types.is_null(column.type)
+                    and _arrow_is_text(spec.type) != _arrow_is_text(column.type)
+                )
+                cast = None if text_mismatch else _lossless_cast(column, spec.type)
                 if cast is None and pa.types.is_null(spec.type):
-                    fixed.fail(spec.name, "TypeError", (
+                    fixed.fail(spec.name, "TypeError", FAILURE_UNTYPED, (
                         f"has no values in the first chunk, which set the "
                         f"file's columns, so the file stores it as all null "
                         f"and its {column.type} values from row {start} on "
                         f"are not written"
                     ))
+                elif text_mismatch:
+                    fixed.fail(spec.name, "TypeError", FAILURE_TYPE_CHANGE, (
+                        f"{column.type} values from row {start} on can't go "
+                        f"in the file's {spec.type} column (its type comes "
+                        f"from the first chunk, and text and non-text values "
+                        f"are never converted into each other), so it is "
+                        f"null from row {start} on"
+                    ))
                 elif cast is None:
-                    fixed.fail(spec.name, "TypeError", (
+                    fixed.fail(spec.name, "TypeError", FAILURE_TYPE_CHANGE, (
                         f"{column.type} values from row {start} on can't be "
                         f"stored losslessly as the file's {spec.type} column "
                         f"(its type comes from the first chunk), so it is "
@@ -1263,6 +1402,20 @@ def _fit_arrow_table(table, schema, fixed: _FixedColumns, start: int):
                 column = cast
         arrays.append(column if column is not None else pa.nulls(table.num_rows, spec.type))
     return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _arrow_is_text(arrow_type) -> bool:
+    """True for Arrow string types, and dictionaries of them (polars
+    Categorical / Enum)."""
+    import pyarrow as pa
+
+    if pa.types.is_dictionary(arrow_type):
+        arrow_type = arrow_type.value_type
+    is_view = getattr(pa.types, "is_string_view", lambda t: False)
+    return (
+        pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type)
+        or is_view(arrow_type)
+    )
 
 
 def _lossless_cast(column, target):
@@ -1463,14 +1616,35 @@ def _stream_rlds(
 
     Each chunk becomes a contiguous run of steps inside a single episode.
     Per-step features:
-        observation: dict of all numeric columns (excluding timestamp_ns)
-        action: empty dict (rosbag has no explicit action signal — users
-                can post-process to extract actions from /cmd_vel etc.)
+        step/timestamp_ns: the row's timestamp (int64)
+        step/observation/<column>: every other column
         reward: 0.0
         discount: 1.0
         is_first: True for first step
         is_last: True for last step
         is_terminal: True for last step
+    There is no action feature: a bag has no explicit action signal
+    (users can post-process one from /cmd_vel etc.).
+
+    Each column keeps one feature type in every step, fixed by its polars
+    dtype in the first chunk where that isn't Null (all null), never by
+    a row's Python value:
+
+    - Float32 / Float64 -> ``float_list``; a null is NaN.
+    - Integers and Booleans -> ``int64_list`` (Booleans as 0 / 1). int64
+      has no missing value, so a null leaves the feature out of that step.
+    - String, Categorical, Enum -> ``bytes_list`` (UTF-8); a null is ``b""``.
+    - Binary -> ``bytes_list`` as is; a null is ``b""``.
+    - Anything else (lists, structs, datetimes) -> ``bytes_list`` of the
+      value's text; a null is ``b""``.
+
+    A column a chunk lacks is null in that chunk's steps. Steps written
+    before a column's type is known (it first appears in a later chunk,
+    or every value so far was null) don't carry it. A later chunk whose
+    values don't fit the column's feature (Int64 in a String column, 2.5
+    in an int64 feature) leaves the feature out of every step from that
+    chunk on, and is reported with :class:`ExportError` once the file is
+    written.
 
     Output: <output_path>/<name>.tfrecord
 
@@ -1492,47 +1666,157 @@ def _stream_rlds(
     output_path.mkdir(parents=True, exist_ok=True)
     filepath = output_path / f"{name}.tfrecord"
     rows_written = 0
-    columns: list[str] = []
+    features = _RldsFeatures(tf)
 
-    def _to_feature(value) -> tf.train.Feature:
-        if isinstance(value, (int, bool)):
-            return tf.train.Feature(int64_list=tf.train.Int64List(value=[int(value)]))
-        if isinstance(value, float):
-            return tf.train.Feature(float_list=tf.train.FloatList(value=[float(value)]))
-        if isinstance(value, str):
-            return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value.encode("utf-8")]))
-        # Fallback: stringify
-        return tf.train.Feature(bytes_list=tf.train.BytesList(value=[str(value).encode("utf-8")]))
+    def flag(value: bool):
+        return tf.train.Feature(int64_list=tf.train.Int64List(value=[int(value)]))
+
+    reward = tf.train.Feature(float_list=tf.train.FloatList(value=[0.0]))
+    discount = tf.train.Feature(float_list=tf.train.FloatList(value=[1.0]))
 
     with tf.io.TFRecordWriter(str(filepath)) as writer:
         for chunk, is_final_chunk in _with_final_flag(chunks):
-            if not columns:
-                columns = list(chunk.columns)
-            chunk_dicts = chunk.to_dicts()
-            last_row_idx = len(chunk_dicts) - 1
-            for row_idx, row in enumerate(chunk_dicts):
-                is_first = rows_written + row_idx == 0
+            columns = features.chunk_columns(chunk, rows_written)
+            last_row_idx = chunk.height - 1
+            for row_idx in range(chunk.height):
                 is_last = is_final_chunk and row_idx == last_row_idx
-
-                feature_map: dict[str, tf.train.Feature] = {}
-                for col, val in row.items():
-                    if col == "timestamp_ns":
-                        feature_map["step/timestamp_ns"] = _to_feature(val)
-                    else:
-                        feature_map[f"step/observation/{col}"] = _to_feature(val)
-
-                feature_map["step/reward"] = _to_feature(0.0)
-                feature_map["step/discount"] = _to_feature(1.0)
-                feature_map["step/is_first"] = _to_feature(is_first)
-                feature_map["step/is_last"] = _to_feature(is_last)
-                feature_map["step/is_terminal"] = _to_feature(is_last)
+                feature_map = {}
+                for key, make, values in columns:
+                    value = values[row_idx]
+                    if value is not None:
+                        feature_map[key] = make(value)
+                feature_map["step/reward"] = reward
+                feature_map["step/discount"] = discount
+                feature_map["step/is_first"] = flag(rows_written + row_idx == 0)
+                feature_map["step/is_last"] = flag(is_last)
+                feature_map["step/is_terminal"] = flag(is_last)
 
                 example = tf.train.Example(features=tf.train.Features(feature=feature_map))
                 writer.write(example.SerializeToString())
             rows_written += chunk.height
 
     logger.info("Wrote RLDS TFRecord (%d steps) to %s", rows_written, filepath)
+    if features.failures:
+        raise ExportError(features.failures, filepath)
     return ExportResult(path=filepath, rows_written=rows_written)
+
+
+class _RldsFeatures:
+    """Per-column feature values for :func:`_stream_rlds`, each column
+    held to the one feature type its first typed chunk set (see that
+    function's docstring for the rules)."""
+
+    _LIST_NAMES = {
+        "float": "float_list", "int": "int64_list", "text": "bytes_list",
+        "binary": "bytes_list", "repr": "bytes_list",
+    }
+
+    def __init__(self, tf) -> None:
+        train = tf.train
+        self._makers = {
+            "float": lambda v: train.Feature(float_list=train.FloatList(value=[v])),
+            "int": lambda v: train.Feature(int64_list=train.Int64List(value=[v])),
+        }
+        for kind in ("text", "binary", "repr"):
+            self._makers[kind] = lambda v: train.Feature(bytes_list=train.BytesList(value=[v]))
+        self._kinds: dict[str, str] = {}
+        self._first_dtypes: dict[str, pl.DataType] = {}
+        self._failed: set[str] = set()
+        self.failures: list[ExportColumnFailure] = []
+
+    @staticmethod
+    def _kind_of(dtype) -> str | None:
+        if dtype == pl.Null:
+            return None
+        if dtype.is_float():
+            return "float"
+        if dtype.is_integer() or dtype == pl.Boolean:
+            return "int"
+        if _is_text(dtype):
+            return "text"
+        if dtype == pl.Binary:
+            return "binary"
+        return "repr"
+
+    def chunk_columns(self, chunk, start: int) -> list[tuple[str, Callable, list]]:
+        """``(feature key, value -> Feature, one value per row)`` for every
+        column to write in ``chunk``, whose first row is step ``start``.
+        A None value means the step leaves the feature out."""
+        out = []
+        for col in chunk.columns:
+            if col in self._failed:
+                continue
+            series = chunk[col]
+            if col not in self._kinds:
+                kind = self._kind_of(series.dtype)
+                if kind is None:
+                    continue
+                self._kinds[col] = kind
+                self._first_dtypes[col] = series.dtype
+            try:
+                values = self._values(self._kinds[col], series)
+            except _ColumnError as e:
+                kind = self._kinds[col]
+                self._failed.add(col)
+                self.failures.append(ExportColumnFailure(
+                    column=col, error_type=e.error_type, kind=e.kind,
+                    message=(
+                        f"{series.dtype} values from row {start} on don't fit "
+                        f"its {self._LIST_NAMES[kind]} feature (set by "
+                        f"{self._first_dtypes[col]} values in an earlier "
+                        f"chunk), so the steps from row {start} on leave it out"
+                    ),
+                ))
+                continue
+            out.append((_rlds_key(col), self._makers[self._kinds[col]], values))
+        absent = [
+            (col, kind) for col, kind in self._kinds.items()
+            if col not in self._failed and col not in chunk.columns
+        ]
+        if absent:
+            nulls = pl.Series("absent", [None] * chunk.height, dtype=pl.Null)
+            for col, kind in absent:
+                out.append((_rlds_key(col), self._makers[kind], self._values(kind, nulls)))
+        return out
+
+    @staticmethod
+    def _values(kind: str, series: "pl.Series") -> list:
+        """``series`` as one feature value per row (None: leave it out),
+        or :class:`_ColumnError` if it doesn't fit ``kind``."""
+        dtype = series.dtype
+        if kind == "repr":
+            return [b"" if v is None else str(v).encode("utf-8") for v in series.to_list()]
+        text = _is_text(dtype)
+        if kind in ("float", "int"):
+            if text or not (dtype.is_numeric() or dtype in (pl.Boolean, pl.Null)):
+                raise _ColumnError("TypeError", FAILURE_TYPE_CHANGE, "")
+            if kind == "float":
+                return series.cast(pl.Float64).fill_null(float("nan")).to_list()
+            ints = _lossless_int64(series)
+            if ints is None:
+                raise _ColumnError("ValueError", FAILURE_TYPE_CHANGE, "")
+            return ints.to_list()
+        if kind == "binary" and dtype in (pl.Binary, pl.Null):
+            return series.cast(pl.Binary).fill_null(b"").to_list()
+        if text or dtype == pl.Null:
+            return [v.encode("utf-8") for v in series.cast(pl.String).fill_null("").to_list()]
+        raise _ColumnError("TypeError", FAILURE_TYPE_CHANGE, "")
+
+
+def _rlds_key(col: str) -> str:
+    return "step/timestamp_ns" if col == "timestamp_ns" else f"step/observation/{col}"
+
+
+def _lossless_int64(series: "pl.Series") -> "pl.Series | None":
+    """``series`` as Int64, or None if a value would change (a fraction,
+    or an unsigned value past int64)."""
+    try:
+        ints = series.cast(pl.Int64, strict=True)
+    except Exception:
+        return None
+    if series.dtype.is_float() and not ints.cast(series.dtype).equals(series):
+        return None
+    return ints
 
 
 def _stream_zarr(chunks: Iterable, output_path: Path, name: str) -> ExportResult:

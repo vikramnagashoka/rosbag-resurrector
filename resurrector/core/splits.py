@@ -98,7 +98,8 @@ def split_export(
         strategy: ``"time"`` (default), ``"random"``, or ``"stratified"``.
         format / sync / sync_method / downsample_hz: Forwarded to each
             sub-export's :meth:`Exporter.export` call. Same shape as
-            :meth:`BagFrame.export`.
+            :meth:`BagFrame.export`. The ``"random"`` strategy writes
+            Parquet without syncing or downsampling, whatever these say.
 
     Returns:
         ``Path`` to ``output`` (same as the single-export case, except the
@@ -208,9 +209,10 @@ def _split_export_random(
 
     For v0.5.0 this is implemented at row granularity per-topic by
     materializing each topic, shuffling the index, and writing per-split
-    parquet files. Memory is bounded by topic size, NOT chunk size — the
-    random strategy is fundamentally non-streaming because we have to
-    decide each row's destination up front.
+    parquet files (``format``, ``sync``, ``sync_method`` and
+    ``downsample_hz`` are not applied). Memory is bounded by topic size,
+    NOT chunk size — the random strategy is fundamentally non-streaming
+    because we have to decide each row's destination up front.
 
     For very large topics, prefer ``strategy="time"`` (which IS streaming).
     """
@@ -247,7 +249,9 @@ def _split_export_random(
                 chunks_full.append(chunk)
         if not chunks_full:
             continue
-        full_df = pl.concat(chunks_full)
+        # A topic's columns can change between chunks; combine them the
+        # way TopicView.to_polars does.
+        full_df = pl.concat(chunks_full, how="diagonal_relaxed")
         n_rows = full_df.height
         # Assign each row to a split label
         random_vals = rng.random(n_rows)

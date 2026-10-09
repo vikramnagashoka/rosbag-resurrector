@@ -30,7 +30,11 @@ from typer.testing import CliRunner
 import resurrector.core.export as export_mod
 from resurrector.cli.main import app as cli_app
 from resurrector.core.dataset import BagRef, DatasetManager
-from resurrector.core.export import ExportColumnFailure, ExportError
+from resurrector.core.export import (
+    FAILURE_UNSTORABLE,
+    ExportColumnFailure,
+    ExportError,
+)
 from resurrector.demo.sample_bag import BagConfig, generate_bag
 from resurrector.ingest.indexer import BagIndex
 from resurrector.ingest.parser import parse_bag
@@ -46,8 +50,9 @@ CSV_FAILURES = [
 ]
 H5_FAILURES = [
     ExportColumnFailure(
-        column="status", error_type="TypeError",
-        message="column is String in this chunk but was written as Float64 from an earlier one",
+        column="points", error_type="TypeError",
+        message="List(Float64) columns can't be written as a numeric or string array",
+        kind=FAILURE_UNSTORABLE,
     ),
 ]
 FAILURES = {"csv": CSV_FAILURES, "hdf5": H5_FAILURES}
@@ -151,11 +156,12 @@ class TestMessage:
 
     @pytest.mark.parametrize(("name", "suggests"), [
         ("imu_data.h5", True), ("imu_data.zarr", True), ("imu_data.npz", True),
-        ("imu_data.csv", False), ("imu_data.parquet", False),
+        ("imu_data.parquet", False),
     ])
-    def test_parquet_suggested_only_for_array_formats(self, name, suggests):
-        """Would catch: telling a user whose Parquet (or CSV) export failed
-        to export to Parquet."""
+    def test_parquet_suggested_for_an_unstorable_column_unless_parquet(self, name, suggests):
+        """Would catch: telling a user whose Parquet export failed to
+        export to Parquet. (Which kinds get which advice is in
+        test_export_error_advice.py.)"""
         out = Path("/data/out") / name
         err = ExportError(list(H5_FAILURES), out)
         assert err.suggests_parquet is suggests

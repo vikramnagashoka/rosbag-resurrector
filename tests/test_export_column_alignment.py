@@ -19,8 +19,8 @@ The rules now:
 - CSV, Parquet: the first chunk fixes the columns. A column a later chunk
   lacks is empty / null there; a column first seen later is reported
   (ExportError) and the rest of the file is still right. A Parquet column
-  whose later values can't be cast losslessly is reported and null from
-  there on.
+  whose later values can't be cast losslessly, or flip between text and
+  non-text, is reported and null from there on.
 - ``materialize_ipc_cache`` (one Arrow IPC file) combines chunks the way
   ``to_polars()`` does, rewriting the cached rows wider when a later
   chunk adds a column or widens a dtype.
@@ -190,8 +190,12 @@ def test_cli_export_keeps_joint_state_rows_aligned(joint_bag, tmp_path, monkeypa
         # The CSV header / Parquet schema came from the first chunk, which
         # had no velocity: reported, left out, everything else correct.
         assert result.exit_code == 1, result.output
+        flat = " ".join(result.output.split())
         assert "velocity.0" in result.output and "velocity.1" in result.output
-        assert f"first appears at row {JS_CHUNK}" in " ".join(result.output.split())
+        assert f"first appears at row {JS_CHUNK}" in flat
+        # Parquet can't add a late column either; HDF5 and Zarr can.
+        assert "export to Parquet" not in flat
+        assert "export to HDF5 or Zarr" in flat
         assert "velocity.0" not in cols and "velocity.1" not in cols
     else:
         assert result.exit_code == 0, result.output
@@ -217,6 +221,18 @@ def test_iter_chunks_keeps_a_field_first_seen_after_row_100(tmp_path):
     first = next(BagFrame(bag)["/joint_states"].iter_chunks(chunk_size=JS_CHUNK))
     assert first.height == JS_CHUNK
     assert first["velocity.0"].to_list() == [None] * 120 + [1000.0 + i for i in range(120, 150)]
+
+
+def test_iter_chunks_keeps_a_field_first_seen_after_row_1000(tmp_path):
+    """Would catch: a capped ``infer_schema_length`` (1000, say, to save
+    time): exports read 50 000-row chunks, so a field first seen past the
+    cap is dropped again."""
+    from tests.fixtures.changing_columns import write_joint_state_bag
+
+    bag = write_joint_state_bag(tmp_path / "js.mcap", 2100, range(1500, 2100), 2100)
+    [chunk] = list(BagFrame(bag)["/joint_states"].iter_chunks(chunk_size=5000))
+    assert chunk.height == 2100
+    assert chunk["velocity.0"].to_list() == [None] * 1500 + [1000.0 + i for i in range(1500, 2100)]
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +375,65 @@ def test_column_first_seen_later_is_back_filled(fmt, tmp_path):
     assert failures == []
     assert cols["x"] == [None, None, 3.0, 4.0]
     assert cols["s"] == ["", "", "c", ""]
+
+
+@pytest.mark.parametrize("fmt", ARRAY_FORMATS)
+def test_untyped_column_absent_from_a_chunk_stays_aligned(fmt, tmp_path):
+    """Would catch: a column still held (null in every row so far, so its
+    dtype is unknown) getting no held rows for a chunk that lacks it. It
+    then ends a row short and is failed and removed ("3 rows written
+    where the export has 4")."""
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [1, 2], "x": [None, None]}),
+        pl.DataFrame({"timestamp_ns": [3]}),
+        pl.DataFrame({"timestamp_ns": [4], "x": [1.0]}),
+    ]
+    cols, failures = _write(fmt, chunks, tmp_path)
+    assert failures == []
+    assert cols["timestamp_ns"] == [1, 2, 3, 4]
+    assert cols["x"] == [None, None, None, 1.0]
+
+
+def _dtype(fmt: str, path: Path, col: str) -> np.dtype:
+    if fmt == "hdf5":
+        import h5py
+        with h5py.File(path, "r") as f:
+            return f["t"][col].dtype
+    if fmt == "numpy":
+        with np.load(path) as data:
+            return data[col].dtype
+    import zarr
+    return zarr.open_group(str(path), mode="r")[col].dtype
+
+
+@pytest.mark.parametrize("fmt", ARRAY_FORMATS)
+@pytest.mark.parametrize("case", ["absent-later", "absent-first", "null-first"])
+def test_float32_fill_stays_float32(fmt, tmp_path, case):
+    """Would catch: Float32's missing value written as float64 NaN. HDF5
+    and Zarr then create a back-filled column as float64, and ``.npz``
+    promotes the joined column to float64."""
+    def f32(values):
+        return pl.Series("x", values, dtype=pl.Float32)
+
+    chunks = {
+        "absent-later": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "x": f32([1.0, 2.0])}),
+            pl.DataFrame({"timestamp_ns": [3]}),
+        ],
+        "absent-first": [
+            pl.DataFrame({"timestamp_ns": [1, 2]}),
+            pl.DataFrame({"timestamp_ns": [3], "x": f32([3.0])}),
+        ],
+        "null-first": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "x": [None, None]}),
+            pl.DataFrame({"timestamp_ns": [3], "x": f32([3.0])}),
+        ],
+    }[case]
+    cols, failures = _write(fmt, chunks, tmp_path)
+    assert failures == []
+    assert _dtype(fmt, tmp_path / f"t.{_EXT[fmt]}", "x") == np.float32
+    want = [1.0, 2.0, None] if case == "absent-later" else [None, None, 3.0]
+    assert cols["x"] == want
 
 
 @pytest.mark.parametrize("fmt", TABLE_FORMATS)
@@ -615,7 +690,8 @@ def test_zarr_chunk_shape_does_not_follow_the_typing_chunk(tmp_path, monkeypatch
     (pl.Series("v", [1], dtype=pl.Int64), pl.Series("v", [3.0]), [1, 3]),
     (pl.Series("v", [1.5]), pl.Series("v", [3], dtype=pl.Int64), [1.5, 3.0]),
     (pl.Series("v", [None], dtype=pl.Float64), pl.Series("v", [None], dtype=pl.Null), [None, None]),
-], ids=["int-then-whole-float", "float-then-int", "float-then-null"])
+    (pl.Series("v", ["a"]), pl.Series("v", ["b"], dtype=pl.Categorical), ["a", "b"]),
+], ids=["int-then-whole-float", "float-then-int", "float-then-null", "string-then-categorical"])
 def test_parquet_casts_a_later_type_when_lossless(tmp_path, first, later, want):
     chunks = [pl.DataFrame({"timestamp_ns": [1], "v": first}),
               pl.DataFrame({"timestamp_ns": [2], "v": later})]
@@ -630,13 +706,20 @@ def test_parquet_casts_a_later_type_when_lossless(tmp_path, first, later, want):
     (pl.Series("v", [True]), pl.Series("v", [3], dtype=pl.Int64)),
     (pl.Series("v", [None], dtype=pl.Null), pl.Series("v", [2.0])),
     (pl.Series("v", ["a"]), pl.Series("v", [[1, 2]])),
+    (pl.Series("v", ["a"]), pl.Series("v", [7], dtype=pl.Int64)),
+    (pl.Series("v", [1.5]), pl.Series("v", ["2.5"])),
+    (pl.Series("v", [True]), pl.Series("v", ["true"])),
 ], ids=["int-then-fraction", "float32-then-wider-float64", "bool-then-int",
-        "null-then-float", "string-then-list"])
+        "null-then-float", "string-then-list", "string-then-int",
+        "float-then-numeric-text", "bool-then-text"])
 def test_parquet_reports_a_lossy_later_type(tmp_path, first, later):
     """Would catch: pyarrow's ``safe`` cast letting 16777217.0 become
     16777216.0 or 3 become True, or a raw ArrowInvalid / schema-mismatch
-    error. The column is null from the failing chunk on (the next chunk,
-    which would cast fine, too); every other column is complete."""
+    error. Text and non-text never convert into each other, as in the
+    HDF5 / Zarr / npz writers: Int64 7 in a String column was stored as
+    "7", and "2.5" in a Float64 one as 2.5. The column is null from the
+    failing chunk on (the next chunk, which would cast fine, too); every
+    other column is complete."""
     chunks = [
         pl.DataFrame({"timestamp_ns": [1], "v": first, "y": [1.0]}),
         pl.DataFrame({"timestamp_ns": [2], "v": later, "y": [2.0]}),
