@@ -16,7 +16,7 @@ from pathlib import Path
 
 import polars as pl
 
-from _common import ensure_sample_bag, ensure_output_dir, header, section, sparkline
+from _common import ensure_bag, ensure_sample_bag, ensure_output_dir, header, section, sparkline
 
 from resurrector.core.cross_bag import align_bags_by_offset
 
@@ -27,11 +27,7 @@ def main() -> None:
 
     # Make a second bag so we have something to overlay.
     primary = ensure_sample_bag()
-    second = out / "second_run.mcap"
-    if not second.exists():
-        print(f"  Creating a second synthetic bag at {second}...")
-        from resurrector.demo.sample_bag import BagConfig, generate_bag
-        generate_bag(second, BagConfig(duration_sec=4.0))
+    second = ensure_bag(out / "second_run.mcap", duration_sec=4.0)
 
     print(f"  Bag A: {primary.name}")
     print(f"  Bag B: {second.name}")

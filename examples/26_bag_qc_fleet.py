@@ -24,10 +24,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from _common import ensure_output_dir, header, section
+from _common import ensure_output_dir, generate_bag_or_exit, header, section
 
 from resurrector.core.qc import run_qc
-from resurrector.demo.sample_bag import generate_bag, BagConfig
+from resurrector.demo.sample_bag import BagConfig
 
 
 def main() -> None:
@@ -42,7 +42,7 @@ def main() -> None:
         p = out / f"v06_qc_healthy_{i}.mcap"
         if p.exists():
             p.unlink()
-        generate_bag(p, BagConfig(duration_sec=0.5, imu_hz=200.0))
+        generate_bag_or_exit(p, BagConfig(duration_sec=0.5, imu_hz=200.0))
         bags.append(p)
         print(f"    {p.name}: 0.5s @ 200Hz IMU (healthy)")
 
@@ -50,7 +50,7 @@ def main() -> None:
     slow = out / "v06_qc_slow_imu.mcap"
     if slow.exists():
         slow.unlink()
-    generate_bag(slow, BagConfig(duration_sec=0.5, imu_hz=10.0))
+    generate_bag_or_exit(slow, BagConfig(duration_sec=0.5, imu_hz=10.0))
     bags.append(slow)
     print(f"    {slow.name}: 0.5s @ 10Hz IMU (anomalous!)")
 
@@ -58,7 +58,7 @@ def main() -> None:
     no_tf = out / "v06_qc_no_tf.mcap"
     if no_tf.exists():
         no_tf.unlink()
-    generate_bag(no_tf, BagConfig(duration_sec=0.5, include_tf=False))
+    generate_bag_or_exit(no_tf, BagConfig(duration_sec=0.5, include_tf=False))
     bags.append(no_tf)
     print(f"    {no_tf.name}: 0.5s, /tf missing (drift!)")
 

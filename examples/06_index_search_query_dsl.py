@@ -14,7 +14,7 @@ score, by message-count threshold.
 
 from __future__ import annotations
 
-from _common import ensure_output_dir, ensure_sample_bag, header, section
+from _common import ensure_bag, ensure_output_dir, ensure_sample_bag, header, section
 
 from resurrector import BagFrame
 from resurrector.ingest.indexer import BagIndex
@@ -37,10 +37,7 @@ def main() -> None:
 
     # Make a second bag so the index has more than one row to filter.
     primary = ensure_sample_bag()
-    second = out / "second_bag.mcap"
-    if not second.exists():
-        from resurrector.demo.sample_bag import BagConfig, generate_bag
-        generate_bag(second, BagConfig(duration_sec=4.0))
+    second = ensure_bag(out / "second_bag.mcap", duration_sec=4.0)
 
     # Use a scratch DB so we don't touch the user's real index.
     db_path = out / "scratch_index.db"

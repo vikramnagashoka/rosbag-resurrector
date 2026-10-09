@@ -9,6 +9,8 @@ that was crossed.
 
 from __future__ import annotations
 
+import os
+
 
 class ResurrectorError(Exception):
     """Base class for resurrector-specific errors.
@@ -124,6 +126,111 @@ class SyncSchemaDriftError(ResurrectorError):
             f"and can't hold these values. Pass engine='eager' if the topics "
             f"fit in memory (it unifies dtypes across the whole topic), or "
             f"leave {topic_name!r} out of the sync."
+        )
+
+
+class LeRobotFrameShapeError(ResurrectorError, ValueError):
+    """A camera topic's frames are a size LeRobot can't store faithfully.
+
+    Raised before the dataset directory is created. Each rule below is a
+    failure measured against LeRobot 0.6.1, not a guess:
+
+    - Height 1: LeRobot reads ``(1, W, 3)`` as single-channel, its image
+      writer drops every frame, and ``save_episode()`` dies with
+      FileNotFoundError. The 1x1 placeholder demo bags hit this.
+    - Height 3: read as channels-first ``(3, H, W)`` and transposed, so
+      image mode silently stores wrong pixels and video mode crashes.
+    - Video mode, height under ``min_height`` or width under 4: the
+      encoder refuses it. Width 4 to ``min_width - 1``: the encoder
+      never returns.
+
+    ``min_width`` / ``min_height`` are the video encoder's limits, measured
+    and defined in :mod:`resurrector.core.lerobot_export`. ``bag`` is the
+    source bag's path, named in the 1x1 hint when given.
+
+    Also a ``ValueError``, so callers that already map ValueError to a
+    clean error (the CLI, the dashboard's 400) keep doing so.
+    """
+
+    def __init__(
+        self,
+        topic: str,
+        shape: tuple[int, ...],
+        use_videos: bool,
+        *,
+        min_width: int,
+        min_height: int,
+        bag: str | os.PathLike | None = None,
+    ):
+        self.topic = topic
+        self.shape = tuple(shape)
+        self.use_videos = use_videos
+        self.bag = bag
+        h, w = self.shape[:2]
+        # What image mode does with this height; None when it stores it fine.
+        image_problem = {
+            1: "LeRobot reads a 1-pixel-high frame as single-channel and fails to write it",
+            3: "LeRobot reads a 3-pixel-high frame as channels-first and stores it transposed",
+        }.get(h)
+        alternative = ""
+        if use_videos:
+            need = (f"LeRobot's AV1 video encoder needs frames at least {min_width} "
+                    f"pixels wide and {min_height} pixels high")
+            if image_problem:
+                need += f", and PNG images can't hold them either: {image_problem}"
+            else:
+                alternative = (" PNG images take frames this size; to store them instead, "
+                               "use the Python API: export_lerobot(..., use_videos=False).")
+        else:
+            need = f"{image_problem}; PNG images need a height of 2 or at least 4 pixels"
+        hint = ""
+        if (h, w) == (1, 1):
+            where = f" ({bag})" if bag else ""
+            hint = (" 1x1 frames usually mean a demo bag written by an install without "
+                    f"Pillow: regenerate the bag{where}; for the default sample, run "
+                    "`resurrector demo`.")
+        super().__init__(
+            f"Camera topic {topic!r} has {h}x{w} (height x width) frames: "
+            f"{need}. Leave the topic out of the export or resize its "
+            f"images.{alternative}{hint}"
+        )
+
+
+class LeRobotFrameFormatError(ResurrectorError, ValueError):
+    """A camera topic's pixels can't become 8-bit RGB without losing values.
+
+    LeRobot export stores every camera as 8-bit RGB (LeRobot 0.6.1's image
+    and video features crash on a uint16 frame and on a 2-channel one).
+    Gray, gray+alpha, RGB(A)/BGR(A) and 1-bit frames convert losslessly
+    (alpha is dropped); anything else raises this before the dataset
+    directory is created. A plain cast would wrap 16-bit values (300 -> 44),
+    and scaling 16-bit or float data to 8 bits turns metric depth (16UC1
+    millimetres, 32FC1 metres) into a near-black, coarsely stepped image,
+    so neither is done silently.
+
+    Also a ``ValueError``, for the same reason as :class:`LeRobotFrameShapeError`.
+    """
+
+    def __init__(self, topic: str | None, dtype: str, shape: tuple[int, ...]):
+        self.topic = topic
+        self.dtype = str(dtype)
+        self.shape = tuple(shape)
+        who = f"Camera topic {topic!r}" if topic else "A camera topic"
+        if self.dtype != "uint8":
+            problem = (
+                f"has {self.dtype} frames (shape {self.shape}): LeRobot export "
+                "stores cameras as 8-bit RGB, and converting these pixels to "
+                "8 bits would wrap or flatten their values (16-bit depth in "
+                "millimetres, for example, becomes a near-black image)"
+            )
+        else:
+            problem = (
+                f"has frames of shape {self.shape}, which isn't height x width "
+                "with 1 to 4 channels"
+            )
+        super().__init__(
+            f"{who} {problem}. Leave the topic out of the export or convert "
+            "its images to 8-bit gray or RGB first."
         )
 
 
