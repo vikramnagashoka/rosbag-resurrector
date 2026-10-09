@@ -510,7 +510,7 @@ class ExportError(ResurrectorError):
       datetimes).
     - CSV: ``late_column``, first seen after the header was written from
       the first chunk; it is not in the file. HDF5 and Zarr add such
-      columns.
+      columns when they can hold its type (``array_storable``).
     - Parquet: ``late_column`` as for CSV. ``untyped_first_chunk``: null
       in all of the first chunk, so it stays in the file as all null
       (HDF5 and Zarr keep its later values). ``type_change``: it stays in
@@ -1120,8 +1120,10 @@ class _NumpyColumns:
                     f"column is {dtype} in this chunk but was {first} in an "
                     f"earlier one"
                 ))
-            arr = series.to_numpy()
-            if arr.dtype == object:
+            # A struct or fixed-size array of numbers converts to a 2-D
+            # float array, which would lose its field names or shape.
+            arr = None if dtype.is_nested() else series.to_numpy()
+            if arr is None or arr.dtype == object or arr.ndim != 1:
                 raise _ColumnError("TypeError", FAILURE_UNSTORABLE, (
                     f"{dtype} columns can't be written as a numeric or string "
                     f"array"
@@ -1829,6 +1831,17 @@ class _RldsFeatures:
                             f"{series.dtype} values past int64's range can't be "
                             f"written as an {self._LIST_NAMES[kind]} feature, so "
                             f"no step has it"
+                        ),
+                    )
+                elif kind == "int" and series.dtype.is_integer():
+                    # Same integer dtype, values past int64's range.
+                    failure = ExportColumnFailure(
+                        column=col, error_type=e.error_type, kind=e.kind,
+                        message=(
+                            f"{series.dtype} values past int64's range from row "
+                            f"{start} on can't be written as an int64_list "
+                            f"feature, so the steps from row {start} on leave it "
+                            f"out (Parquet stores them)"
                         ),
                     )
                 else:

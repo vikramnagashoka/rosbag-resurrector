@@ -50,18 +50,22 @@ frames in the dashboard.
   h5py 3.16) caches up to 8 MiB of written chunks per column, so a 1M-row,
   31-column export peaked near 290 MB and a synced export grew from about
   110 MB at 100k rows to 175 MB at 300k. The writer now uses a 64 KiB cache
-  per column with 1024-row chunks: about 40 MB at 1M rows, and 82 MB / 84 MB
-  for the synced export. File layout, size and speed are unchanged.
+  per column with 1024-row chunks: about 35 MB at 1M rows, and the synced
+  export stays near 90 MB from 100k to 300k rows. File layout, size and
+  speed are unchanged.
 - RLDS keeps one feature type per column, taken from its dtype, and never
   writes the text `"None"`: a missing float is NaN, a missing string is
   `b""`, and a missing integer or boolean leaves the feature out of that
-  step.
+  step. A column first seen after the first chunk (or null until then) is
+  absent from the earlier steps, so read it with `VarLenFeature` or a
+  default value.
 - LeRobot export no longer fails with `ColumnNotFoundError` when a topic
   stops publishing a field, and keeps a field that starts in a later chunk
   (it was dropped). Frames before a field's first value hold that value,
   frames after its last value hold the last one, and both are logged.
 - LeRobot export refuses camera frames it would store wrong, with a clear
-  error before anything is written: 16-bit, 32-bit and float frames (a cast
+  error before it writes anything (an error on a later bag removes the
+  partial dataset): 16-bit, 32-bit and float frames (a cast
   to 8 bits wrapped 16-bit depth values, 300 becoming 44), and frame sizes
   LeRobot mishandles (1 or 3 pixels high, or below the video encoder's
   25 x 4 minimum, which ended in a `FileNotFoundError` traceback, a
@@ -76,7 +80,9 @@ frames in the dashboard.
   traceback and the dashboard showed "Export failed: Internal Server
   Error". `resurrector export` and `resurrector dataset export` print it to
   stderr and exit 1; dataset export also says how to get the other format
-  (a new version with `-f`).
+  (a new version with `-f`). `resurrector dataset export` also reports a
+  LeRobot frame error or an existing LeRobot target in one line, where it
+  ended in a traceback.
 
 **Dashboard and install**
 
@@ -84,17 +90,22 @@ frames in the dashboard.
   rosbag-resurrector`, every camera frame and Library thumbnail returned
   HTTP 500 and `BagFrame` couldn't decode CompressedImage topics.
 - `resurrector demo` on an install without Pillow wrote 1x1 placeholder
-  camera frames; it now always writes real frames, never leaves a
-  half-written bag behind, and regenerates a 1x1 sample left by 0.8.5 on
-  its own. The examples do the same for their sample bag.
-- Bag export, trim and dataset-version export return 422 with the failed
-  columns instead of a bare 500. The export dialogs, the trim popover and
+  frames on its CompressedImage topic (`/camera/compressed`); it now always
+  writes real frames, never leaves a half-written bag at the output path,
+  and regenerates a 1x1 sample left by 0.8.5 on its own. The examples do
+  the same for their sample bag.
+- Bag export and trim return 422 with the failed columns instead of a bare
+  500, and dataset-version export returns the same 422 instead of a 500.
+  The export dialogs, the trim popover and
   both Datasets pages keep the explanation on screen, one column per line,
   and screen readers announce it once. A Datasets-page error stays visible
   when you select another dataset and goes away when that version or its
   dataset is deleted.
 - Dataset-version export answers an unknown dataset or version with 404
-  (was 500) and a LeRobot frame error with 400.
+  (was 500), a LeRobot frame error with 400, and an existing LeRobot target
+  with 409. Dataset-version export and trim answer a missing extra (Zarr,
+  tensorflow, LeRobot) with the 503 bag export already used, so the page
+  shows its install banner instead of a 500.
 - `resurrector doctor` checks Pillow under "Core install".
 
 ### Changed
@@ -104,15 +115,17 @@ frames in the dashboard.
   `failures` and `output` attributes are unchanged. `ExportColumnFailure`
   gains `kind` and `array_storable` fields (with defaults), and
   `ExportError` gains `suggested_formats` and `suggests_parquet`.
-- List, struct, binary and decimal columns now fail in HDF5, Zarr and
-  `.npz` with a message pointing to Parquet. Before, `.npz` pickled them
-  (unloadable without `allow_pickle=True`) and HDF5 wrote decimals as text.
-  The built-in message decoders don't produce these columns.
+- List, struct, fixed-size array, binary and decimal columns now fail in
+  HDF5, Zarr and `.npz` with a message pointing to Parquet. Before, `.npz`
+  pickled list columns (unloadable without `allow_pickle=True`) and wrote
+  struct columns as unlabeled 2-D arrays, Zarr crashed on struct columns,
+  and HDF5 wrote decimals as text. The built-in message decoders don't
+  produce these columns.
 - `.npz` text columns are fixed-width unicode, as wide as the column's
   longest string; a warning names any column over 256 MB.
-- `LeRobotFrameShapeError` moved to `resurrector.core.exceptions` (still
-  importable from `resurrector.core.lerobot_export`), next to the new
-  `LeRobotFrameFormatError`.
+- New `LeRobotFrameShapeError` and `LeRobotFrameFormatError` in
+  `resurrector.core.exceptions`, both a `ResurrectorError` and a
+  `ValueError` (also importable from `resurrector.core.lerobot_export`).
 - `[vision-lite]` now only adds OpenCV, for MP4 video export.
 
 ### Test infrastructure
@@ -126,8 +139,8 @@ frames in the dashboard.
 
 ### Test counts
 
-- Backend: **1652 passed** (was 1292), plus a memory-regression tier of 20
-  (was 16)
+- Backend: **1694 passed** (was 1305) with zarr and tensorflow installed,
+  plus a memory-regression tier of 20 (was 16)
 - Frontend unit: **101 passed** (was 80)
 - E2E: **55 behavioural** (was 47) plus 7 visual
 

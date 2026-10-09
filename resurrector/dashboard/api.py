@@ -692,6 +692,25 @@ def _export_error_detail(exc: ExportError, message: str | None = None) -> dict[s
     }
 
 
+def _capability_unavailable(e: ImportError) -> HTTPException:
+    """A missing optional extra (LeRobot, Zarr, tensorflow) as a structured
+    503, so the UI can render the install banner instead of a generic
+    error toast. Every export route uses it."""
+    from resurrector.core.capabilities import get_capabilities
+    cap_name = "lerobot" if "lerobot" in str(e) else "all_exports"
+    cap = get_capabilities()[cap_name]
+    return HTTPException(
+        status_code=503,
+        detail={
+            "kind": "capability_unavailable",
+            "capability": cap_name,
+            "install_command": cap.install_command,
+            "description": cap.description,
+            "message": str(e),
+        },
+    )
+
+
 @app.exception_handler(ExportError)
 async def _export_error_handler(request: Request, exc: ExportError) -> JSONResponse:
     """The chosen format couldn't store some columns: 422 with the
@@ -762,21 +781,7 @@ async def export_bag(
             # LeRobot refuses to write into a non-empty directory.
             raise HTTPException(409, str(e))
         except ImportError as e:
-            # Missing optional extra: structured 503 so the UI can render
-            # the install banner instead of a generic error toast.
-            from resurrector.core.capabilities import get_capabilities
-            cap_name = "lerobot" if "lerobot" in str(e) else "all_exports"
-            cap = get_capabilities()[cap_name]
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "kind": "capability_unavailable",
-                    "capability": cap_name,
-                    "install_command": cap.install_command,
-                    "description": cap.description,
-                    "message": str(e),
-                },
-            )
+            raise _capability_unavailable(e)
         return {"status": "completed", "output_path": str(output_path)}
     finally:
         index.close()
@@ -1672,10 +1677,13 @@ async def export_dataset_version_api(
     downsample / format settings, and writes data + manifest +
     auto-README + reproducibility config under
     ``<output_dir>/<dataset>/<version>/``. Synchronous; large datasets
-    block the request. Returns 404 for an unknown dataset or version, and
-    422 (``export_column_failures``, see ``_export_error_handler``) when
-    the version's format can't store some columns; that message also says
-    how to get the version as Parquet, since its format is fixed.
+    block the request. Returns 404 for an unknown dataset or version; 400
+    when LeRobot can't store a camera's frames; 409 when the target exists;
+    503 (``capability_unavailable``) when the version's format needs an
+    extra that isn't installed; and 422 (``export_column_failures``, see
+    ``_export_error_handler``) when the format can't store some columns,
+    with a hint naming the format that would keep them
+    (``ExportError.suggested_formats``), since a version's format is fixed.
     """
     payload = payload or {}
     output_dir = payload.get("output_dir", "./datasets")
@@ -1699,6 +1707,10 @@ async def export_dataset_version_api(
             raise HTTPException(400, str(e))
         except ValueError as e:
             raise HTTPException(404, str(e))
+        except FileExistsError as e:
+            raise HTTPException(409, str(e))
+        except ImportError as e:
+            raise _capability_unavailable(e)
         except ExportError as e:
             message = str(e)
             if e.suggested_formats:
@@ -2236,6 +2248,8 @@ async def trim_bag_api(bag_id: int, payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(400, str(e))
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
+        except ImportError as e:
+            raise _capability_unavailable(e)
         return {
             "bag_id": bag_id,
             "format": format_str,

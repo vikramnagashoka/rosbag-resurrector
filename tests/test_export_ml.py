@@ -290,6 +290,22 @@ def test_rlds_first_chunk_overflow_is_not_in_the_file(rlds_steps, tmp_path):
     assert "export to Parquet" in text
 
 
+def test_rlds_later_chunk_overflow_names_the_range(rlds_steps, tmp_path):
+    """Would catch: UInt64 values past int64's range in a later chunk
+    reported as "don't fit (set by UInt64 values in an earlier chunk)",
+    which misstates the cause (the dtype didn't change) and gives no fix."""
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [0], "u": pl.Series([1], dtype=pl.UInt64)}),
+        pl.DataFrame({"timestamp_ns": [1], "u": pl.Series([2**63 + 5], dtype=pl.UInt64)}),
+    ]
+    steps, error = rlds_steps(chunks, tmp_path)
+    assert _column(steps, "u")[1] is None
+    [failure] = error.failures
+    assert "past int64's range from row 1 on" in failure.message
+    assert "Parquet stores them" in failure.message
+    assert "earlier chunk" not in failure.message
+
+
 @pytest.mark.skipif(not tf_available, reason="tensorflow not installed")
 def test_rlds_joint_state_parses_with_a_typed_spec(tmp_dir, monkeypatch):
     """The verifier's late.mcap case end to end: JointState velocity first

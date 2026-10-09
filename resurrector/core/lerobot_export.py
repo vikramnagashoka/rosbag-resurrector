@@ -19,8 +19,10 @@ Our job is the mapping from a bag to LeRobot frames:
   there, because a NaN would make LeRobot's statistics for it NaN.
 - **Grid bounds** are ``[max(first_ts), min(last_ts)]`` across the selected
   topics, so no topic is ever extrapolated before it starts or held past
-  the point where it stopped publishing. A single field that stops while
-  its topic keeps publishing is held at its last value, also logged.
+  the point where it stopped publishing. A field that stops for good
+  while its topic keeps publishing is held at its last value, also
+  logged; one missing from some samples in between keeps its previous
+  value, as the as-of join does.
 - ``observation.state`` = numeric fields of non-image topics (minus header
   stamps), ``action`` = numeric fields of ``action_topics`` if given, and
   ``observation.images.<topic>`` = one video stream per image topic.

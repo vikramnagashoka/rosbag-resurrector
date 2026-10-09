@@ -266,6 +266,7 @@ class TestFrameShapeGuard:
 
     VIDEO_MIN = f"at least {MIN_VIDEO_WIDTH} pixels wide and {MIN_VIDEO_HEIGHT} pixels high"
     PNG_OPTION = (
+        "from resurrector import BagFrame; "
         "from resurrector.core.lerobot_export import export_lerobot; "
         "export_lerobot([BagFrame(bag)], topics, output_dir, use_videos=False)"
     )

@@ -1471,7 +1471,7 @@ def dataset_export(
         help="Version to export (must exist via `dataset add-version`). e.g. 1.0",
     )],
     output: Annotated[Path, typer.Option("--output", "-o",
-        help="Output directory; the version writes into <output>/<name>/<version>/. "
+        help="Output directory; the version writes into OUTPUT/NAME/VERSION/. "
              "e.g. -o ./datasets",
     )] = Path("./datasets"),
     db: Annotated[Optional[Path], typer.Option("--db",
@@ -1502,6 +1502,12 @@ def dataset_export(
     except KeyError as e:
         # Unknown dataset or version. str(KeyError) would quote the message.
         err_console.print(f"[red]Export failed: {rich_escape(str(e.args[0] if e.args else e))}[/red]")
+        raise typer.Exit(1)
+    except (ValueError, FileExistsError) as e:
+        # LeRobot's frame guards (LeRobotFrameShapeError / FormatError are
+        # ValueErrors), an undecodable camera, an existing LeRobot target:
+        # one line, as `resurrector export` prints them.
+        err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
     except ImportError as e:
         err_console.print(f"[yellow]{rich_escape(str(e))}[/yellow]")

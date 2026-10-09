@@ -133,7 +133,8 @@ class SyncSchemaDriftError(ResurrectorError):
 class LeRobotFrameShapeError(ResurrectorError, ValueError):
     """A camera topic's frames are a size LeRobot can't store faithfully.
 
-    Raised before the dataset directory is created. Each rule below is a
+    For the first bag, raised before the dataset directory is created; a
+    later bag's error removes the partial dataset. Each rule below is a
     failure measured against LeRobot 0.6.1, not a guess:
 
     - Height 1: LeRobot reads ``(1, W, 3)`` as single-channel, its image
@@ -183,9 +184,10 @@ class LeRobotFrameShapeError(ResurrectorError, ValueError):
                 # The CLI, dashboard and BagFrame.export always encode video;
                 # only a direct export_lerobot() call can choose PNG.
                 alternative = (" PNG images take frames this size; to store them instead, "
-                               "call the Python API: from resurrector.core.lerobot_export "
-                               "import export_lerobot; export_lerobot([BagFrame(bag)], "
-                               "topics, output_dir, use_videos=False).")
+                               "call the Python API: from resurrector import BagFrame; "
+                               "from resurrector.core.lerobot_export import export_lerobot; "
+                               "export_lerobot([BagFrame(bag)], topics, output_dir, "
+                               "use_videos=False).")
         else:
             need = f"{image_problem}; PNG images need a height of 2 or at least 4 pixels"
         hint = ""

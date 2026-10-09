@@ -188,6 +188,27 @@ def _chunks(case: str) -> list[pl.DataFrame]:
             pl.DataFrame({"timestamp_ns": [2], "y": [2.0],
                           "v": pl.Series([b"x"], dtype=pl.Binary)}),
         ],
+        # The late column types bags actually produce.
+        "string-late": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+            pl.DataFrame({"timestamp_ns": [3], "y": [3.0], "v": ["base_link"]}),
+        ],
+        "int-late": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+            pl.DataFrame({"timestamp_ns": [3], "y": [3.0], "v": [7]}),
+        ],
+        "bool-late": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0]}),
+            pl.DataFrame({"timestamp_ns": [3], "y": [3.0], "v": [True]}),
+        ],
+        "struct": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0],
+                          "v": [{"x": 1.0, "z": 2.0}, {"x": 3.0, "z": 4.0}]}),
+        ],
+        "array": [
+            pl.DataFrame({"timestamp_ns": [1, 2], "y": [1.0, 2.0],
+                          "v": pl.Series([[1.0, 2.0], [3.0, 4.0]], dtype=pl.Array(pl.Float64, 2))}),
+        ],
     }[case]
 
 
@@ -214,6 +235,20 @@ REAL_CASES = {
     ("parquet", "binary-late"): (FAILURE_LATE_COLUMN, False, None),
     ("parquet", "datetime-late"): (FAILURE_LATE_COLUMN, False, None),
     ("parquet", "null-then-binary"): (FAILURE_UNTYPED, True, None),
+    ("csv", "string-late"): (FAILURE_LATE_COLUMN, False, "hdf5"),
+    ("parquet", "string-late"): (FAILURE_LATE_COLUMN, False, "hdf5"),
+    ("csv", "int-late"): (FAILURE_LATE_COLUMN, False, "hdf5"),
+    ("parquet", "int-late"): (FAILURE_LATE_COLUMN, False, "hdf5"),
+    ("csv", "bool-late"): (FAILURE_LATE_COLUMN, False, "hdf5"),
+    ("parquet", "bool-late"): (FAILURE_LATE_COLUMN, False, "hdf5"),
+    # A struct or fixed-size array of numbers converts to a 2-D float
+    # array; written as is it would lose its field names or shape.
+    ("hdf5", "struct"): (FAILURE_UNSTORABLE, False, "parquet"),
+    ("zarr", "struct"): (FAILURE_UNSTORABLE, False, "parquet"),
+    ("numpy", "struct"): (FAILURE_UNSTORABLE, False, "parquet"),
+    ("hdf5", "array"): (FAILURE_UNSTORABLE, False, "parquet"),
+    ("zarr", "array"): (FAILURE_UNSTORABLE, False, "parquet"),
+    ("numpy", "array"): (FAILURE_UNSTORABLE, False, "parquet"),
 }
 
 
@@ -266,3 +301,41 @@ def test_cli_parquet_late_column_points_to_hdf5_not_parquet(tmp_path, monkeypatc
         assert NOT_IN_FILE in flat
         assert PARQUET_ADVICE not in flat
         assert HDF5_ADVICE in flat
+
+
+@pytest.mark.parametrize("dtype", [
+    pl.Float32, pl.Float64, pl.Int8, pl.Int64, pl.UInt64, pl.Boolean, pl.Null,
+    pl.String, pl.Categorical, pl.Enum(["a", "b"]), pl.Binary, pl.Date,
+    pl.Datetime("us"), pl.Duration("us"), pl.Time, pl.Decimal(10, 2),
+    pl.List(pl.Float64), pl.Array(pl.Float64, 2), pl.Struct({"x": pl.Float64}),
+], ids=str)
+def test_polars_and_arrow_storability_agree(dtype):
+    """Would catch: CSV (polars dtypes) and Parquet (Arrow types) giving
+    different advice for the same late column, or a storable type (text,
+    integers, booleans) dropped from one of the checks."""
+    from resurrector.core.export import _arrow_array_storable, _polars_array_storable
+
+    series = pl.Series("v", [None, None], dtype=dtype)
+    want = dtype in (pl.Float32, pl.Float64, pl.Int8, pl.Int64, pl.UInt64, pl.Boolean,
+                     pl.Null, pl.String, pl.Categorical) or isinstance(dtype, pl.Enum)
+    # The writers pass a chunk's dtypes (instances, as series.dtype is).
+    assert _polars_array_storable(series.dtype) is want
+    assert _arrow_array_storable(series.to_arrow().type) is want
+
+
+def test_mixed_parquet_wording_counts_only_columns_hdf5_or_zarr_keep(tmp_path):
+    """Would catch: "first appears, or first has values," when the only
+    untyped column is one HDF5 and Zarr can't hold anyway (binary)."""
+    chunks = [
+        pl.DataFrame({"timestamp_ns": [1], "y": [1.0], "b": [None]}),
+        pl.DataFrame({"timestamp_ns": [2], "y": [2.0], "f": [3.0],
+                      "b": pl.Series([b"x"], dtype=pl.Binary)}),
+    ]
+    with pytest.raises(ExportError) as exc:
+        _stream_parquet(iter(chunks), tmp_path, "t")
+    text = _flat(str(exc.value))
+    assert sorted((f.column, f.kind) for f in exc.value.failures) == [
+        ("b", FAILURE_UNTYPED), ("f", FAILURE_LATE_COLUMN),
+    ]
+    assert "To keep a column that first appears after the first chunk" in text
+    assert "or first has values" not in text

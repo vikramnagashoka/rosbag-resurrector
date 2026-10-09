@@ -582,11 +582,18 @@ def version_format_hint(name: str, formats: list[str]) -> str:
     """
     label = " or ".join(_FORMAT_LABELS.get(f, f) for f in formats)
     flags = " or ".join(f"-f {f}" for f in formats)
+    if name.startswith("-"):
+        # Quoting doesn't stop a leading dash reading as an option; "--"
+        # does, so the positionals go after it.
+        command = (f"resurrector dataset add-version -b <bag> ... -f {formats[0]} "
+                   f"-- {shlex.quote(name)} <new-version>")
+    else:
+        command = (f"resurrector dataset add-version {shlex.quote(name)} "
+                   f"<new-version> -b <bag> ... -f {formats[0]}")
     return (
         f"A dataset version's format is set when the version is added. To get "
         f"{label}, add a version with the same bags and settings and {flags}, "
-        f"then export that version: resurrector dataset add-version "
-        f"{shlex.quote(name)} <new-version> -b <bag> ... -f {formats[0]}"
+        f"then export that version: {command}"
     )
 
 

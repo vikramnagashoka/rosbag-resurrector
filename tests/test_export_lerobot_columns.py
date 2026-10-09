@@ -238,6 +238,17 @@ def test_later_bag_with_fields_in_another_order_is_aligned():
                      ["js/position.0", "js/effort.0", "js/extra.0"], [], [])
     assert _match_field_order(other, first).state_names == other.state_names
 
+    # A rotation, which (unlike a swap) isn't its own inverse, so the
+    # inverse permutation can't pass; and the action vector too.
+    have = ["js/velocity.0", "js/effort.0", "js/position.0"]
+    values = np.array([[10.0, 20.0, 30.0]], dtype=np.float32)
+    rotated = _Episode(np.array([0]), values, values * 2, have, list(have), [])
+    want = ["js/position.0", "js/velocity.0", "js/effort.0"]
+    got = _match_field_order(rotated, (want, list(want)))
+    assert got.state_names == want and got.action_names == want
+    assert got.state.tolist() == [[30.0, 10.0, 20.0]]
+    assert got.action.tolist() == [[60.0, 20.0, 40.0]]
+
 
 def test_two_bags_with_fields_first_seen_in_another_order(tmp_path, monkeypatch):
     """Both bags export into one dataset, and the second episode's state

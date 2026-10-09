@@ -193,6 +193,14 @@ class TestMessage:
             "add-version 'pick place' <new-version> -b <bag> ... -f hdf5"
         )
 
+    def test_dataset_hint_for_a_name_starting_with_a_dash(self):
+        """Would catch: ``add-version -runs ...``, which the CLI reads as
+        option -r ("No such option: -r")."""
+        hint = version_format_hint("-runs", ["hdf5", "zarr"])
+        assert hint.endswith(
+            "resurrector dataset add-version -b <bag> ... -f hdf5 -- -runs <new-version>"
+        )
+
     def test_dataset_parquet_hint_word_for_word(self):
         """Would catch: the hint telling a dataset user to "export to
         Parquet", which neither `dataset export` nor the Datasets page can
@@ -290,6 +298,35 @@ class TestCli:
         # a new version switches the format.
         assert "-f parquet" not in _flat(result.output)
         assert version_format_hint("pick-place", ["hdf5", "zarr"]) in _flat(result.stderr)
+
+    @pytest.mark.parametrize("error", ["shape", "format", "exists"])
+    def test_dataset_export_frame_and_target_errors_in_one_line(self, bag, tmp_dir, monkeypatch, error):
+        """Would catch: ``resurrector dataset export`` ending in a Rich
+        traceback for a LeRobot frame guard (a ValueError) or an existing
+        LeRobot target, which ``resurrector export`` prints in one line."""
+        from resurrector.core.exceptions import LeRobotFrameFormatError, LeRobotFrameShapeError
+
+        err = {
+            "shape": LeRobotFrameShapeError("/camera/rgb", (1, 1, 3), True, min_width=25, min_height=4),
+            "format": LeRobotFrameFormatError("/depth", "uint16", (48, 64)),
+            "exists": FileExistsError("LeRobot export target out/1.0 already exists and is not empty."),
+        }[error]
+
+        def refuse(self, *args, **kwargs):
+            raise err
+
+        db = tmp_dir / "index.db"
+        _make_version(db, bag, "csv")
+        monkeypatch.setattr(DatasetManager, "export_version", refuse)
+        result = CliRunner().invoke(
+            cli_app,
+            ["dataset", "export", "pick-place", "1.0", "-o", str(tmp_dir / "ds"), "--db", str(db)],
+            env={"COLUMNS": "400"},
+        )
+        assert result.exit_code == 1, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert result.stdout == ""
+        assert _flat(result.stderr) == f"Export failed: {_flat(str(err))}"
 
     def test_dataset_export_says_how_to_get_parquet(self, bag, tmp_dir, failing_writer):
         """Would catch: advice to "export to Parquet" that this command
@@ -589,6 +626,63 @@ class TestApi:
         )
         assert r.status_code == 400, r.text
         assert r.json() == {"detail": str(err)}
+
+    @pytest.mark.parametrize(("error", "status"), [
+        ("format", 400), ("exists", 409), ("missing-extra", 503),
+    ])
+    def test_dataset_export_maps_errors_like_bag_export(self, api, bag, tmp_dir, monkeypatch, error, status):
+        """Would catch: a LeRobot format error answered 404, an existing
+        target or a missing extra falling into the route's catch-all as a
+        500 ("Partial output may exist", when nothing was written), with no
+        install banner for the missing extra."""
+        from resurrector.core.exceptions import LeRobotFrameFormatError
+        from resurrector.core.lerobot_export import INSTALL_HINT
+
+        err = {
+            "format": LeRobotFrameFormatError("/depth", "uint16", (48, 64)),
+            "exists": FileExistsError("LeRobot export target already exists and is not empty."),
+            "missing-extra": ImportError(INSTALL_HINT),
+        }[error]
+
+        def refuse(self, *args, **kwargs):
+            raise err
+
+        _make_version(tmp_dir / "index.db", bag, "csv")
+        monkeypatch.setattr(DatasetManager, "export_version", refuse)
+        client, _ = api
+        r = client.post(
+            "/api/datasets/pick-place/versions/1.0/export",
+            json={"output_dir": str(tmp_dir / "ds")},
+        )
+        assert r.status_code == status, r.text
+        detail = r.json()["detail"]
+        if error == "missing-extra":
+            assert detail["kind"] == "capability_unavailable"
+            assert detail["capability"] == "lerobot"
+            assert detail["message"] == INSTALL_HINT
+        else:
+            assert detail == str(err)
+
+    def test_trim_missing_extra_returns_503(self, api, tmp_dir, monkeypatch):
+        """Would catch: trimming to Zarr without the extra answered with a
+        bare 500 while bag export answers the same case with the 503 the
+        UI turns into an install banner."""
+        import resurrector.core.trim as trim_mod
+
+        def no_zarr(*args, **kwargs):
+            raise ImportError("Zarr export requires the zarr package. Install with: "
+                              "pip install 'rosbag-resurrector[all-exports]'")
+
+        monkeypatch.setattr(trim_mod, "trim_to_format", no_zarr)
+        client, bag_id = api
+        r = client.post(
+            f"/api/bags/{bag_id}/trim",
+            json={"start_sec": 0.0, "end_sec": 0.5, "topics": ["/imu/data"],
+                  "format": "zarr", "output_path": str(tmp_dir / "trim")},
+        )
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"]["kind"] == "capability_unavailable"
+        assert r.json()["detail"]["capability"] == "all_exports"
 
     @pytest.mark.parametrize(("name", "version", "detail"), [
         ("nosuch", "1.0", "Dataset 'nosuch' not found"),
