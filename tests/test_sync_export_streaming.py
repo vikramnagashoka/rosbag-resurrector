@@ -129,17 +129,20 @@ def test_synced_csv_export_matches_whole_table(bag, tmp_path, small_chunks):
     assert (tmp_path / "synced.csv").read_text() == expected.write_csv()
 
 
-def test_synced_export_with_no_rows_still_writes_file(bag, tmp_path):
-    """A time slice past the end of the bag syncs to nothing; the export
-    still produces the (empty) file, as it did before streaming."""
+def test_synced_export_with_no_rows_writes_nothing(bag, tmp_path):
+    """A time slice past the end of the bag syncs to nothing. Would catch:
+    a header-only synced.parquet and a reported success, where the same
+    export without sync fails with EmptyExportError."""
+    from resurrector.core.exceptions import EmptyExportError
+
     sliced = BagFrame(bag).time_slice(100.0, 101.0)
-
-    Exporter().export(
-        bag_frame=sliced, topics=TOPICS, format="parquet",
-        output_dir=str(tmp_path), sync=True, downsample_hz=10.0,
-    )
-
-    assert pl.read_parquet(tmp_path / "synced.parquet").height == 0
+    out = tmp_path / "out"
+    with pytest.raises(EmptyExportError):
+        Exporter().export(
+            bag_frame=sliced, topics=TOPICS, format="parquet",
+            output_dir=str(out), sync=True, downsample_hz=10.0,
+        )
+    assert not out.exists()
 
 
 def test_synced_export_missing_topic_still_raises(bag, tmp_path):

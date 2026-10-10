@@ -48,10 +48,15 @@ def _open_bag(path: Path):
     except FileNotFoundError as e:
         err_console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
-    except (NotImplementedError, ValueError, McapError, struct.error, OSError) as e:
+    except (NotImplementedError, ValueError) as e:
+        # Already says what's wrong (an unsupported extension, a .bag that
+        # needs converting).
+        err_console.print(f"[red]Can't read {rich_escape(str(path))}: {rich_escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    except (McapError, struct.error, OSError) as e:
         err_console.print(
-            f"[red]Can't read {rich_escape(str(path))}: "
-            f"{rich_escape(str(e) or type(e).__name__)}[/red]"
+            f"[red]Can't read {rich_escape(str(path))}: it isn't an MCAP file, or "
+            f"it was cut off mid-write ({rich_escape(str(e) or type(e).__name__)})[/red]"
         )
         raise typer.Exit(1)
     return bf

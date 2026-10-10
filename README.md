@@ -494,7 +494,7 @@ bf.export(topics=["/imu/data", "/joint_states"],
           downsample_hz=10)
 ```
 
-Every topic you name must be in the bag; an unknown one fails the export before anything is written, with the bag's topic list in the message. A topic with no messages (in the bag, or in the exported time range) gets no file in any format, with a warning, and an export whose topics are all empty fails instead of reporting success.
+Every topic you name must be in the bag; an unknown one fails the export before anything is written, with the bag's topic list in the message. A topic with no messages (in the bag, or in the exported time range) gets no file in any format, with a warning, and an export whose topics are all empty (with `--sync`, whose synced table has no rows) fails instead of reporting success.
 
 `--split train=0.8 --split val=0.2` (or `split={"train": 0.8, "val": 0.2}`) writes one folder per split. The default `--split-strategy time` gives each split a contiguous time window; `random` sends each row (each synced row with `--sync`) to a split at random, the same way every run, reading the bag once per split. Both stream and honor the format, sync and downsample settings; `random` can't write LeRobot, whose episodes are contiguous.
 

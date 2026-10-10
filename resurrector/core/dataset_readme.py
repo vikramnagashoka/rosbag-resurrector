@@ -94,8 +94,11 @@ def generate_dataset_readme(
         path = ref.get("path", "?")
         if is_lerobot:
             line = f"- Episode {i}: `{path}`"
-        elif folders:
+        elif folders and any(k.startswith(folders[i] + "/") or k.startswith(folders[i] + "\\")
+                             for k in manifest):
             line = f"- `{folders[i]}/`: `{path}`"
+        elif folders:
+            line = f"- `{path}` (no messages to export, so no `{folders[i]}/` folder)"
         else:
             line = f"- `{path}`"
         if ref.get("start_time") or ref.get("end_time"):

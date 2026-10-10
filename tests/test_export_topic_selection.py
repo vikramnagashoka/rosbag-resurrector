@@ -135,7 +135,7 @@ def test_preset_filter_matching_nothing_is_an_error(tmp_path):
     from tests.fixtures.changing_columns import write_joint_state_bag
 
     bag = write_joint_state_bag(Path(tmp_path / "nocam.mcap"), 10, range(0), 10)
-    with pytest.raises(ValueError, match="'camera-only' preset exports images topics"):
+    with pytest.raises(ValueError, match="'camera-only' preset exports image topics"):
         BagFrame(bag).export(preset="camera-only", output=str(tmp_path / "out"))
 
 
@@ -185,3 +185,63 @@ class TestDashboard:
         r = c.post("/api/datasets/ds/versions/1.0/export", json={"output_dir": str(tmp_path / "o")})
         assert r.status_code == 400, r.text
         assert text in r.json()["detail"]
+
+
+class TestReviewFollowUps:
+    def test_sync_with_only_empty_topics_raises(self, tmp_path):
+        """Would catch: --sync writing a 1-byte synced.csv and exiting 0
+        when every topic is empty (the non-sync path already failed)."""
+        from mcap.writer import Writer
+
+        from resurrector.demo.sample_bag import SCHEMAS
+
+        bag = tmp_path / "empty2.mcap"
+        with open(bag, "wb") as f:
+            w = Writer(f)
+            w.start(profile="ros2", library="test")
+            for topic, mt in (("/imu/data", "sensor_msgs/msg/Imu"),
+                              ("/joint_states", "sensor_msgs/msg/JointState")):
+                sid = w.register_schema(name=mt, encoding="ros2msg", data=SCHEMAS[mt]["data"].encode())
+                w.register_channel(topic=topic, message_encoding="cdr", schema_id=sid)
+            w.finish()
+        out = tmp_path / "out"
+        result = _cli("export", str(bag), "-t", "/imu/data", "-t", "/joint_states",
+                      "--sync", "nearest", "-f", "csv", "-o", str(out))
+        assert result.exit_code == 1, result.output
+        assert "No messages to export" in result.stderr
+        assert not out.exists()
+
+    def test_dotdot_in_output_never_removes_an_existing_folder(self, demo_bag, tmp_path, monkeypatch):
+        """Would catch: ``-o x/../E/new`` on a failed export removing the
+        existing (empty) folder E, because the cleanup walked x/../E as if
+        the export had created it."""
+        (tmp_path / "E").mkdir()
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(EmptyExportError):
+            Exporter().export(bag_frame=BagFrame(demo_bag), topics=["/tf"], output_dir="x/../E/new")
+        assert (tmp_path / "E").is_dir()
+        assert not (tmp_path / "E" / "new").exists()
+
+    def test_unknown_format_is_named_first(self, demo_bag, tmp_path):
+        with pytest.raises(ValueError, match="Unknown export format: bogus"):
+            Exporter().export(bag_frame=BagFrame(demo_bag), topics=["/tf"], format="bogus",
+                              output_dir=str(tmp_path / "o"))
+
+    def test_concatenated_bags_export(self, tmp_path):
+        """Would catch: AttributeError 'ConcatenatedBagFrame' object has no
+        attribute 'topic_names' from the new topic check."""
+        from resurrector.core.concatenated import concatenate_bags
+
+        a = generate_bag(tmp_path / "a.mcap", BagConfig(duration_sec=0.5))
+        b = generate_bag(tmp_path / "b.mcap", BagConfig(duration_sec=0.5))
+        cat = concatenate_bags([a, b])
+        out = tmp_path / "out"
+        Exporter().export(bag_frame=cat, topics=["/imu/data"], output_dir=str(out))
+        assert [p.name for p in out.iterdir()] == ["imu_data.parquet"]
+        with pytest.raises(TopicNotFoundError, match="not in the 2 concatenated bags"):
+            Exporter().export(bag_frame=cat, topics=["/nope"], output_dir=str(out))
+
+    def test_random_split_warns_about_an_empty_topic(self, demo_bag, tmp_path, caplog):
+        BagFrame(demo_bag).export(topics=["/imu/data", "/tf"], output=str(tmp_path / "r"),
+                                  split={"a": 0.5, "b": 0.5}, split_strategy="random")
+        assert "'tf' has no messages" in caplog.text

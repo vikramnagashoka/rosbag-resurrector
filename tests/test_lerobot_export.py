@@ -545,6 +545,48 @@ class TestGuardsRunBeforeLeRobot:
         export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
         assert "1 frame(s) on /cam didn't decode (first at 1700000000300000000)" in caplog.text
 
+    def test_frame_with_no_encoding_counts_as_damaged(self, tmp_dir, fake_lerobot, caplog):
+        """A frame whose header didn't parse has no encoding at all. Would
+        catch: that frame failing the export as an "unreadable encoding
+        None" instead of taking the frame before it."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_frames_bag(tmp_dir / "noenc.mcap",
+                              [("rgb8", rgb, 0)] * 3 + [("", rgb, 0)] + [("rgb8", rgb, 0)] * 3)
+        export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert "1 frame(s) on /cam didn't decode" in caplog.text
+
+    def test_time_split_skips_a_window_with_no_frames(self, tmp_dir, fake_lerobot, monkeypatch):
+        """Would catch: a LeRobot time split failing whole on a window with
+        no messages ("None of the selected topics contain messages")."""
+        from resurrector.core import export as export_module
+        from resurrector.core.splits import split_export
+
+        monkeypatch.setattr(export_module, "require_export_dependencies", lambda f: None)
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_camera_bag(tmp_dir / "cam.mcap", "rgb8", rgb)  # frames at 0..400 ms
+        bf = BagFrame(bag)
+        out = tmp_dir / "split"
+        gap = 0.005 / bf.duration_sec  # 240-245 ms: between two frames
+        split_export(bag_frame=bf, topics=["/cam"], output=out,
+                     split={"a": 0.6, "gap": gap, "b": 0.4 - gap}, strategy="time", format="lerobot")
+        assert len(fake_lerobot.create) == 2
+        assert not (out / "gap").exists()
+
+    def test_bag_export_with_topics_none_takes_every_topic(self, tmp_dir, fake_lerobot, monkeypatch):
+        """Would catch: TypeError 'NoneType' object is not iterable from
+        the new topic check (topics=None meant every topic before)."""
+        from resurrector.core import export as export_module
+        from resurrector.core.export import Exporter
+
+        monkeypatch.setattr(export_module, "require_export_dependencies", lambda f: None)
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_camera_bag(tmp_dir / "cam.mcap", "rgb8", rgb)
+        Exporter().export(bag_frame=BagFrame(bag), topics=None, format="lerobot",
+                          output_dir=str(tmp_dir / "lr"))
+        assert "observation.images.cam" in fake_lerobot.frames[0]
+
     def test_raw_helper_control_rgb8_decodes(self, tmp_dir, fake_lerobot):
         """Control for the test above: the same writer with rgb8 exports."""
         from resurrector.core.lerobot_export import export_lerobot

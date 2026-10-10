@@ -200,6 +200,53 @@ class TestMultiBagExport:
         assert not (out / "000_run").exists()
         assert (out / "001_run" / "imu_data.parquet").exists()
         assert "Skipping that bag" in caplog.text
+        # The README doesn't point at a folder that wasn't written.
+        readme = (out / "README.md").read_text()
+        assert f"- `{a}` (no messages to export, so no `000_run/` folder)" in readme
+
+    def test_synced_bag_with_an_empty_slice_is_skipped(self, mgr, two_bags, tmp_dir):
+        """Would catch: a synced version writing a header-only
+        synced.parquet for a bag whose slice holds no messages."""
+        a, b = two_bags
+        mgr.create("mb")
+        mgr.create_version("mb", "1.0",
+                           [BagRef(path=str(a), start_time="5s", end_time="6s"), BagRef(path=str(b))],
+                           topics=["/imu/data", "/joint_states"], sync_config=SyncConfig(method="nearest"))
+        out = mgr.export_version("mb", "1.0", str(tmp_dir / "ds"))
+        assert not (out / "000_run").exists()
+        assert (out / "001_run" / "synced.parquet").exists()
+
+    def test_unknown_topic_in_a_later_bag_writes_nothing(self, mgr, two_bags, tmp_dir):
+        """Would catch: the first bag's files written before the second
+        bag's missing topic failed the export."""
+        from resurrector.core.exceptions import TopicNotFoundError
+
+        a, b = two_bags
+        mgr.create("mb")
+        mgr.create_version("mb", "1.0", [BagRef(path=str(a)), BagRef(path=str(b), topics=["/nope"])],
+                           topics=["/imu/data"])
+        with pytest.raises(TopicNotFoundError, match="'/nope'"):
+            mgr.export_version("mb", "1.0", str(tmp_dir / "ds"))
+        assert not (tmp_dir / "ds").exists()
+
+    def test_flat_files_from_an_older_export_stay_out_of_the_manifest(self, mgr, two_bags, tmp_dir, caplog):
+        """0.8.6 exported every bag of a version flat, so a re-export finds
+        that imu_data.parquet (the last bag's rows only) beside the new
+        per-bag folders. Would catch: it landing in manifest.json and in
+        the README's loading snippet."""
+        import json
+
+        a, b = two_bags
+        mgr.create("mb")
+        mgr.create_version("mb", "1.0", [BagRef(path=str(a)), BagRef(path=str(b))], topics=["/imu/data"])
+        version_dir = tmp_dir / "ds" / "mb" / "1.0"
+        version_dir.mkdir(parents=True)
+        (version_dir / "imu_data.parquet").write_text("left from 0.8.6")
+        out = mgr.export_version("mb", "1.0", str(tmp_dir / "ds"))
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert sorted(manifest) == ["000_run/imu_data.parquet", "001_run/imu_data.parquet"]
+        assert "outside its per-bag folders" in caplog.text and "imu_data.parquet" in caplog.text
+        assert str(out / "000_run" / "imu_data.parquet") in (out / "README.md").read_text()
 
 
 class TestFailedExportCleanup:
@@ -227,6 +274,59 @@ class TestFailedExportCleanup:
         with pytest.raises(EmptyExportError):
             mgr.export_version("ds", "1.0", str(tmp_dir / "exports"))
         assert (version_dir / "earlier.parquet").read_text() == "from an earlier export"
+
+    @pytest.fixture
+    def failing_lerobot(self, monkeypatch):
+        """A LeRobot writer whose create() makes the root (as LeRobot's
+        does) and whose first add_frame() fails."""
+        from resurrector.core import export as export_module
+        from resurrector.core import lerobot_export
+
+        class _Dataset:
+            def add_frame(self, frame):
+                raise RuntimeError("encoder died")
+
+            def finalize(self):
+                pass
+
+        class _LeRobotDataset:
+            @staticmethod
+            def create(root, **_kw):
+                (root / "meta").mkdir(parents=True)
+                return _Dataset()
+
+        monkeypatch.setattr(lerobot_export, "import_lerobot_dataset", lambda: _LeRobotDataset)
+        monkeypatch.setattr(export_module, "require_export_dependencies", lambda f: None)
+
+    def test_failed_lerobot_export_leaves_no_empty_dataset_folder(self, mgr, healthy_bag, tmp_dir, failing_lerobot):
+        """Would catch: <output>/<dataset> left behind after LeRobot
+        removed the version folder (the cleanup stopped at the missing
+        leaf instead of walking up)."""
+        mgr.create("ds")
+        mgr.create_version("ds", "1.0", [BagRef(path=str(healthy_bag))], topics=["/imu/data"],
+                           export_format="lerobot")
+        with pytest.raises(RuntimeError, match="encoder died"):
+            mgr.export_version("ds", "1.0", str(tmp_dir / "exports"))
+        assert not (tmp_dir / "exports").exists()
+
+    def test_failed_lerobot_export_keeps_an_existing_version_folder(self, mgr, healthy_bag, tmp_dir, failing_lerobot):
+        mgr.create("ds")
+        mgr.create_version("ds", "1.0", [BagRef(path=str(healthy_bag))], topics=["/imu/data"],
+                           export_format="lerobot")
+        version_dir = tmp_dir / "exports" / "ds" / "1.0"
+        version_dir.mkdir(parents=True)
+        with pytest.raises(RuntimeError):
+            mgr.export_version("ds", "1.0", str(tmp_dir / "exports"))
+        assert version_dir.is_dir() and not any(version_dir.iterdir())
+
+    def test_failed_bag_lerobot_export_removes_created_parents(self, healthy_bag, tmp_dir, failing_lerobot):
+        from resurrector.core.bag_frame import BagFrame
+        from resurrector.core.export import Exporter
+
+        with pytest.raises(RuntimeError):
+            Exporter().export(bag_frame=BagFrame(healthy_bag), topics=["/imu/data"],
+                              format="lerobot", output_dir=str(tmp_dir / "n1" / "n2"))
+        assert not (tmp_dir / "n1").exists()
 
     def test_unknown_topic_names_the_bag(self, mgr, healthy_bag, tmp_dir):
         from resurrector.core.exceptions import TopicNotFoundError

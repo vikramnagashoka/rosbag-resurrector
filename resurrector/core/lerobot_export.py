@@ -285,7 +285,10 @@ def _unreadable_encoding(view: "TopicView", msg) -> bool:
 
     if view.message_type == "sensor_msgs/msg/CompressedImage":
         return "compresseddepth" in (msg.data.get("format") or "").lower()
-    return msg.data.get("encoding") not in RAW_IMAGE_ENCODINGS
+    # No encoding at all means the frame itself didn't parse (cut off
+    # inside its header, or an empty Image): damaged, not unreadable.
+    encoding = msg.data.get("encoding")
+    return bool(encoding) and encoding not in RAW_IMAGE_ENCODINGS
 
 
 def frames_on_grid(view: "TopicView", grid: np.ndarray) -> Iterator[np.ndarray]:
@@ -501,7 +504,11 @@ def _plan_episode(
         if b is not None:
             bounds.append(b)
     if not bounds:
-        raise ValueError("None of the selected topics contain messages")
+        # EmptyExportError (a ValueError): a time split skips such a window.
+        from resurrector.core.exceptions import EmptyExportError
+        from resurrector.core.export import bag_label
+
+        raise EmptyExportError([*topics, *action_topics], bag_label(bf))
 
     grid = build_grid(max(b[0] for b in bounds), min(b[1] for b in bounds), fps)
     if len(grid) == 0:
@@ -611,6 +618,8 @@ def export_lerobot(
         Either error on a later frame or bag removes the partial dataset.
         TopicNotFoundError: A bag lacks one of ``topics`` or
             ``action_topics``.
+        EmptyExportError: A bag has no messages on the selected topics
+            (a ``ValueError``).
         ValueError: No overlapping data, episodes disagree on features,
             or a camera frame after decodable ones is in an encoding the
             export can't read (the partial dataset is removed).

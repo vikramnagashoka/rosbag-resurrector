@@ -364,8 +364,8 @@ class DatasetManager:
         """
         from resurrector.core.export import (
             first_missing_dir,
-            remove_empty_dirs,
             require_export_dependencies,
+            restore_output_dir,
         )
 
         ds = self._get_dataset_by_name(dataset_name)
@@ -386,15 +386,32 @@ class DatasetManager:
         try:
             self._write_version_data(config, metadata, dataset_name, output_path)
         except BaseException:
-            remove_empty_dirs(output_path, created)
+            restore_output_dir(output_path, created)
             raise
 
+        # Build manifest (hash the data files). In a multi-bag version only
+        # the per-bag folders hold this export's data: a file beside them
+        # is left from an earlier export (0.8.6 wrote every bag flat, so
+        # such a file holds only the last bag) and stays out of the manifest.
+        folders = None if config.get("export_format") == "lerobot" else bag_folder_names(config["bag_refs"])
         manifest: dict[str, str] = {}
-
-        # Build manifest (hash all output files)
-        for f in output_path.rglob("*"):
-            if f.is_file() and f.name != "manifest.json" and f.name != "README.md":
-                manifest[str(f.relative_to(output_path))] = _file_sha256(f)
+        stale: list[str] = []
+        for f in sorted(output_path.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(output_path)
+            if str(rel) in ("manifest.json", "README.md", "dataset_config.json"):
+                continue
+            if folders and rel.parts[0] not in folders:
+                stale.append(str(rel))
+                continue
+            manifest[str(rel)] = _file_sha256(f)
+        if stale:
+            logger.warning(
+                "%s holds %d file(s) outside its per-bag folders, left from an "
+                "earlier export; they are not in manifest.json: %s",
+                output_path, len(stale), ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else ""),
+            )
 
         # Save manifest
         manifest_path = output_path / "manifest.json"
@@ -441,23 +458,34 @@ class DatasetManager:
         :meth:`export_version` for the layout)."""
         from resurrector.core.bag_frame import BagFrame
         from resurrector.core.exceptions import EmptyExportError
-        from resurrector.core.export import Exporter
+        from resurrector.core.export import Exporter, check_topics
 
         bag_refs = config["bag_refs"]
-
-        def open_ref(ref_dict: dict[str, Any]):
+        is_lerobot = config.get("export_format") == "lerobot"
+        bags = []
+        for ref_dict in bag_refs:
             bf = BagFrame(ref_dict["path"])
             if ref_dict.get("start_time") and ref_dict.get("end_time"):
                 bf = bf.time_slice(ref_dict["start_time"], ref_dict["end_time"])
-            return bf
+            bags.append(bf)
 
-        if config.get("export_format") == "lerobot":
+        def ref_topics(ref_dict: dict[str, Any], bf) -> list[str]:
+            if is_lerobot:  # LeRobot applies the version's topics to every bag
+                return list(config.get("topics") or bf.topic_names)
+            return list(ref_dict.get("topics") or config.get("topics") or bf.topic_names)
+
+        # Every bag's topics are checked before any bag is written, so a
+        # topic missing from the last bag doesn't leave the first ones on disk.
+        for ref_dict, bf in zip(bag_refs, bags):
+            check_topics(bf, ref_topics(ref_dict, bf))
+
+        if is_lerobot:
             # One LeRobot dataset, one episode per bag ref; per-bag
             # directories would make N separate datasets.
             from resurrector.core.lerobot_export import DEFAULT_FPS, export_lerobot
 
             export_lerobot(
-                [open_ref(r) for r in bag_refs],
+                bags,
                 config.get("topics"),
                 output_path,
                 fps=int(round(config.get("downsample_hz") or DEFAULT_FPS)),
@@ -472,9 +500,8 @@ class DatasetManager:
         sync_cfg = config.get("sync_config")
         exporter = Exporter()
         empty: list[EmptyExportError] = []
-        for i, ref_dict in enumerate(bag_refs):
-            bf = open_ref(ref_dict)
-            topics = ref_dict.get("topics") or config.get("topics") or bf.topic_names
+        for i, (ref_dict, bf) in enumerate(zip(bag_refs, bags)):
+            topics = ref_topics(ref_dict, bf)
             try:
                 exporter.export(
                     bag_frame=bf,

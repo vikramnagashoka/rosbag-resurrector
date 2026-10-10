@@ -176,7 +176,7 @@ def _split_export_time(
 ) -> Path:
     """Chronological split: each named split gets a contiguous time window."""
     from resurrector.core.exceptions import EmptyExportError
-    from resurrector.core.export import Exporter
+    from resurrector.core.export import Exporter, bag_label
 
     duration = bag_frame.duration_sec
     boundaries = _cumulative_time_boundaries(split, duration)
@@ -216,7 +216,7 @@ def _split_export_time(
         cursor_sec = end_sec
 
     if not written:
-        raise EmptyExportError(topics, bag_frame.path)
+        raise EmptyExportError(topics, bag_label(bag_frame))
     _write_manifest(output, manifest)
     logger.info(
         "Time-split export to %s: %d splits over %.2fs",
@@ -258,6 +258,7 @@ def _split_export_random(
     from resurrector.core.export import (
         NUMPY_HARD_CAP,
         Exporter,
+        bag_label,
         nonempty_chunks,
         synced_chunks,
         topic_chunks,
@@ -290,6 +291,7 @@ def _split_export_random(
     }
     exporter = Exporter()
     for name, make_chunks in streams:
+        stream_rows = 0
         for idx, split_name in enumerate(split_names):
             counter = [0]
 
@@ -309,9 +311,12 @@ def _split_export_random(
             sub_output.mkdir(parents=True, exist_ok=True)
             exporter._stream_dataframe_chunks(chunks, format, sub_output, name)
             manifest["splits"][split_name]["rows"] += counter[0]
+            stream_rows += counter[0]
+        if not stream_rows:
+            logger.warning("'%s' has no messages in the exported range; no file written for it", name)
 
     if not any(s["rows"] for s in manifest["splits"].values()):
-        raise EmptyExportError(topics, bag_frame.path)
+        raise EmptyExportError(topics, bag_label(bag_frame))
     _write_manifest(output, manifest)
     logger.info(
         "Random-split export to %s: %d splits", output, len(split),
