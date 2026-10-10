@@ -93,7 +93,8 @@ def main() -> None:
     print(f"  strategy={manifest['strategy']!r} "
           f"(seed={manifest.get('seed', 'n/a')}; deterministic across runs)")
     for name, info in manifest.get("splits", {}).items():
-        # Random splits report row counts per topic, not a time window
+        # Random splits report rows per split (synced rows here, since
+        # sync=True), not a time window
         print(f"    {name}: ratio={info.get('ratio')}  rows={info.get('rows', 'n/a')}")
 
     print(

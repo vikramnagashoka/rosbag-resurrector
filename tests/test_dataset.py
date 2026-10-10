@@ -149,3 +149,90 @@ class TestDatasetManager:
         mgr.create_version("multi", "2.0", [BagRef(path=str(healthy_bag))])
         ds = mgr.get_dataset("multi")
         assert len(ds["versions"]) == 2
+
+
+class TestMultiBagExport:
+    """Would catch: every bag of a version exporting into one directory
+    under the same file names, so only the last bag's data survived (a
+    two-bag version kept 400 of 600 IMU rows)."""
+
+    @pytest.fixture
+    def two_bags(self, tmp_dir):
+        a = generate_bag(tmp_dir / "run.mcap", BagConfig(duration_sec=1.0))
+        (tmp_dir / "other").mkdir()
+        b = generate_bag(tmp_dir / "other" / "run.mcap", BagConfig(duration_sec=2.0))
+        return a, b
+
+    def test_each_bag_gets_its_own_folder(self, mgr, two_bags, tmp_dir):
+        import polars as pl
+        from resurrector.core.bag_frame import BagFrame
+
+        a, b = two_bags
+        mgr.create("mb")
+        mgr.create_version("mb", "1.0", [BagRef(path=str(a)), BagRef(path=str(b))],
+                           topics=["/imu/data"])
+        out = mgr.export_version("mb", "1.0", str(tmp_dir / "ds"))
+        # Same file name in both bags: the index keeps them apart.
+        for folder, bag in (("000_run", a), ("001_run", b)):
+            rows = pl.read_parquet(out / folder / "imu_data.parquet").height
+            assert rows == BagFrame(bag)["/imu/data"].message_count
+        assert not (out / "imu_data.parquet").exists()
+        readme = (out / "README.md").read_text()
+        assert f"- `000_run/`: `{a}`" in readme and f"- `001_run/`: `{b}`" in readme
+        import json
+        manifest = json.loads((out / "manifest.json").read_text())
+        assert "000_run/imu_data.parquet" in manifest and "001_run/imu_data.parquet" in manifest
+
+    def test_single_bag_keeps_the_flat_layout(self, mgr, healthy_bag, tmp_dir):
+        mgr.create("one")
+        mgr.create_version("one", "1.0", [BagRef(path=str(healthy_bag))], topics=["/imu/data"])
+        out = mgr.export_version("one", "1.0", str(tmp_dir / "ds"))
+        assert (out / "imu_data.parquet").exists()
+
+    def test_a_bag_with_no_messages_is_skipped(self, mgr, two_bags, tmp_dir, caplog):
+        a, b = two_bags
+        mgr.create("mb")
+        # The first bag's own topic filter is /tf, which has no messages in
+        # the synthetic bags; the second bag exports /imu/data.
+        mgr.create_version("mb", "1.0", [BagRef(path=str(a), topics=["/tf"]), BagRef(path=str(b))],
+                           topics=["/imu/data"])
+        out = mgr.export_version("mb", "1.0", str(tmp_dir / "ds"))
+        assert not (out / "000_run").exists()
+        assert (out / "001_run" / "imu_data.parquet").exists()
+        assert "Skipping that bag" in caplog.text
+
+
+class TestFailedExportCleanup:
+    """Would catch: a failed export leaving an empty <output>/<dataset>
+    folder behind (the version folder was removed, its parent wasn't)."""
+
+    def test_failure_removes_only_folders_it_created(self, mgr, healthy_bag, tmp_dir):
+        from resurrector.core.exceptions import EmptyExportError
+
+        mgr.create("ds")
+        mgr.create_version("ds", "1.0", [BagRef(path=str(healthy_bag))], topics=["/tf"])
+        root = tmp_dir / "exports"
+        with pytest.raises(EmptyExportError):
+            mgr.export_version("ds", "1.0", str(root / "nested"))
+        assert not root.exists()
+
+    def test_existing_version_folder_is_kept(self, mgr, healthy_bag, tmp_dir):
+        from resurrector.core.exceptions import EmptyExportError
+
+        mgr.create("ds")
+        mgr.create_version("ds", "1.0", [BagRef(path=str(healthy_bag))], topics=["/tf"])
+        version_dir = tmp_dir / "exports" / "ds" / "1.0"
+        version_dir.mkdir(parents=True)
+        (version_dir / "earlier.parquet").write_text("from an earlier export")
+        with pytest.raises(EmptyExportError):
+            mgr.export_version("ds", "1.0", str(tmp_dir / "exports"))
+        assert (version_dir / "earlier.parquet").read_text() == "from an earlier export"
+
+    def test_unknown_topic_names_the_bag(self, mgr, healthy_bag, tmp_dir):
+        from resurrector.core.exceptions import TopicNotFoundError
+
+        mgr.create("ds")
+        mgr.create_version("ds", "1.0", [BagRef(path=str(healthy_bag))], topics=["/nope"])
+        with pytest.raises(TopicNotFoundError, match=f"not in {healthy_bag.name}"):
+            mgr.export_version("ds", "1.0", str(tmp_dir / "exports"))
+        assert not (tmp_dir / "exports").exists()

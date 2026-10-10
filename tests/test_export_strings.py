@@ -187,12 +187,21 @@ def test_cli_zarr_export_of_a_stamped_topic_succeeds(demo_bag, tmp_path, zarr_in
     assert frame_ids == {"imu_link"}
 
 
-def test_empty_topic_exports_without_crashing(demo_bag, tmp_path, fmt):
-    """``/tf`` is in the demo bag with no messages."""
+def test_empty_topic_gets_no_file_in_any_format(demo_bag, tmp_path, fmt):
+    """``/tf`` is in the demo bag with no messages. Would catch: CSV writing
+    a 0-byte file and HDF5/Zarr/.npz empty ones (Parquet wrote none), and
+    an export of only empty topics reporting success with nothing written."""
+    from resurrector.core.exceptions import EmptyExportError
+
     bf = BagFrame(demo_bag)
     assert bf["/tf"].message_count == 0
-    Exporter().export(bag_frame=bf, topics=["/tf"], format=fmt, output_dir=str(tmp_path))
-    assert _read(fmt, tmp_path, "tf") == {}
+    out = tmp_path / "out"
+    with pytest.raises(EmptyExportError, match="'/tf' has none"):
+        Exporter().export(bag_frame=bf, topics=["/tf"], format=fmt, output_dir=str(out))
+    assert not out.exists()
+
+    Exporter().export(bag_frame=bf, topics=["/tf", "/imu/data"], format=fmt, output_dir=str(out))
+    assert [p.stem for p in out.iterdir()] == ["imu_data"]
 
 
 def test_multimodal_preset_writes_strings(demo_bag, tmp_path, zarr_installed):

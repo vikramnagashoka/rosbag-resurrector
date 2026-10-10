@@ -3,7 +3,8 @@
 - validate_split_ratios() catches malformed specs
 - _cumulative_time_boundaries() math
 - split_export(strategy="time") writes per-split subdirs + manifest
-- split_export(strategy="random") preserves total row count + manifest
+- split_export(strategy="random") streams, honors format / sync /
+  downsample, and puts every row in exactly one split
 - split_export(strategy="stratified") raises NotImplementedError
 - BagFrame.export(split=..., split_strategy=...) end-to-end
 - CLI `--split train=0.8 --split val=0.1 --split test=0.1`
@@ -277,6 +278,141 @@ class TestSplitExportRandom:
         want = bf["/joint_states"].to_polars()
         assert got.height == want.height == 400
         assert got.select(want.columns).equals(want)
+
+
+class TestRandomSplitHonorsExportSettings:
+    """Would catch: the random strategy writing Parquet whatever -f, --sync
+    and --downsample said (v0.8.6 and before), or rows landing in two
+    splits or none once it streams one pass per split."""
+
+    @staticmethod
+    def _read_rows(path):
+        import h5py
+        import numpy as np
+
+        if path.suffix == ".h5":
+            with h5py.File(path, "r") as f:
+                group = f[list(f.keys())[0]]
+                return np.asarray(group["timestamp_ns"][:]).tolist()
+        import polars as pl
+        return pl.read_parquet(path)["timestamp_ns"].to_list()
+
+    @pytest.mark.parametrize("fmt,ext", [("hdf5", ".h5"), ("csv", ".csv"), ("numpy", ".npz")])
+    def test_writes_the_requested_format(self, synth_bag, tmp_dir, fmt, ext):
+        from resurrector.core.bag_frame import BagFrame
+        out = tmp_dir / "fmt"
+        split_export(bag_frame=BagFrame(synth_bag), topics=["/imu/data"], output=out,
+                     split={"a": 0.5, "b": 0.5}, strategy="random", format=fmt)
+        for name in ("a", "b"):
+            assert [p.name for p in (out / name).iterdir()] == [f"imu_data{ext}"]
+
+    def test_rows_partition_the_topic_and_repeat_across_runs(self, synth_bag, tmp_dir):
+        from resurrector.core.bag_frame import BagFrame
+        bf = BagFrame(synth_bag)
+        runs = []
+        for run in ("r1", "r2"):
+            out = tmp_dir / run
+            split_export(bag_frame=bf, topics=["/imu/data"], output=out,
+                         split={"a": 0.6, "b": 0.3, "c": 0.1}, strategy="random", format="hdf5")
+            runs.append({n: self._read_rows(out / n / "imu_data.h5") for n in ("a", "b", "c")})
+        parts = runs[0]
+        every = sorted(t for rows in parts.values() for t in rows)
+        assert every == bf["/imu/data"].to_polars()["timestamp_ns"].to_list()  # each row once
+        assert all(parts.values())
+        assert runs[0] == runs[1]
+        manifest = json.loads((tmp_dir / "r1" / "split_manifest.json").read_text())
+        assert {n: s["rows"] for n, s in manifest["splits"].items()} == {
+            n: len(rows) for n, rows in parts.items()}
+
+    def test_sync_splits_whole_synced_rows(self, synth_bag, tmp_dir):
+        import polars as pl
+        from resurrector.core.bag_frame import BagFrame
+        bf = BagFrame(synth_bag)
+        out = tmp_dir / "sync"
+        split_export(bag_frame=bf, topics=["/imu/data", "/joint_states"], output=out,
+                     split={"a": 0.5, "b": 0.5}, strategy="random", format="parquet",
+                     sync=True, sync_method="nearest")
+        parts = [pl.read_parquet(out / n / "synced.parquet") for n in ("a", "b")]
+        got = pl.concat(parts).sort("timestamp_ns")
+        want = bf.sync(["/imu/data", "/joint_states"], method="nearest").sort("timestamp_ns")
+        assert got.select(want.columns).equals(want)
+
+    def test_downsample_applies_before_the_split(self, synth_bag, tmp_dir):
+        import polars as pl
+        from resurrector.core.bag_frame import BagFrame
+        bf = BagFrame(synth_bag)
+        out = tmp_dir / "ds"
+        split_export(bag_frame=bf, topics=["/imu/data"], output=out,
+                     split={"a": 0.5, "b": 0.5}, strategy="random", format="parquet",
+                     downsample_hz=20)
+        rows = sum(pl.read_parquet(out / n / "imu_data.parquet").height for n in ("a", "b"))
+        assert 70 <= rows <= 90  # 4 s at 20 Hz, not 800 rows at 200 Hz
+
+    def test_streams_in_chunks(self, synth_bag, tmp_dir, monkeypatch):
+        """Memory is bounded by the chunk size: no writer ever gets more
+        than CHUNK_SIZE rows at once. Would catch: the v0.8.6 random split,
+        which concatenated each whole topic and wrote it as one frame."""
+        from resurrector.core import export as export_module
+        from resurrector.core.bag_frame import BagFrame
+
+        monkeypatch.setattr(export_module, "CHUNK_SIZE", 100)
+        seen = []
+        real = export_module.Exporter._stream_dataframe_chunks
+
+        def spy(self, chunks, fmt, output_path, name):
+            def watch():
+                for chunk in chunks:
+                    seen.append(chunk.height)
+                    yield chunk
+            return real(self, watch(), fmt, output_path, name)
+
+        monkeypatch.setattr(export_module.Exporter, "_stream_dataframe_chunks", spy)
+        split_export(bag_frame=BagFrame(synth_bag), topics=["/imu/data"], output=tmp_dir / "c",
+                     split={"a": 0.5, "b": 0.5}, strategy="random", format="parquet")
+        assert sum(seen) == BagFrame(synth_bag)["/imu/data"].message_count
+        assert len(seen) > 2 and max(seen) <= 100
+
+    def test_lerobot_is_refused_before_writing(self, synth_bag, tmp_dir, monkeypatch):
+        from resurrector.core.bag_frame import BagFrame
+        monkeypatch.setattr("resurrector.core.export.require_export_dependencies", lambda f: None)
+        out = tmp_dir / "lr"
+        with pytest.raises(ValueError, match="random split can't write LeRobot"):
+            split_export(bag_frame=BagFrame(synth_bag), topics=["/camera/rgb"], output=out,
+                         split={"a": 0.5, "b": 0.5}, strategy="random", format="lerobot")
+        assert not out.exists()
+
+    def test_cli_random_split_writes_hdf5(self, synth_bag, tmp_dir):
+        out = tmp_dir / "cli_h5"
+        result = CliRunner().invoke(app, [
+            "export", str(synth_bag), "-t", "/imu/data", "-f", "hdf5", "-o", str(out),
+            "--split", "train=0.8", "--split", "val=0.2", "--split-strategy", "random",
+        ])
+        assert result.exit_code == 0, result.output
+        assert [p.name for p in (out / "train").iterdir()] == ["imu_data.h5"]
+
+
+class TestTimeSplitEmptyWindow:
+    def test_split_with_no_messages_is_skipped(self, synth_bag, tmp_dir, caplog):
+        """/camera/compressed is 10 Hz: a 2 ms window between frames has
+        none. Would catch: that split failing the whole export."""
+        from resurrector.core.bag_frame import BagFrame
+        bf = BagFrame(synth_bag)
+        out = tmp_dir / "gap"
+        tiny = 0.002 / bf.duration_sec
+        split_export(bag_frame=bf, topics=["/camera/compressed"], output=out,
+                     split={"head": 0.4, "gap": tiny, "rest": 0.6 - tiny},
+                     strategy="time", format="parquet")
+        assert sorted(p.name for p in out.iterdir()) == ["head", "rest", "split_manifest.json"]
+        assert "Split 'gap'" in caplog.text
+
+    def test_every_split_empty_raises(self, synth_bag, tmp_dir):
+        from resurrector.core.bag_frame import BagFrame
+        from resurrector.core.exceptions import EmptyExportError
+        out = tmp_dir / "empty"
+        with pytest.raises(EmptyExportError):
+            split_export(bag_frame=BagFrame(synth_bag), topics=["/tf"], output=out,
+                         split={"a": 0.5, "b": 0.5}, strategy="time", format="parquet")
+        assert not out.exists()
 
 
 # ---------------------------------------------------------------------------

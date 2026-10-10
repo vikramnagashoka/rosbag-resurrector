@@ -274,26 +274,69 @@ def _decode_frame(view: "TopicView", msg) -> np.ndarray | None:
     return None if arr is None else to_rgb(arr, msg.data.get("encoding"), view.name)
 
 
+def _frame_encoding(msg) -> str | None:
+    return msg.data.get("encoding") or msg.data.get("format")
+
+
+def _unreadable_encoding(view: "TopicView", msg) -> bool:
+    """True if ``msg`` failed to decode because of its encoding (every
+    frame like it will fail), not because the frame itself is damaged."""
+    from resurrector.ingest.parser import RAW_IMAGE_ENCODINGS
+
+    if view.message_type == "sensor_msgs/msg/CompressedImage":
+        return "compresseddepth" in (msg.data.get("format") or "").lower()
+    return msg.data.get("encoding") not in RAW_IMAGE_ENCODINGS
+
+
 def frames_on_grid(view: "TopicView", grid: np.ndarray) -> Iterator[np.ndarray]:
-    """Yield one RGB frame per grid point (latest frame at or before it)."""
+    """Yield one RGB frame per grid point (latest frame at or before it).
+
+    A frame in an encoding the export can't read (raw mono16 / 16UC1 /
+    32FC1, compressedDepth) raises ValueError, even after earlier frames
+    decoded: holding the last good frame would fill the rest of the
+    episode with a stale image. A damaged frame in a readable encoding (cut
+    off, or a JPEG that doesn't decode) is replaced by the frame before it,
+    and a warning gives how many were.
+    """
     msgs = iter(view.iter_messages())
     current: np.ndarray | None = None
     undecoded = None
+    damaged = 0
+    first_damaged = None
     pending = next(msgs, None)
-    for t in grid:
+    last = len(grid) - 1
+    for i, t in enumerate(grid):
         while pending is not None and pending.timestamp_ns <= t:
             frame = _decode_frame(view, pending)
             if frame is not None:
                 current = frame
+            elif _unreadable_encoding(view, pending) and current is not None:
+                raise ValueError(
+                    f"Camera topic {view.name!r} has a frame at "
+                    f"{pending.timestamp_ns} in encoding "
+                    f"{_frame_encoding(pending)!r}, which LeRobot export can't "
+                    f"convert to 8-bit RGB, after frames it could. Leave the "
+                    f"topic out of the export or convert its images first."
+                )
             else:
                 undecoded = pending
+                if current is not None:
+                    damaged += 1
+                    first_damaged = first_damaged or pending.timestamp_ns
             pending = next(msgs, None)
         if current is None:
             # The encoding is what a user needs to see: raw 16UC1 / mono16
             # / rgb16 frames, for one, don't decode at all.
-            enc = undecoded and (undecoded.data.get("encoding") or undecoded.data.get("format"))
+            enc = undecoded and _frame_encoding(undecoded)
             detail = f" (frame encoding {enc!r})" if enc else ""
             raise ValueError(f"No decodable frame on {view.name} at or before {t}{detail}")
+        if i == last and damaged:
+            # Logged before the last yield: the writer takes exactly one
+            # frame per grid point, so code after the loop never runs.
+            logger.warning(
+                "%d frame(s) on %s didn't decode (first at %d); each was "
+                "replaced by the frame before it", damaged, view.name, first_damaged,
+            )
         yield current
 
 
@@ -434,18 +477,19 @@ def _match_field_order(ep: _Episode, names: tuple[list[str], list[str]]) -> _Epi
 def _plan_episode(
     bf: "BagFrame", topics: Sequence[str], action_topics: Sequence[str], fps: int,
 ) -> _Episode:
+    from resurrector.core.export import check_topics
+
+    # A topic or action topic missing from this bag used to be skipped,
+    # giving that episode different features than the others.
+    check_topics(bf, [*topics, *action_topics])
     image_views, state_topics = [], []
     for t in topics:
-        try:
-            view = bf[t]
-        except KeyError:
-            logger.warning("Topic '%s' not found, skipping", t)
-            continue
+        view = bf[t]
         if view.is_image_topic:
             image_views.append(view)
         elif t not in action_topics:
             state_topics.append(t)
-    act_topics = [t for t in action_topics if t in bf.topic_names]
+    act_topics = list(action_topics)
 
     bounds = []
     for t in [*state_topics, *act_topics]:
@@ -565,7 +609,11 @@ def export_lerobot(
             float, ...) and can't become RGB losslessly; usually raised on
             the topic's first frame, before ``output_dir`` exists.
         Either error on a later frame or bag removes the partial dataset.
-        ValueError: No overlapping data, or episodes disagree on features.
+        TopicNotFoundError: A bag lacks one of ``topics`` or
+            ``action_topics``.
+        ValueError: No overlapping data, episodes disagree on features,
+            or a camera frame after decodable ones is in an encoding the
+            export can't read (the partial dataset is removed).
     """
     LeRobotDataset = import_lerobot_dataset()
 

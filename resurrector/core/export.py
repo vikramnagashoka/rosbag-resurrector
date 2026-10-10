@@ -41,6 +41,7 @@ the file is written; HDF5, Zarr and NumPy leave them out of the file.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import logging
 import platform
 import sys
@@ -52,7 +53,12 @@ from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Mapping, Sequenc
 import numpy as np
 import polars as pl
 
-from resurrector.core.exceptions import LargeTopicError, ResurrectorError
+from resurrector.core.exceptions import (
+    EmptyExportError,
+    LargeTopicError,
+    ResurrectorError,
+    TopicNotFoundError,
+)
 
 if TYPE_CHECKING:
     from resurrector.core.bag_frame import BagFrame
@@ -684,9 +690,11 @@ class Exporter:
 
         Args:
             bag_frame: The :class:`BagFrame` to read from.
-            topics: List of topic names. Missing topics are logged and
-                skipped — the export does NOT fail on a single missing
-                topic.
+            topics: List of topic names. Every one must be in the bag
+                (else :class:`TopicNotFoundError`, before anything is
+                written). A topic with no messages in the exported range
+                gets no file and a logged warning; if none of them has
+                any, :class:`EmptyExportError` is raised.
             format: ``parquet`` (default), ``hdf5``, ``csv``, ``numpy``,
                 ``zarr`` (needs ``[all-exports]``), ``lerobot`` (needs
                 ``[lerobot]``, Python 3.12+), or ``rlds`` (needs
@@ -722,7 +730,13 @@ class Exporter:
             ImportError: The format's optional dependency is missing.
                 Raised before ``output_dir`` is created.
             ValueError: For unknown format strings.
-            KeyError: ``sync=True`` and a topic isn't in the bag.
+            TopicNotFoundError: A topic isn't in the bag (also a
+                ``KeyError`` and a ``ValueError``). Raised before anything
+                is written.
+            EmptyExportError: None of the topics has a message in the
+                exported range, so nothing was written (also a
+                ``ValueError``). Not raised for ``sync=True``, which
+                writes ``synced.<ext>`` with no rows.
             SyncOutOfOrderError, SyncBufferExceededError,
                 SyncSchemaDriftError: ``sync=True`` on the streaming
                 engine (topics over ``LARGE_TOPIC_THRESHOLD``). Raised
@@ -738,6 +752,9 @@ class Exporter:
                 does with the failed columns.
         """
         require_export_dependencies(format)
+        check_topics(bag_frame, topics)
+        if not topics:
+            raise ValueError("No topics selected, so nothing was exported.")
         output_path = Path(output_dir)
 
         if format == "lerobot":
@@ -753,45 +770,48 @@ class Exporter:
             )
             return output_path
 
+        created = first_missing_dir(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
-
-        if sync and len(topics) > 1:
-            from resurrector.core.sync import iter_synchronize
-            from resurrector.core.transforms import iter_downsample_temporal
-
-            views = {name: bag_frame[name] for name in topics}
-            chunks = iter_synchronize(views, method=sync_method, chunk_size=CHUNK_SIZE)
-            if downsample_hz:
-                chunks = iter_downsample_temporal(chunks, downsample_hz)
-            self._stream_dataframe_chunks(
-                _at_least_one_chunk(chunks), format, output_path, "synced",
-            )
-            return output_path
-
-        for topic in topics:
-            try:
-                view = bag_frame[topic]
-            except KeyError:
-                logger.warning("Topic '%s' not found, skipping", topic)
-                continue
-
-            # Pre-flight: NumPy export is hard-capped because .npz
-            # can't append. Refuse early with a clear pointer to
-            # Parquet rather than letting the user wait through a
-            # multi-GB materialization.
-            if format == "numpy" and view.message_count > NUMPY_HARD_CAP:
-                raise LargeTopicError(
-                    topic_name=view.name,
-                    message_count=view.message_count,
-                    threshold=NUMPY_HARD_CAP,
+        try:
+            if sync and len(topics) > 1:
+                self._stream_dataframe_chunks(
+                    _at_least_one_chunk(
+                        synced_chunks(bag_frame, topics, sync_method, downsample_hz)
+                    ),
+                    format, output_path, "synced",
                 )
+                return output_path
 
-            safe_name = topic.lstrip("/").replace("/", "_")
-            chunks = _transform_chunks(
-                view.iter_chunks(CHUNK_SIZE), downsample_hz
-            )
-            self._stream_dataframe_chunks(chunks, format, output_path, safe_name)
-
+            empty: list[str] = []
+            for topic in topics:
+                view = bag_frame[topic]
+                # Pre-flight: NumPy export is hard-capped because .npz
+                # can't append. Refuse early with a clear pointer to
+                # Parquet rather than letting the user wait through a
+                # multi-GB materialization.
+                if format == "numpy" and view.message_count > NUMPY_HARD_CAP:
+                    raise LargeTopicError(
+                        topic_name=view.name,
+                        message_count=view.message_count,
+                        threshold=NUMPY_HARD_CAP,
+                    )
+                chunks = nonempty_chunks(topic_chunks(view, downsample_hz))
+                if chunks is None:
+                    # Every format writes nothing for it: a header-less
+                    # CSV or an empty HDF5 file says nothing a reader can use.
+                    logger.warning(
+                        "Topic '%s' has no messages in the exported range; "
+                        "no file written for it", topic,
+                    )
+                    empty.append(topic)
+                    continue
+                safe_name = topic.lstrip("/").replace("/", "_")
+                self._stream_dataframe_chunks(chunks, format, output_path, safe_name)
+            if topics and len(empty) == len(topics):
+                raise EmptyExportError(empty, bag_frame.path)
+        except BaseException:
+            remove_empty_dirs(output_path, created)
+            raise
         return output_path
 
     def _stream_dataframe_chunks(
@@ -945,6 +965,78 @@ class Exporter:
 
         logger.info("Exported %d frames as video to %s", count, output_file)
         return output_file
+
+
+def check_topics(bag_frame: "BagFrame", topics: Sequence[str]) -> None:
+    """Raise :class:`TopicNotFoundError` if any of ``topics`` isn't in the bag."""
+    available = list(bag_frame.topic_names)
+    known = set(available)
+    missing = [t for t in topics if t not in known]
+    if missing:
+        raise TopicNotFoundError(missing, available, bag_frame.path)
+
+
+def topic_chunks(view, downsample_hz: float | None) -> Iterator:
+    """One topic's export rows: ``CHUNK_SIZE`` chunks, each downsampled
+    on its own when ``downsample_hz`` is set."""
+    return _transform_chunks(view.iter_chunks(CHUNK_SIZE), downsample_hz)
+
+
+def synced_chunks(
+    bag_frame: "BagFrame", topics: Sequence[str], sync_method: str,
+    downsample_hz: float | None,
+) -> Iterator:
+    """The synced table of ``topics`` (the rows :meth:`BagFrame.sync`
+    gives), streamed in ``CHUNK_SIZE`` chunks and downsampled as one
+    stream when ``downsample_hz`` is set."""
+    from resurrector.core.sync import iter_synchronize
+    from resurrector.core.transforms import iter_downsample_temporal
+
+    views = {name: bag_frame[name] for name in topics}
+    chunks = iter_synchronize(views, method=sync_method, chunk_size=CHUNK_SIZE)
+    if downsample_hz:
+        chunks = iter_downsample_temporal(chunks, downsample_hz)
+    return chunks
+
+
+def nonempty_chunks(chunks: Iterable) -> Iterator | None:
+    """``chunks`` from its first chunk with rows on, or None if no chunk
+    has any. Reads ahead one chunk."""
+    it = iter(chunks)
+    for chunk in it:
+        if chunk.height:
+            return itertools.chain([chunk], it)
+    return None
+
+
+def first_missing_dir(path: Path) -> Path | None:
+    """The outermost directory ``path.mkdir(parents=True)`` would create,
+    or None if ``path`` already exists."""
+    path = Path(path).absolute()
+    top = None
+    while not path.exists():
+        top = path
+        if path.parent == path:
+            break
+        path = path.parent
+    return top
+
+
+def remove_empty_dirs(path: Path, top: Path | None) -> None:
+    """Remove ``path`` and its parents up to ``top`` while each is empty:
+    what a failed export created and never filled. Nothing is removed
+    when ``top`` is None (``path`` existed before the export)."""
+    if top is None:
+        return
+    d = Path(path).absolute()
+    while True:
+        try:
+            d.rmdir()  # fails unless d is empty
+        except OSError:
+            return
+        if d == top or d.parent == d:
+            return
+        d = d.parent
 
 
 def _transform_chunks(chunks: Iterable, downsample_hz: float | None) -> Iterator:

@@ -52,6 +52,54 @@ class LargeTopicError(ResurrectorError):
         )
 
 
+class TopicNotFoundError(ResurrectorError, KeyError, ValueError):
+    """An export named topics the bag doesn't have.
+
+    Raised before anything is written. Exports used to log a missing topic
+    and skip it, so a typo exported nothing and still reported success.
+    A ``KeyError`` (what ``BagFrame[topic]`` raises) and a ``ValueError``
+    (what the CLI and the dashboard's 400 already handle).
+    """
+
+    def __init__(self, missing: list[str], available: list[str], bag: str | os.PathLike):
+        self.missing = list(missing)
+        self.available = list(available)
+        self.bag = bag
+        names = ", ".join(repr(t) for t in self.missing)
+        noun = "Topic" if len(self.missing) == 1 else "Topics"
+        verb = "is" if len(self.missing) == 1 else "are"
+        self.message = (
+            f"{noun} {names} {verb} not in {os.path.basename(os.fspath(bag))}, "
+            f"so nothing was exported. Topics in it: {', '.join(self.available) or 'none'}."
+        )
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        # KeyError's own __str__ would quote the whole message.
+        return self.message
+
+
+class EmptyExportError(ResurrectorError, ValueError):
+    """Every topic selected for an export has no messages (in the bag, or
+    in the exported time range), so no file was written.
+
+    A topic with no messages is skipped (with a warning) when other topics
+    have data; this is raised only when nothing at all could be written,
+    instead of reporting a successful export of nothing.
+    """
+
+    def __init__(self, topics: list[str], bag: str | os.PathLike):
+        self.topics = list(topics)
+        self.bag = bag
+        names = ", ".join(repr(t) for t in self.topics)
+        self.message = (
+            f"No messages to export from {os.path.basename(os.fspath(bag))}: "
+            f"{names} {'has' if len(self.topics) == 1 else 'have'} none in the "
+            f"exported range, so no file was written."
+        )
+        super().__init__(self.message)
+
+
 class SyncBufferExceededError(ResurrectorError):
     """Raised when a streaming sync buffer fills up.
 

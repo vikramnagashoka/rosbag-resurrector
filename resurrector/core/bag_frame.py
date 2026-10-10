@@ -896,6 +896,12 @@ class BagFrame:
         if resolved["topics"] is None:
             topic_filter = resolved.pop("topic_filter")
             topic_names = apply_topic_filter(self, topic_filter)
+            if not topic_names and topic_filter:
+                raise ValueError(
+                    f"The {preset!r} preset exports {topic_filter} topics, and "
+                    f"{self._path.name} has none (topics: "
+                    f"{', '.join(self.topic_names) or 'none'})."
+                )
         else:
             topic_names = resolved["topics"]
             resolved.pop("topic_filter")

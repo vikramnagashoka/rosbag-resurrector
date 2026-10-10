@@ -86,10 +86,18 @@ def generate_dataset_readme(
         ])
 
     # Source bags
+    from resurrector.core.dataset import bag_folder_names
+
+    folders = None if is_lerobot else bag_folder_names(bag_refs)
     lines.extend(["## Source Bags", ""])
     for i, ref in enumerate(bag_refs):
         path = ref.get("path", "?")
-        line = f"- Episode {i}: `{path}`" if is_lerobot else f"- `{path}`"
+        if is_lerobot:
+            line = f"- Episode {i}: `{path}`"
+        elif folders:
+            line = f"- `{folders[i]}/`: `{path}`"
+        else:
+            line = f"- `{path}`"
         if ref.get("start_time") or ref.get("end_time"):
             line += f" (slice: {ref.get('start_time', '0')} → {ref.get('end_time', 'end')})"
         # LeRobot applies the dataset-level topic list to every episode.
@@ -174,8 +182,7 @@ def generate_dataset_readme(
         lines.extend([
             "import polars as pl",
             "",
-            "# Load all parquet files",
-            f"df = pl.read_parquet({_path_literal('*.parquet')})",
+            f"df = pl.read_parquet({_path_literal(first_file or 'data.parquet')})",
             "print(df.head())",
         ])
     elif export_format == "hdf5":

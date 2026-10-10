@@ -32,6 +32,31 @@ console = Console()
 err_console = Console(stderr=True, soft_wrap=True)
 
 
+def _open_bag(path: Path):
+    """``BagFrame(path)`` with its metadata read, or a one-line error on
+    stderr and exit 1 when the path is missing, isn't a bag format, or
+    isn't a readable bag (not an MCAP at all, or cut off mid-write)."""
+    import struct
+
+    from mcap.exceptions import McapError
+
+    from resurrector.core.bag_frame import BagFrame
+
+    try:
+        bf = BagFrame(path)
+        bf.metadata  # reads the MCAP summary, where an unreadable file fails
+    except FileNotFoundError as e:
+        err_console.print(f"[red]{rich_escape(str(e))}[/red]")
+        raise typer.Exit(1)
+    except (NotImplementedError, ValueError, McapError, struct.error, OSError) as e:
+        err_console.print(
+            f"[red]Can't read {rich_escape(str(path))}: "
+            f"{rich_escape(str(e) or type(e).__name__)}[/red]"
+        )
+        raise typer.Exit(1)
+    return bf
+
+
 def _print_version_and_exit(value: bool) -> None:
     """`--version` callback. Typer doesn't add this automatically."""
     if not value:
@@ -180,10 +205,9 @@ def info(
     Example:
       resurrector info experiment.mcap
     """
-    from resurrector.core.bag_frame import BagFrame
     from resurrector.cli.formatters import print_bag_info
 
-    bf = BagFrame(path)
+    bf = _open_bag(path)
     health = bf.health_report()
     print_bag_info(bf.metadata, health, path.stat().st_size)
 
@@ -219,7 +243,6 @@ def health(
       Whole directory, machine-readable JSON output:
           resurrector health ./bags --format json --output report.json
     """
-    from resurrector.core.bag_frame import BagFrame
     from resurrector.ingest.scanner import scan_path
     from resurrector.cli.formatters import print_health_report
 
@@ -230,8 +253,16 @@ def health(
         paths = [path]
 
     all_reports = {}
+    unreadable = 0
     for bag_path in paths:
-        bf = BagFrame(bag_path)
+        try:
+            bf = _open_bag(bag_path)
+        except typer.Exit:
+            if not path.is_dir():
+                raise
+            # One bad bag in a directory doesn't stop the others' reports.
+            unreadable += 1
+            continue
         report = bf.health_report()
         all_reports[str(bag_path)] = report
 
@@ -264,6 +295,8 @@ def health(
             console.print(f"[green]Report saved to {output}[/green]")
         else:
             console.print(json_str)
+    if unreadable:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -524,9 +557,11 @@ def export(
     )] = None,
     split_strategy: Annotated[str, typer.Option("--split-strategy",
         help="How to assign rows to splits when --split is set. "
-             "'time' (default) — chronological, best for time-series. "
-             "'random' — uniform random per row. 'stratified' is a "
-             "v0.6+ candidate (raises NotImplementedError). "
+             "'time' (default): chronological, best for time-series. "
+             "'random': each row (each synced row with --sync) goes to a "
+             "split at random, the same way every run; reads the bag once "
+             "per split; not for lerobot. 'stratified' is a v0.6+ candidate "
+             "(raises NotImplementedError). "
              "e.g. --split-strategy random",
     )] = "time",
     task: Annotated[Optional[str], typer.Option("--task",
@@ -607,9 +642,7 @@ def export(
             "Missing argument 'PATH'. e.g. resurrector export run.mcap --preset lerobot"
         )
 
-    from resurrector.core.bag_frame import BagFrame
-
-    bf = BagFrame(path)
+    bf = _open_bag(path)
     # `sync` arg in CLI is the method string (or None); BagFrame.export
     # takes a bool sync + str sync_method separately. Resolve here.
     do_sync = sync is not None if preset is None else None  # let preset decide
@@ -917,6 +950,8 @@ def diff(
     """
     from resurrector.core.bag_diff import diff_bags
 
+    _open_bag(bag1)
+    _open_bag(bag2)
     # --json / --fail-on-change use the structured engine; the default
     # human view keeps the existing rich-table formatter unchanged.
     if json_output is not None or fail_on_change:
@@ -983,9 +1018,11 @@ def report(
           resurrector report run.mcap -s 12 -e 18 -o incident.md
     """
     from resurrector.core.report import generate_incident_report
-    from resurrector.ingest.parser import parse_bag
 
-    end_sec = end if end is not None else parse_bag(bag).get_metadata().duration_sec
+    bf = _open_bag(bag)
+    if baseline is not None:
+        _open_bag(baseline)
+    end_sec = end if end is not None else bf.metadata.duration_sec
 
     # Resolve format from the output extension when present.
     resolved_fmt = fmt
@@ -1198,14 +1235,13 @@ def quicklook(
     Example:
       resurrector quicklook experiment.mcap
     """
-    from resurrector.core.bag_frame import BagFrame
     from resurrector.core.topic_groups import classify_topics
     from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
     from resurrector.cli.formatters import health_badge, format_size
 
-    bf = BagFrame(path)
+    bf = _open_bag(path)
     meta = bf.metadata
     health = bf.health_report()
     groups = classify_topics(bf.topic_names)
@@ -1623,10 +1659,9 @@ def export_frames_cmd(
           resurrector export-frames bag.mcap -t /camera/rgb \
               -f jpeg --every-n 5 -o ./frames_thin
     """
-    from resurrector.core.bag_frame import BagFrame
     from resurrector.core.export import Exporter
 
-    bf = BagFrame(path)
+    bf = _open_bag(path)
     view = bf[topic]
     if not view.is_image_topic:
         console.print(f"[red]Topic '{topic}' is not an image topic.[/red]")
