@@ -6,8 +6,9 @@ from a single bag, applying one of:
 - **time** (default) — chronological. First N% of the bag's time → train,
   next M% → val, last K% → test. Best for time-series; preserves temporal
   locality so val/test contain "future" data the model didn't train on.
-- **random** — uniform random per-row split. Disregards temporal
-  locality; only valid when row-level independence is OK (rare in robotics).
+- **random** — each row goes to a split at random (fixed seed, so the
+  same bag gives the same splits). Disregards temporal locality; only
+  valid when row-level independence is OK (rare in robotics).
 - **stratified** — not implemented in v0.5.0; see the ``NotImplementedError``
   message for the v0.6+ design sketch.
 
@@ -19,6 +20,7 @@ Ratios must sum to ~1.0 (1e-6 tolerance).
 from __future__ import annotations
 
 import logging
+import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -89,6 +91,9 @@ def split_export(
                 ...
             split_manifest.json   (records the split ratios + strategy + boundaries)
 
+    Both strategies stream: memory is bounded by the chunk size, not the
+    topic size. A split with no rows gets no subdirectory.
+
     Args:
         bag_frame: The :class:`BagFrame` to split + export.
         topics: List of topic names to include in each split.
@@ -96,49 +101,66 @@ def split_export(
         split: Ratios dict (``{"train": 0.8, ...}``). Must already pass
             :func:`validate_split_ratios`.
         strategy: ``"time"`` (default), ``"random"``, or ``"stratified"``.
-        format / sync / sync_method / downsample_hz: Forwarded to each
-            sub-export's :meth:`Exporter.export` call. Same shape as
-            :meth:`BagFrame.export`. The ``"random"`` strategy writes
-            Parquet without syncing or downsampling, whatever these say.
+        format / sync / sync_method / downsample_hz: Applied to each split
+            the way :meth:`Exporter.export` applies them. ``"random"``
+            assigns rows after syncing and downsampling, and can't write
+            ``lerobot`` (an episode is a contiguous run of frames).
 
     Returns:
         ``Path`` to ``output`` (same as the single-export case, except the
         directory now contains per-split subdirectories).
 
     Raises:
-        ValueError: For unknown strategies.
+        ValueError: For unknown strategies, or ``"random"`` with
+            ``format="lerobot"``.
         NotImplementedError: For ``"stratified"``.
         ImportError: The format's optional dependency is missing (raised
             before ``output`` is created).
+        TopicNotFoundError: A topic isn't in the bag (raised before
+            ``output`` is created).
+        EmptyExportError: No split has any rows.
     """
-    from resurrector.core.export import require_export_dependencies
+    from resurrector.core.export import (
+        check_topics,
+        first_missing_dir,
+        remove_empty_dirs,
+        require_export_dependencies,
+    )
 
     require_export_dependencies(format)
-    output = Path(output)
-    output.mkdir(parents=True, exist_ok=True)
-
-    if strategy == "time":
-        return _split_export_time(
-            bag_frame, topics, output, split,
-            format=format, sync=sync, sync_method=sync_method,
-            downsample_hz=downsample_hz,
-        )
-    if strategy == "random":
-        return _split_export_random(
-            bag_frame, topics, output, split,
-            format=format, sync=sync, sync_method=sync_method,
-            downsample_hz=downsample_hz,
-        )
+    check_topics(bag_frame, topics)
+    if not topics:
+        raise ValueError("No topics selected, so nothing was exported.")
     if strategy == "stratified":
         raise NotImplementedError(
             "stratified split is not yet supported (v0.6+ candidate). "
             "It needs a column-to-stratify-by argument and per-stratum "
             "shuffling. Use 'time' or 'random' for v0.5.0."
         )
-    raise ValueError(
-        f"Unknown split strategy {strategy!r}. "
-        f"Supported: 'time', 'random'. ('stratified' planned for v0.6.)"
-    )
+    if strategy not in ("time", "random"):
+        raise ValueError(
+            f"Unknown split strategy {strategy!r}. "
+            f"Supported: 'time', 'random'. ('stratified' planned for v0.6.)"
+        )
+    if strategy == "random" and format == "lerobot":
+        raise ValueError(
+            "A random split can't write LeRobot datasets: each episode is a "
+            "contiguous run of frames, and a random split scatters them. "
+            "Use --split-strategy time."
+        )
+    output = Path(output)
+    created = first_missing_dir(output)
+    output.mkdir(parents=True, exist_ok=True)
+    run = _split_export_time if strategy == "time" else _split_export_random
+    try:
+        return run(
+            bag_frame, topics, output, split,
+            format=format, sync=sync, sync_method=sync_method,
+            downsample_hz=downsample_hz,
+        )
+    except BaseException:
+        remove_empty_dirs(output, created)
+        raise
 
 
 def _split_export_time(
@@ -153,6 +175,9 @@ def _split_export_time(
     downsample_hz: float | None,
 ) -> Path:
     """Chronological split: each named split gets a contiguous time window."""
+    from resurrector.core.exceptions import EmptyExportError
+    from resurrector.core.export import Exporter, bag_label
+
     duration = bag_frame.duration_sec
     boundaries = _cumulative_time_boundaries(split, duration)
 
@@ -163,22 +188,26 @@ def _split_export_time(
     }
 
     cursor_sec = 0.0
+    written = 0
     for split_name, end_sec in boundaries:
-        sub_output = output / split_name
-        sub_output.mkdir(parents=True, exist_ok=True)
         sliced = bag_frame.time_slice(cursor_sec, end_sec)
-        # Note: TimeslicedBagFrame.export isn't defined; we go through the
-        # exporter directly with the time-bounded TopicViews.
-        from resurrector.core.export import Exporter
-        Exporter().export(
-            bag_frame=sliced,
-            topics=topics,
-            format=format,
-            output_dir=str(sub_output),
-            sync=sync,
-            sync_method=sync_method,
-            downsample_hz=downsample_hz,
-        )
+        try:
+            Exporter().export(
+                bag_frame=sliced,
+                topics=topics,
+                format=format,
+                output_dir=str(output / split_name),
+                sync=sync,
+                sync_method=sync_method,
+                downsample_hz=downsample_hz,
+            )
+            written += 1
+        except EmptyExportError:
+            # A short window can hold no messages; that split is just empty.
+            logger.warning(
+                "Split '%s' (%.3fs to %.3fs) has no messages; nothing written for it",
+                split_name, cursor_sec, end_sec,
+            )
         manifest["splits"][split_name] = {
             "start_sec": cursor_sec,
             "end_sec": end_sec,
@@ -186,12 +215,19 @@ def _split_export_time(
         }
         cursor_sec = end_sec
 
+    if not written:
+        raise EmptyExportError(topics, bag_label(bag_frame))
     _write_manifest(output, manifest)
     logger.info(
         "Time-split export to %s: %d splits over %.2fs",
         output, len(split), duration,
     )
     return output
+
+
+# Every random split draws from this seed, so the same bag and split spec
+# always give the same rows in each split.
+RANDOM_SPLIT_SEED = 42
 
 
 def _split_export_random(
@@ -205,72 +241,82 @@ def _split_export_random(
     sync_method: str,
     downsample_hz: float | None,
 ) -> Path:
-    """Random split: assign each row to a split label by sampled probability.
+    """Random split: each row goes to a split drawn with the split's ratio.
 
-    For v0.5.0 this is implemented at row granularity per-topic by
-    materializing each topic, shuffling the index, and writing per-split
-    parquet files (``format``, ``sync``, ``sync_method`` and
-    ``downsample_hz`` are not applied). Memory is bounded by topic size,
-    NOT chunk size — the random strategy is fundamentally non-streaming
-    because we have to decide each row's destination up front.
-
-    For very large topics, prefer ``strategy="time"`` (which IS streaming).
+    Streams in one pass per split instead of materializing a topic: each
+    pass re-reads the topic (or the synced table) chunk by chunk, draws a
+    label per row from an RNG seeded by :data:`RANDOM_SPLIT_SEED` and the
+    stream's name, and keeps the rows labelled for that split. Re-seeding
+    per pass gives every row the same label in every pass, so the splits
+    partition the rows. Memory is bounded by the chunk size; reading cost
+    is one read per split. Rows are assigned after syncing and
+    downsampling, so a split holds whole synced rows.
     """
     import numpy as np
     import polars as pl
-    from resurrector.core.export import Exporter
+    from resurrector.core.exceptions import EmptyExportError, LargeTopicError
+    from resurrector.core.export import (
+        NUMPY_HARD_CAP,
+        Exporter,
+        bag_label,
+        nonempty_chunks,
+        synced_chunks,
+        topic_chunks,
+    )
 
-    rng = np.random.default_rng(seed=42)  # deterministic per call
     split_names = list(split.keys())
-    split_ratios = np.array([split[n] for n in split_names], dtype=np.float64)
-    # Cumulative thresholds for np.searchsorted
-    thresholds = np.cumsum(split_ratios)
+    thresholds = np.cumsum([split[n] for n in split_names])
+
+    if sync and len(topics) > 1:
+        streams = [("synced", lambda: synced_chunks(bag_frame, topics, sync_method, downsample_hz))]
+    else:
+        streams = []
+        for topic in topics:
+            view = bag_frame[topic]
+            if format == "numpy" and view.message_count > NUMPY_HARD_CAP:
+                raise LargeTopicError(
+                    topic_name=view.name,
+                    message_count=view.message_count,
+                    threshold=NUMPY_HARD_CAP,
+                )
+            streams.append((
+                topic.lstrip("/").replace("/", "_"),
+                lambda view=view: topic_chunks(view, downsample_hz),
+            ))
 
     manifest = {
         "strategy": "random",
-        "seed": 42,
+        "seed": RANDOM_SPLIT_SEED,
         "splits": {n: {"ratio": split[n], "rows": 0} for n in split_names},
     }
-
-    # Materialize per-topic, shuffle, write per-split.
-    # We bypass Exporter.export and call the per-format writers directly
-    # because Exporter assumes one BagFrame in → one set of files out;
-    # here we want N output sets per topic.
-    for topic in topics:
-        try:
-            view = bag_frame[topic]
-        except KeyError:
-            logger.warning("Topic %s not found; skipping", topic)
-            continue
-
-        chunks_full: list[pl.DataFrame] = []
-        for chunk in view.iter_chunks():
-            if chunk.height > 0:
-                chunks_full.append(chunk)
-        if not chunks_full:
-            continue
-        # A topic's columns can change between chunks; combine them the
-        # way TopicView.to_polars does.
-        full_df = pl.concat(chunks_full, how="diagonal_relaxed")
-        n_rows = full_df.height
-        # Assign each row to a split label
-        random_vals = rng.random(n_rows)
-        labels = np.searchsorted(thresholds, random_vals, side="right")
-        labels = np.clip(labels, 0, len(split_names) - 1)
-
+    exporter = Exporter()
+    for name, make_chunks in streams:
+        stream_rows = 0
         for idx, split_name in enumerate(split_names):
-            mask = labels == idx
-            split_df = full_df.filter(pl.Series(mask))
-            if split_df.height == 0:
+            counter = [0]
+
+            def rows_for_split(idx=idx, counter=counter, name=name, make_chunks=make_chunks):
+                # zlib.crc32 is stable across runs (hash() of a str isn't).
+                rng = np.random.default_rng([RANDOM_SPLIT_SEED, zlib.crc32(name.encode())])
+                for chunk in make_chunks():
+                    labels = np.searchsorted(thresholds, rng.random(chunk.height), side="right")
+                    picked = chunk.filter(pl.Series(np.minimum(labels, len(split_names) - 1) == idx))
+                    counter[0] += picked.height
+                    yield picked
+
+            chunks = nonempty_chunks(rows_for_split())
+            if chunks is None:
                 continue
             sub_output = output / split_name
             sub_output.mkdir(parents=True, exist_ok=True)
-            # Write via the parquet streamer (one chunk = whole split)
-            from resurrector.core.export import _stream_parquet
-            safe_name = topic.lstrip("/").replace("/", "_")
-            _stream_parquet(iter([split_df]), sub_output, safe_name)
-            manifest["splits"][split_name]["rows"] += split_df.height
+            exporter._stream_dataframe_chunks(chunks, format, sub_output, name)
+            manifest["splits"][split_name]["rows"] += counter[0]
+            stream_rows += counter[0]
+        if not stream_rows:
+            logger.warning("'%s' has no messages in the exported range; no file written for it", name)
 
+    if not any(s["rows"] for s in manifest["splits"].values()):
+        raise EmptyExportError(topics, bag_label(bag_frame))
     _write_manifest(output, manifest)
     logger.info(
         "Random-split export to %s: %d splits", output, len(split),

@@ -538,8 +538,17 @@ def _parse_laser_scan(buf: bytes) -> dict[str, Any]:
     }
 
 
+# sensor_msgs/Image encodings get_image_array decodes; it returns None for
+# any other (mono16, 16UC1, 32FC1, rgb16, bayer_*, yuv422, ...).
+RAW_IMAGE_ENCODINGS = ("rgb8", "bgr8", "rgba8", "bgra8", "mono8")
+
+
 def get_image_array(msg: Message) -> np.ndarray | None:
-    """Extract image data from a parsed Image message as a numpy array."""
+    """Extract image data from a parsed Image message as a numpy array.
+
+    None when the encoding isn't one of :data:`RAW_IMAGE_ENCODINGS` or the
+    pixel data is shorter than height x width x channels.
+    """
     if msg.raw_data is None or "height" not in msg.data:
         return None
     offset = msg.data.get("_pixel_data_offset")
@@ -734,7 +743,9 @@ def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
             "ROS2 .db3 (SQLite) format requires the ros2 CLI for auto-convert "
             "(provided by any ROS 2 install)."
         )
-    raise ValueError(f"Unsupported file format: {ext}")
+    raise ValueError(
+        f"Unsupported file format: {ext or path.name!r} (expected .mcap, .bag or .db3)"
+    )
 
 
 # Register the built-in decoders now that all helper functions are defined.

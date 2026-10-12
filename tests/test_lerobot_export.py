@@ -65,27 +65,39 @@ def _png_camera_bag(path: Path, img) -> Path:
 def _raw_camera_bag(path: Path, encoding: str, arr: np.ndarray) -> Path:
     """A bag whose only topic, ``/cam``, is five sensor_msgs/Image frames of
     ``arr`` (little-endian) labelled ``encoding``."""
+    return _raw_frames_bag(path, [(encoding, arr, 0)] * 5)
+
+
+def _raw_frames_bag(path: Path, frames: list[tuple[str, np.ndarray, int]]) -> Path:
+    """``/cam`` as sensor_msgs/Image frames 100 ms apart, one per
+    ``(encoding, array, cut)``: ``cut`` drops that many bytes from the end
+    of the pixel data (a damaged frame)."""
     import struct
 
     from mcap.writer import Writer
 
     from resurrector.demo.sample_bag import SCHEMAS, _cdr_encapsulate, _encode_cdr_header
 
-    h = arr.shape[0]
-    data = arr.astype(arr.dtype.newbyteorder("<")).tobytes()
-    enc = encoding.encode() + b"\x00"
-    body = (struct.pack("<II", h, arr.shape[1]) + struct.pack("<I", len(enc)) + enc
-            + b"\x00" * ((4 - len(enc) % 4) % 4) + b"\x00" * 4
-            + struct.pack("<I", len(data) // h) + struct.pack("<I", len(data)) + data)
+    def body(encoding: str, arr: np.ndarray, cut: int) -> bytes:
+        h = arr.shape[0]
+        data = arr.astype(arr.dtype.newbyteorder("<")).tobytes()
+        step = len(data) // h
+        data = data[:len(data) - cut]
+        enc = encoding.encode() + b"\x00"
+        return (struct.pack("<II", h, arr.shape[1]) + struct.pack("<I", len(enc)) + enc
+                + b"\x00" * ((4 - len(enc) % 4) % 4) + b"\x00" * 4
+                + struct.pack("<I", step) + struct.pack("<I", len(data)) + data)
+
     mt = "sensor_msgs/msg/Image"
     with open(path, "wb") as f:
         w = Writer(f)
         w.start(profile="ros2", library="test")
         sid = w.register_schema(name=mt, encoding="ros2msg", data=SCHEMAS[mt]["data"].encode())
         cid = w.register_channel(topic="/cam", message_encoding="cdr", schema_id=sid)
-        for i in range(5):
+        for i, (encoding, arr, cut) in enumerate(frames):
             ts = 1_700_000_000_000_000_000 + i * 100_000_000
-            payload = _cdr_encapsulate(_encode_cdr_header(*divmod(ts, 10**9), "cam") + body)
+            payload = _cdr_encapsulate(_encode_cdr_header(*divmod(ts, 10**9), "cam")
+                                       + body(encoding, arr, cut))
             w.add_message(channel_id=cid, log_time=ts, publish_time=ts, sequence=i, data=payload)
         w.finish()
     return path
@@ -508,6 +520,72 @@ class TestGuardsRunBeforeLeRobot:
         with pytest.raises(ValueError, match=rf"No decodable frame on /cam .*'{encoding}'"):
             export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
         assert fake_lerobot.create == []
+
+    def test_unreadable_encoding_after_good_frames_is_refused(self, tmp_dir, fake_lerobot):
+        """Would catch: rgb8 frames then mono16 ones exporting without a
+        word, every frame after the switch a copy of the last rgb8 one."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        depth = np.full((48, 64), 40000, np.uint16)
+        bag = _raw_frames_bag(tmp_dir / "mixed.mcap",
+                              [("rgb8", rgb, 0)] * 5 + [("mono16", depth, 0)] * 5)
+        with pytest.raises(ValueError, match=r"/cam' has a frame at 1700000000500000000 in encoding 'mono16'"):
+            export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert not (tmp_dir / "lr").exists()
+
+    def test_damaged_frame_is_replaced_and_counted(self, tmp_dir, fake_lerobot, caplog):
+        """A cut-off rgb8 frame takes the frame before it, and the export
+        says so. Would catch: the substitution happening silently."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_frames_bag(tmp_dir / "cut.mcap",
+                              [("rgb8", rgb, 0)] * 3 + [("rgb8", rgb, 100)] + [("rgb8", rgb, 0)] * 3)
+        export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert "1 frame(s) on /cam didn't decode (first at 1700000000300000000)" in caplog.text
+
+    def test_frame_with_no_encoding_counts_as_damaged(self, tmp_dir, fake_lerobot, caplog):
+        """A frame whose header didn't parse has no encoding at all. Would
+        catch: that frame failing the export as an "unreadable encoding
+        None" instead of taking the frame before it."""
+        from resurrector.core.lerobot_export import export_lerobot
+
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_frames_bag(tmp_dir / "noenc.mcap",
+                              [("rgb8", rgb, 0)] * 3 + [("", rgb, 0)] + [("rgb8", rgb, 0)] * 3)
+        export_lerobot([BagFrame(bag)], ["/cam"], tmp_dir / "lr")
+        assert "1 frame(s) on /cam didn't decode" in caplog.text
+
+    def test_time_split_skips_a_window_with_no_frames(self, tmp_dir, fake_lerobot, monkeypatch):
+        """Would catch: a LeRobot time split failing whole on a window with
+        no messages ("None of the selected topics contain messages")."""
+        from resurrector.core import export as export_module
+        from resurrector.core.splits import split_export
+
+        monkeypatch.setattr(export_module, "require_export_dependencies", lambda f: None)
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_camera_bag(tmp_dir / "cam.mcap", "rgb8", rgb)  # frames at 0..400 ms
+        bf = BagFrame(bag)
+        out = tmp_dir / "split"
+        gap = 0.005 / bf.duration_sec  # 240-245 ms: between two frames
+        split_export(bag_frame=bf, topics=["/cam"], output=out,
+                     split={"a": 0.6, "gap": gap, "b": 0.4 - gap}, strategy="time", format="lerobot")
+        assert len(fake_lerobot.create) == 2
+        assert not (out / "gap").exists()
+
+    def test_bag_export_with_topics_none_takes_every_topic(self, tmp_dir, fake_lerobot, monkeypatch):
+        """Would catch: TypeError 'NoneType' object is not iterable from
+        the new topic check (topics=None meant every topic before)."""
+        from resurrector.core import export as export_module
+        from resurrector.core.export import Exporter
+
+        monkeypatch.setattr(export_module, "require_export_dependencies", lambda f: None)
+        rgb = np.dstack([_halves(np.uint8, 10, 200)] * 3)
+        bag = _raw_camera_bag(tmp_dir / "cam.mcap", "rgb8", rgb)
+        Exporter().export(bag_frame=BagFrame(bag), topics=None, format="lerobot",
+                          output_dir=str(tmp_dir / "lr"))
+        assert "observation.images.cam" in fake_lerobot.frames[0]
 
     def test_raw_helper_control_rgb8_decodes(self, tmp_dir, fake_lerobot):
         """Control for the test above: the same writer with rgb8 exports."""

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import shlex
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -325,6 +326,14 @@ class DatasetManager:
         Reads each bag listed in the version (applying per-bag time slice
         if any), runs the recorded sync / downsample / format settings,
         and writes the result to ``<output_dir>/<dataset_name>/<version>/``.
+        A version with several bags (other than ``lerobot``, which writes
+        one episode per bag) gets one subdirectory per bag, named by
+        :func:`bag_folder_names`, each holding what a single-bag export
+        writes. A bag with no messages in its selected topics and range is
+        skipped with a warning.
+
+        On failure, directories this call created and left empty are
+        removed; an existing version directory is never removed.
 
         Side effects:
           - Writes data files in the requested format
@@ -345,14 +354,19 @@ class DatasetManager:
             KeyError: If the dataset or version doesn't exist.
             ImportError: The export format's optional dependency is
                 missing (raised before anything is written).
+            TopicNotFoundError: A bag lacks one of the version's topics.
+            EmptyExportError: No bag has any messages to export.
 
         Example::
 
             out = mgr.export_version("pick-place", "1.0", "./datasets")
             print(out)            # ./datasets/pick-place/1.0
         """
-        from resurrector.core.bag_frame import BagFrame
-        from resurrector.core.export import Exporter, require_export_dependencies
+        from resurrector.core.export import (
+            first_missing_dir,
+            require_export_dependencies,
+            restore_output_dir,
+        )
 
         ds = self._get_dataset_by_name(dataset_name)
         if ds is None:
@@ -367,55 +381,37 @@ class DatasetManager:
 
         require_export_dependencies(config.get("export_format", "parquet"))
         output_path = Path(output_dir) / dataset_name / version
+        created = first_missing_dir(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
+        try:
+            self._write_version_data(config, metadata, dataset_name, output_path)
+        except BaseException:
+            restore_output_dir(output_path, created)
+            raise
 
-        exporter = Exporter()
+        # Build manifest (hash the data files). In a multi-bag version only
+        # the per-bag folders hold this export's data: a file beside them
+        # is left from an earlier export (0.8.6 wrote every bag flat, so
+        # such a file holds only the last bag) and stays out of the manifest.
+        folders = None if config.get("export_format") == "lerobot" else bag_folder_names(config["bag_refs"])
         manifest: dict[str, str] = {}
-
-        if config.get("export_format") == "lerobot":
-            # One LeRobot dataset, one episode per bag ref. The per-bag
-            # loop below would write N separate datasets on top of each
-            # other into the same directory.
-            from resurrector.core.lerobot_export import DEFAULT_FPS, export_lerobot
-
-            bags = []
-            for ref_dict in config["bag_refs"]:
-                bf = BagFrame(ref_dict["path"])
-                if ref_dict.get("start_time") and ref_dict.get("end_time"):
-                    bf = bf.time_slice(ref_dict["start_time"], ref_dict["end_time"])
-                bags.append(bf)
-            export_lerobot(
-                bags,
-                config.get("topics"),
-                output_path,
-                fps=int(round(config.get("downsample_hz") or DEFAULT_FPS)),
-                task=metadata.get("description") or dataset_name,
+        stale: list[str] = []
+        for f in sorted(output_path.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(output_path)
+            if str(rel) in ("manifest.json", "README.md", "dataset_config.json"):
+                continue
+            if folders and rel.parts[0] not in folders:
+                stale.append(str(rel))
+                continue
+            manifest[str(rel)] = _file_sha256(f)
+        if stale:
+            logger.warning(
+                "%s holds %d file(s) outside its per-bag folders, left from an "
+                "earlier export; they are not in manifest.json: %s",
+                output_path, len(stale), ", ".join(stale[:5]) + (" ..." if len(stale) > 5 else ""),
             )
-            output_path.mkdir(parents=True, exist_ok=True)
-
-        for ref_dict in ([] if config.get("export_format") == "lerobot" else config["bag_refs"]):
-            bf = BagFrame(ref_dict["path"])
-            if ref_dict.get("start_time") and ref_dict.get("end_time"):
-                bf = bf.time_slice(ref_dict["start_time"], ref_dict["end_time"])
-
-            topics = ref_dict.get("topics") or config.get("topics") or bf.topic_names
-            sync_cfg = config.get("sync_config")
-            do_sync = sync_cfg is not None and len(topics) > 1
-
-            exporter.export(
-                bag_frame=bf,
-                topics=topics,
-                format=config.get("export_format", "parquet"),
-                output_dir=str(output_path),
-                sync=do_sync,
-                sync_method=sync_cfg["method"] if sync_cfg else "nearest",
-                downsample_hz=config.get("downsample_hz"),
-            )
-
-        # Build manifest (hash all output files)
-        for f in output_path.rglob("*"):
-            if f.is_file() and f.name != "manifest.json" and f.name != "README.md":
-                manifest[str(f.relative_to(output_path))] = _file_sha256(f)
 
         # Save manifest
         manifest_path = output_path / "manifest.json"
@@ -450,6 +446,80 @@ class DatasetManager:
 
         logger.info("Exported dataset '%s' v%s to %s", dataset_name, version, output_path)
         return output_path
+
+    def _write_version_data(
+        self,
+        config: dict[str, Any],
+        metadata: dict[str, Any],
+        dataset_name: str,
+        output_path: Path,
+    ) -> None:
+        """Write a version's data files into ``output_path`` (see
+        :meth:`export_version` for the layout)."""
+        from resurrector.core.bag_frame import BagFrame
+        from resurrector.core.exceptions import EmptyExportError
+        from resurrector.core.export import Exporter, check_topics
+
+        bag_refs = config["bag_refs"]
+        is_lerobot = config.get("export_format") == "lerobot"
+        bags = []
+        for ref_dict in bag_refs:
+            bf = BagFrame(ref_dict["path"])
+            if ref_dict.get("start_time") and ref_dict.get("end_time"):
+                bf = bf.time_slice(ref_dict["start_time"], ref_dict["end_time"])
+            bags.append(bf)
+
+        def ref_topics(ref_dict: dict[str, Any], bf) -> list[str]:
+            if is_lerobot:  # LeRobot applies the version's topics to every bag
+                return list(config.get("topics") or bf.topic_names)
+            return list(ref_dict.get("topics") or config.get("topics") or bf.topic_names)
+
+        # Every bag's topics are checked before any bag is written, so a
+        # topic missing from the last bag doesn't leave the first ones on disk.
+        for ref_dict, bf in zip(bag_refs, bags):
+            check_topics(bf, ref_topics(ref_dict, bf))
+
+        if is_lerobot:
+            # One LeRobot dataset, one episode per bag ref; per-bag
+            # directories would make N separate datasets.
+            from resurrector.core.lerobot_export import DEFAULT_FPS, export_lerobot
+
+            export_lerobot(
+                bags,
+                config.get("topics"),
+                output_path,
+                fps=int(round(config.get("downsample_hz") or DEFAULT_FPS)),
+                task=metadata.get("description") or dataset_name,
+            )
+            output_path.mkdir(parents=True, exist_ok=True)
+            return
+
+        # One directory per bag: exported into one directory, every bag
+        # wrote the same file names and only the last bag's data survived.
+        folders = bag_folder_names(bag_refs)
+        sync_cfg = config.get("sync_config")
+        exporter = Exporter()
+        empty: list[EmptyExportError] = []
+        for i, (ref_dict, bf) in enumerate(zip(bag_refs, bags)):
+            topics = ref_topics(ref_dict, bf)
+            try:
+                exporter.export(
+                    bag_frame=bf,
+                    topics=topics,
+                    format=config.get("export_format", "parquet"),
+                    output_dir=str(output_path / folders[i] if folders else output_path),
+                    sync=sync_cfg is not None and len(topics) > 1,
+                    sync_method=sync_cfg["method"] if sync_cfg else "nearest",
+                    downsample_hz=config.get("downsample_hz"),
+                )
+            except EmptyExportError as e:
+                if len(bag_refs) == 1:
+                    raise
+                logger.warning("%s Skipping that bag.", e)
+                empty.append(e)
+        if empty and len(empty) == len(bag_refs):
+            topics = sorted({t for e in empty for t in e.topics})
+            raise EmptyExportError(topics, f"any of the {len(bag_refs)} bags")
 
     def list_datasets(self) -> list[dict[str, Any]]:
         """Return every dataset in the index, with versions pre-populated.
@@ -556,6 +626,19 @@ class DatasetManager:
         Safe to call multiple times. Recommended at the end of a script.
         """
         self.conn.close()
+
+
+def bag_folder_names(bag_refs: list[dict[str, Any]]) -> list[str] | None:
+    """The subdirectory each bag of a multi-bag version exports into:
+    ``000_<file stem>``, ``001_<file stem>``, ... in ``bag_refs`` order
+    (the index keeps two bags with the same file name apart). None for a
+    single bag, which exports straight into the version directory."""
+    if len(bag_refs) < 2:
+        return None
+    return [
+        f"{i:03d}_" + (re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(ref["path"]).stem) or "bag")
+        for i, ref in enumerate(bag_refs)
+    ]
 
 
 def _file_sha256(path: Path) -> str:

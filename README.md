@@ -455,6 +455,8 @@ mgr.create_version(
 output = mgr.export_version("pick-and-place-v1", "1.0", output_dir="./datasets")
 ```
 
+A version with one bag writes its files straight into `<output_dir>/<dataset>/<version>/`. A version with several bags writes one folder per bag (`000_session_001/`, `001_session_002/`, ...), each holding what a single-bag export writes; LeRobot versions are the exception and write one dataset with an episode per bag. A bag with no messages in its selected topics and time range is skipped with a warning.
+
 Each exported dataset includes:
 - **manifest.json** — SHA256 hashes of every file for reproducibility
 - **dataset_config.json** — full configuration for re-creating the dataset
@@ -491,6 +493,10 @@ bf.export(topics=["/imu/data", "/joint_states"],
           sync=True,
           downsample_hz=10)
 ```
+
+Every topic you name must be in the bag; an unknown one fails the export before anything is written, with the bag's topic list in the message. A topic with no messages (in the bag, or in the exported time range) gets no file in any format, with a warning, and an export whose topics are all empty (with `--sync`, whose synced table has no rows) fails instead of reporting success.
+
+`--split train=0.8 --split val=0.2` (or `split={"train": 0.8, "val": 0.2}`) writes one folder per split. The default `--split-strategy time` gives each split a contiguous time window; `random` sends each row (each synced row with `--sync`) to a split at random, the same way every run, reading the bag once per split. Both stream and honor the format, sync and downsample settings; `random` can't write LeRobot, whose episodes are contiguous.
 
 Memory bounds vary by format — see [Performance contract](#performance-contract) for the precise rule. Exports to Parquet, HDF5, CSV, Zarr, and RLDS are chunk-streamed (memory bounded by `chunk_size`, independent of topic size), with or without `--sync`: the synced table (also used by the `rlds` / `training-tabular` / `multimodal` presets) is written a chunk at a time. As in `bf.sync()`, topics under 1 M messages go through the eager sync engine, which loads them first; bigger ones stream. NumPy `.npz` accumulates per-topic and is hard-capped at 1 M rows; for very large topics, prefer Parquet. LeRobot streams its input but holds one episode's frame grid (duration × fps × numeric fields) in memory, because LeRobot's own writer buffers an episode before saving it; camera frames are spilled to disk.
 

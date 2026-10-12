@@ -849,8 +849,14 @@ class BagFrame:
 
         Raises:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
-            ValueError: If ``preset`` is not known, or ``split`` ratios don't
-                sum to ~1.0, or ``split_strategy`` is unknown.
+            ValueError: If ``preset`` is not known, ``split`` ratios don't
+                sum to ~1.0, ``split_strategy`` is unknown, the preset's
+                topic filter matches none of the bag's topics, or a random
+                split is asked to write ``lerobot``.
+            TopicNotFoundError: A topic isn't in the bag (also a
+                ``KeyError`` and a ``ValueError``); nothing is written.
+            EmptyExportError: None of the topics has a message in the
+                exported range (also a ``ValueError``); nothing is written.
             ImportError: The format's optional dependency is missing
                 (``[all-exports]`` for zarr / rlds, ``[lerobot]`` on
                 Python 3.12+ for lerobot). Raised before anything is
@@ -896,6 +902,13 @@ class BagFrame:
         if resolved["topics"] is None:
             topic_filter = resolved.pop("topic_filter")
             topic_names = apply_topic_filter(self, topic_filter)
+            if not topic_names and topic_filter:
+                kind = {"images": "image", "non-images": "non-image"}.get(topic_filter, topic_filter)
+                raise ValueError(
+                    f"The {preset!r} preset exports {kind} topics, and "
+                    f"{self._path.name} has none (topics: "
+                    f"{', '.join(self.topic_names) or 'none'})."
+                )
         else:
             topic_names = resolved["topics"]
             resolved.pop("topic_filter")

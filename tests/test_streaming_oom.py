@@ -300,6 +300,23 @@ def test_parquet_export_bounded(large_bag):
     assert delta_mb < 100, f"parquet export RSS delta {delta_mb:.1f} MB > 100 MB"
 
 
+def test_random_split_export_bounded(large_bag):
+    """The random split streams one pass per split (it used to concatenate
+    each whole topic). tests/test_splits.py checks the chunk bound
+    structurally; this is the RSS view of the same path."""
+    from resurrector.core.splits import split_export
+
+    bf = BagFrame(large_bag)
+    with tempfile.TemporaryDirectory() as d:
+        delta_mb, _ = _peak_rss_delta_mb(
+            lambda: split_export(
+                bag_frame=bf, topics=["/imu/data", "/joint_states"], output=Path(d),
+                split={"train": 0.8, "val": 0.2}, strategy="random", format="hdf5",
+            ),
+        )
+    assert delta_mb < 150, f"random split RSS delta {delta_mb:.1f} MB > 150 MB"
+
+
 def test_hdf5_export_bounded(large_bag):
     """Streaming HDF5 export uses resizable datasets (append per chunk).
 

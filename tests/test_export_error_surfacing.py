@@ -628,7 +628,7 @@ class TestApi:
         assert r.json() == {"detail": str(err)}
 
     @pytest.mark.parametrize(("error", "status"), [
-        ("format", 400), ("exists", 409), ("missing-extra", 503),
+        ("format", 400), ("exists", 409), ("missing-extra", 503), ("encoding", 400),
     ])
     def test_dataset_export_maps_errors_like_bag_export(self, api, bag, tmp_dir, monkeypatch, error, status):
         """Would catch: a LeRobot format error answered 404, an existing
@@ -642,6 +642,9 @@ class TestApi:
             "format": LeRobotFrameFormatError("/depth", "uint16", (48, 64)),
             "exists": FileExistsError("LeRobot export target already exists and is not empty."),
             "missing-extra": ImportError(INSTALL_HINT),
+            # A plain ValueError about the bag (here LeRobot's mid-topic
+            # encoding switch): 400, not the 404 for a missing version.
+            "encoding": ValueError("Camera topic '/cam' has a frame at 1 in encoding 'mono16'"),
         }[error]
 
         def refuse(self, *args, **kwargs):

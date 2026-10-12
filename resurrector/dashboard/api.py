@@ -21,7 +21,6 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
-from resurrector.core.exceptions import LeRobotFrameFormatError, LeRobotFrameShapeError
 from resurrector.core.export import ExportError
 
 app = FastAPI(
@@ -1700,9 +1699,8 @@ async def export_dataset_version_api(
     validated = _validate_path(str(Path(output_dir).resolve().parent))  # dir may not exist yet
     mgr = _get_dataset_manager()
     try:
-        # Checked up front: export_version raises KeyError for these, but
-        # so can the export itself (a topic missing from a bag), which
-        # stays a 500.
+        # Checked up front: export_version raises KeyError for these, and
+        # every ValueError below is then about the bags' contents.
         ds = mgr.get_dataset(name)
         if ds is None:
             raise HTTPException(404, f"Dataset '{name}' not found")
@@ -1710,12 +1708,12 @@ async def export_dataset_version_api(
             raise HTTPException(404, f"Version '{version}' not found for dataset '{name}'")
         try:
             path = mgr.export_version(name, version, output_dir=output_dir)
-        except (LeRobotFrameShapeError, LeRobotFrameFormatError) as e:
-            # ValueErrors too, but about the bag's frames, not a missing
-            # version: 400, as the single-bag export route returns.
-            raise HTTPException(400, str(e))
         except ValueError as e:
-            raise HTTPException(404, str(e))
+            # The dataset and version were checked above, so a ValueError
+            # here is about the bags' contents (a LeRobot frame error, a
+            # topic a bag lacks, nothing to export): 400, as the single-bag
+            # export route returns.
+            raise HTTPException(400, str(e))
         except FileExistsError as e:
             raise HTTPException(409, str(e))
         except ImportError as e:

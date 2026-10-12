@@ -6,6 +6,82 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ---
 
+## [Unreleased]
+
+### What's new
+
+A multi-bag dataset version keeps every bag, a random split honors the
+export format, and exports and CLI commands name what they couldn't read
+instead of reporting success or ending in a traceback.
+
+### Fixed
+
+- A dataset version with two or more bags exported only the last one:
+  every bag wrote the same file names into the version folder, so a
+  two-bag version kept 400 of 600 IMU rows with no warning. Each bag now
+  exports into its own folder (`000_<file name>/`, `001_<file name>/`,
+  ...), named in the dataset README and manifest. Single-bag versions
+  keep the flat layout, and LeRobot versions still write one dataset with
+  an episode per bag. Re-exporting over a 0.8.6 export leaves its flat
+  files in place but out of the manifest, with a warning naming them.
+- `resurrector export -t /nope` printed "Exported to ..." and exited 0
+  with nothing written. An unknown topic now fails the export before
+  anything is written (exit 1), and the message lists the bag's topics.
+  This covers `--sync`, splits, LeRobot (including `--action-topic`) and
+  dataset versions, where every bag is checked before the first one is
+  written.
+- A topic with no messages got a 0-byte CSV and empty HDF5, Zarr and
+  `.npz` files, and no Parquet file, all with exit 0. It now gets no
+  file in any format and a warning; an export whose topics are all empty
+  (with `--sync`: whose synced table has no rows) fails with exit 1. A
+  time split whose window holds no messages is skipped with a warning,
+  LeRobot included, and so is a dataset bag with no messages.
+- `--split-strategy random` ignored `-f`, `--sync` and `--downsample`
+  and always wrote unsynced Parquet, and it loaded each whole topic into
+  memory. It now streams one pass per split (memory bounded by the chunk
+  size, the bag read once per split), writes the requested format, and
+  assigns synced or downsampled rows. Every row lands in exactly one
+  split, the same way each run. A random split refuses LeRobot, whose
+  episodes are contiguous.
+- A failed dataset export left an empty `<output>/<dataset>` folder.
+  Dataset and bag exports now remove the empty folders they created when
+  they fail; a folder that existed before is kept (an empty one that a
+  failed LeRobot export removed is put back).
+- LeRobot export filled the rest of an episode with copies of the last
+  good frame when a camera topic switched to an encoding it can't read
+  (rgb8 frames, then mono16). That now fails with the frame's timestamp
+  and encoding, and removes the partial dataset. A damaged frame (cut
+  off, or a JPEG that doesn't decode) still takes the frame before it,
+  and the export logs how many did.
+- `resurrector export`, `info`, `health`, `quicklook`, `export-frames`,
+  `diff` and `report` ended in a traceback for a missing path, a file
+  that isn't an MCAP, or one cut off mid-write. Each now prints one line
+  to stderr saying which, and exits 1. `health` on a directory reports
+  the readable bags and exits 1 if any weren't.
+- A preset whose topic filter matches nothing (`camera-only` on a bag
+  without cameras) exported nothing and reported success; it now says
+  the bag has no such topics.
+
+### Changed
+
+- `BagFrame.export` and `Exporter.export` raise `TopicNotFoundError` for
+  a topic that isn't in the bag, instead of logging and skipping it, and
+  `EmptyExportError` when every topic is empty. Both are in
+  `resurrector.core.exceptions`; `TopicNotFoundError` is also a
+  `KeyError` and a `ValueError`, and `EmptyExportError` a `ValueError`.
+  The dashboard answers both with 400.
+- A synced export with no rows raises `EmptyExportError` instead of
+  writing an empty `synced.<ext>`, the same rule as unsynced exports.
+- Dataset-version export in the dashboard answers a `ValueError` about
+  the bags (a LeRobot frame error, for one) with 400; it answered 404, as
+  if the version were missing.
+- An unknown export format is reported before anything else is checked.
+- The random split's per-topic seeds changed (each stream draws from
+  seed 42 and its own name), so the same bag splits differently than in
+  0.8.6; the manifest still records `seed: 42`.
+- The dataset README's Parquet snippet loads one file instead of
+  globbing `*.parquet` (which failed for topics with different columns).
+
 ## [0.8.6] — 2026-10-09
 
 ### What's new
