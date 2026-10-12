@@ -6,7 +6,7 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ---
 
-## [Unreleased]
+## [0.8.7] — 2026-10-11
 
 ### What's new
 
@@ -81,6 +81,14 @@ instead of reporting success or ending in a traceback.
   0.8.6; the manifest still records `seed: 42`.
 - The dataset README's Parquet snippet loads one file instead of
   globbing `*.parquet` (which failed for topics with different columns).
+
+### Test counts
+
+- Backend: **1799 passed** (was 1715) with zarr and tensorflow installed
+  and `tests/test_vision.py` excluded, plus a memory-regression tier of 21
+  (was 20)
+- Frontend unit: **101 passed** (unchanged)
+- E2E: **56 behavioural** plus 7 visual (unchanged)
 
 ## [0.8.6] — 2026-10-09
 
