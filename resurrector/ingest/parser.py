@@ -73,6 +73,7 @@ class Message:
         return self.timestamp_ns / 1e9
 
 
+_METADATA_DECODERS: set = set()  # filled with the built-in metadata-only decoders
 _SUMMARIES: "OrderedDict[tuple, Any]" = OrderedDict()
 _SUMMARIES_LOCK = threading.Lock()
 _SUMMARIES_MAX = 2
@@ -175,10 +176,17 @@ class MCAPParser:
         topics: list[str] | None,
         start_time_ns: int | None,
         end_time_ns: int | None,
-    ) -> Iterator[tuple[Any, Any, int, int, bytes]]:
-        """``(channel, schema, log_time, sequence, data)`` per message, in
-        log-time order: the fast indexed reader when the file allows it,
-        else the mcap reader. Both yield the same messages in the same order.
+        prefix_for: Callable[[Any, Any], int | None] | None = None,
+    ) -> Iterator[tuple[Any, Any, int, int, bytes, int, int]]:
+        """``(channel, schema, log_time, sequence, data, size, data_offset)``
+        per message, in log-time order: the fast indexed reader when the
+        file allows it, else the mcap reader. Both yield the same messages
+        in the same order.
+
+        ``prefix_for(channel, schema)`` may name how many payload bytes a
+        channel's caller needs; the fast reader then may cut ``data`` to
+        that (``size`` stays the full length, ``data_offset`` is where the
+        payload starts in the file, -1 if it can't be re-read from there).
         """
         if isinstance(topics, str):
             topics = [topics]
@@ -191,16 +199,21 @@ class MCAPParser:
                     cid: (ch, schemas.get(ch.schema_id) if ch.schema_id else None)
                     for cid, ch in summary.channels.items()
                 }
+                prefix = None
+                if prefix_for is not None:
+                    prefix = {cid: n for cid, (ch, sc) in info.items()
+                              if (n := prefix_for(ch, sc)) is not None}
                 for m in fast_mcap.iter_raw(
                     f, summary, _channel_ids(summary, topics), start_time_ns, end_time_ns,
+                    prefix or None,
                 ):
                     channel, schema = info[m.channel_id]
-                    yield channel, schema, m.log_time, m.sequence, m.data
+                    yield channel, schema, m.log_time, m.sequence, m.data, m.size, m.data_offset
                 return
             for schema, channel, msg in reader.iter_messages(
                 topics=topics, start_time=start_time_ns, end_time=end_time_ns,
             ):
-                yield channel, schema, msg.log_time, msg.sequence, msg.data
+                yield channel, schema, msg.log_time, msg.sequence, msg.data, len(msg.data), -1
 
     def read_messages(
         self,
@@ -221,7 +234,9 @@ class MCAPParser:
         """
         warned: set[str] = set()
         decoders: dict[int, tuple[str, DecoderFn | None]] = {}
-        for channel, schema, log_time, sequence, data in self._raw(topics, start_time_ns, end_time_ns):
+        for channel, schema, log_time, sequence, data, _, _ in self._raw(
+            topics, start_time_ns, end_time_ns,
+        ):
             entry = decoders.get(channel.id)
             if entry is None:
                 msg_type = schema.name if schema else "unknown"
@@ -245,8 +260,27 @@ class MCAPParser:
         Same messages and order as :meth:`read_messages`, for callers that
         only need timestamps and sizes (health checks, density).
         """
-        for channel, _schema, log_time, _seq, data in self._raw(topics, start_time_ns, end_time_ns):
+        for channel, _schema, log_time, _seq, data, _, _ in self._raw(
+            topics, start_time_ns, end_time_ns,
+        ):
             yield channel.topic, log_time, data
+
+    def iter_sizes(
+        self,
+        topics: list[str] | None = None,
+        start_time_ns: int | None = None,
+        end_time_ns: int | None = None,
+    ) -> Iterator[tuple[str, int, int]]:
+        """Yield ``(topic, log_time_ns, payload_size)``, reading as little as possible.
+
+        For health checks and density, which need nothing else: in an
+        indexed, uncompressed file only each message's record header is
+        read, so a bag of camera frames costs a fraction of its size.
+        """
+        for channel, _schema, log_time, _seq, _data, size, _ in self._raw(
+            topics, start_time_ns, end_time_ns, prefix_for=lambda ch, sc: 0,
+        ):
+            yield channel.topic, log_time, size
 
     def iter_rows(
         self,
@@ -263,11 +297,24 @@ class MCAPParser:
         """
         warned: set[str] = set()
         makers: dict[int, Callable[[bytes, int], dict]] = {}
-        for channel, schema, log_time, _seq, data in self._raw(topics, start_time_ns, end_time_ns):
-            make = makers.get(channel.id)
-            if make is None:
-                make = makers[channel.id] = _row_maker(channel.topic, schema, warned)
-            yield channel.topic, make(data, log_time)
+        fd = -1
+        try:
+            for channel, schema, log_time, _seq, data, size, offset in self._raw(
+                topics, start_time_ns, end_time_ns, prefix_for=_row_prefix,
+            ):
+                make = makers.get(channel.id)
+                if make is None:
+                    make = makers[channel.id] = _row_maker(channel.topic, schema, warned)
+                row = make(data, log_time)
+                if len(row) == 1 and size > len(data) and offset >= 0:
+                    # The metadata didn't fit in the prefix: decode it all.
+                    if fd < 0:
+                        fd = os.open(self.path, os.O_RDONLY)
+                    row = make(os.pread(fd, size, offset), log_time)
+                yield channel.topic, row
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
 
 class CDRParseError(ValueError):
@@ -503,6 +550,22 @@ def _warn_unparsed(topic: str, msg_type: str) -> None:
     )
 
 
+# Built-in decoders that read only a message's leading metadata (the pixels
+# and points stay in raw_data), so a row never needs more than this much.
+_METADATA_ONLY = {
+    "sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage", "sensor_msgs/msg/PointCloud2",
+}
+_METADATA_PREFIX = 65536
+
+
+def _row_prefix(channel, schema) -> int | None:
+    """How much of a channel's payload :meth:`MCAPParser.iter_rows` needs."""
+    msg_type = schema.name if schema else ""
+    if msg_type in _METADATA_ONLY and _DECODER_REGISTRY.get(msg_type) in _METADATA_DECODERS:
+        return _METADATA_PREFIX
+    return None
+
+
 def _row_maker(topic: str, schema, warned: set[str]) -> Callable[[bytes, int], dict]:
     """``make(data, ts) -> row`` for one channel, as :meth:`MCAPParser.iter_rows` uses it.
 
@@ -530,15 +593,76 @@ def _row_maker(topic: str, schema, warned: set[str]) -> Callable[[bytes, int], d
                 return {"timestamp_ns": ts}
         return make
 
+    flat: list = [None]  # compiled flattener, made from the first decoded message
+
     def make(data: bytes, ts: int) -> dict:
         parsed = _decode_with(decoder, msg_type, data)
         if parsed.get("_unparsed") and msg_type not in warned:
             _warn_unparsed(topic, msg_type)
             warned.add(msg_type)
         row = {"timestamp_ns": ts}
-        flatten_into(parsed, row)
+        fn = flat[0]
+        if fn is None and parsed and "_parse_error" not in parsed and "_unparsed" not in parsed:
+            fn = flat[0] = _compile_flattener(parsed)
+        if fn is None or not fn(parsed, row):
+            row = {"timestamp_ns": ts}
+            flatten_into(parsed, row)
         return row
     return make
+
+
+def _compile_flattener(sample: dict) -> Callable[[dict, dict], bool]:
+    """A function filling ``row`` exactly as :func:`flatten_into` would, for
+    dicts shaped like ``sample`` (same keys, nested the same way).
+
+    A decoder returns the same shape for every valid message of a type, so
+    the dict walk, the type checks and the key strings can be fixed once.
+    The function checks the shape as it goes and returns False at the
+    first difference (an error placeholder, a longer list than 20, a
+    non-number in a list), and the caller falls back to ``flatten_into``.
+    """
+    lines = ["def flat(d, row):"]
+    env: dict[str, Any] = {"_num": (int, float)}
+    counter = [0]
+
+    def emit(node: dict, var: str, prefix: str, depth: int) -> None:
+        pad = "    "
+        lines.append(f"{pad}if type({var}) is not dict or len({var}) != {len(node)}: return False")
+        for key, value in node.items():
+            full = f"{prefix}.{key}" if prefix else key
+            if key.startswith("_"):
+                # Not in rows, but its presence still has to match.
+                lines.append(f"{pad}if {key!r} not in {var}: return False")
+                continue
+            counter[0] += 1
+            v = f"x{counter[0]}"
+            lines.append(f"{pad}{v} = {var}[{key!r}]")
+            cls = type(value)
+            if cls is dict:
+                emit(value, v, full, depth + 1)
+            elif cls is list:
+                keys = f"K{counter[0]}"
+                env[keys] = tuple(f"{full}.{i}" for i in range(20))
+                lines.extend([
+                    f"{pad}if type({v}) is not list: return False",
+                    f"{pad}if len({v}) <= 20:",
+                    f"{pad}    for e in {v}:",
+                    f"{pad}        if not isinstance(e, _num): break",
+                    f"{pad}    else:",
+                    f"{pad}        for i, e in enumerate({v}): row[{keys}[i]] = e",
+                ])
+            elif isinstance(value, (np.ndarray, bytes, bytearray, memoryview)):
+                lines.append(f"{pad}if not isinstance({v}, _skip): return False")
+                env["_skip"] = (np.ndarray, bytes, bytearray, memoryview)
+            else:
+                lines.append(f"{pad}if type({v}) in _special: return False")
+                lines.append(f"{pad}row[{full!r}] = {v}")
+                env["_special"] = (dict, list, np.ndarray, bytes, bytearray, memoryview)
+
+    emit(sample, "d", "", 0)
+    lines.append("    return True")
+    exec(compile("\n".join(lines) + "\n", "<flattener>", "exec"), env)
+    return env["flat"]
 
 
 def flatten_into(d: dict, out: dict, prefix: str = "") -> None:
@@ -609,6 +733,7 @@ def _register_builtin_decoders() -> None:
     register_decoder("sensor_msgs/msg/PointCloud2", _parse_pointcloud2)
     register_decoder("visualization_msgs/msg/Marker", _parse_marker)
     register_decoder("visualization_msgs/msg/MarkerArray", _parse_marker_array)
+    _METADATA_DECODERS.update((_decode_image, _decode_compressed_image, _parse_pointcloud2))
 
 
 def _read_string_unpadded(buf: bytes, offset: int, msg_type: str = "?") -> tuple[str, int]:

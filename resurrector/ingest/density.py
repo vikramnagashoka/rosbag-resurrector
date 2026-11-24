@@ -108,8 +108,8 @@ def compute_density(
     # Memory: bounded by num_topics * bins. Never materializes
     # per-topic timestamp lists.
     last_bin = bins - 1
-    # Timestamps only: iterate raw so payloads are never decoded.
-    for topic, timestamp_ns, _raw in parser.iter_raw(topics=list(target)):
+    # Timestamps only: payloads are never read, let alone decoded.
+    for topic, timestamp_ns, _size in parser.iter_sizes(topics=list(target)):
         c = counters.get(topic)
         if c is None:
             continue

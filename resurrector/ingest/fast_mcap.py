@@ -44,8 +44,12 @@ _MESSAGE_HEAD = _RECORD.size + _MESSAGE.size  # 31 bytes before a message's data
 _CHUNK = struct.Struct("<QQQII")            # start, end, uncompressed size, crc, compression len
 _INDEX_HEAD = struct.Struct("<HI")          # channel_id, entries byte length
 
-# One chunk's wanted messages: (log_time, position, channel_id, sequence, publish_time, data).
+# One chunk's wanted messages:
+# (log_time, position, channel_id, sequence, publish_time, data, size, data_offset).
 _Entry = tuple
+
+# A record is read only up to its prefix when that saves more than this.
+_PREFIX_SLACK = 4096
 
 SUPPORTED_COMPRESSION = ("", "zstd", "lz4")
 
@@ -56,6 +60,8 @@ class RawMessage(NamedTuple):
     log_time: int
     publish_time: int
     data: bytes
+    size: int = -1        # the payload's full length; > len(data) if cut to a prefix
+    data_offset: int = -1  # file offset of the payload, when it can be re-read from there
 
 
 class _Unreadable(ValueError):
@@ -78,12 +84,20 @@ def iter_raw(
     channel_ids: Iterable[int] | None = None,
     start_time: int | None = None,
     end_time: int | None = None,
+    prefix: dict[int, int] | None = None,
 ) -> Iterator[RawMessage]:
     """Yield the messages of ``channel_ids`` (all if None) in log-time order.
 
     ``start_time`` is inclusive and ``end_time`` exclusive, both on log
     time, as in the mcap reader. Call :func:`can_read` first; a file it
     rejects raises ``ValueError`` here.
+
+    ``prefix`` maps a channel id to how many payload bytes its caller
+    needs. In an uncompressed chunk, a larger message of that channel is
+    then read only that far (``data`` is cut short, ``size`` is the full
+    length and ``data_offset`` says where to re-read it): a camera frame
+    costs a header read instead of a megabyte copy when only its metadata
+    is wanted. ``{cid: 0}`` reads nothing past the record header.
     """
     if not can_read(summary):
         raise ValueError("file has no usable chunk index; use the mcap reader")
@@ -111,7 +125,7 @@ def iter_raw(
         ):
             ci = chunks[i]
             i += 1
-            entries = _read_chunk(fd, ci, wanted, start_time, end_time)
+            entries = _read_chunk(fd, ci, wanted, start_time, end_time, prefix)
             if entries:
                 first = entries[0]
                 heapq.heappush(heap, (first[0], ci.chunk_start_offset, first[1], entries, 0))
@@ -131,14 +145,14 @@ def iter_raw(
             e = entries[k]
             if bound is not None and (e[0], offset) > bound:
                 break
-            yield RawMessage(e[2], e[3], e[0], e[4], e[5])
+            yield RawMessage(e[2], e[3], e[0], e[4], e[5], e[6], e[7])
             k += 1
         if k < n:
             e = entries[k]
             heapq.heappush(heap, (e[0], offset, e[1], entries, k))
 
 
-def _read_chunk(fd: int, ci, wanted, start_time, end_time) -> list[_Entry]:
+def _read_chunk(fd: int, ci, wanted, start_time, end_time, prefix=None) -> list[_Entry]:
     """One chunk's wanted messages, sorted by (log_time, position)."""
     compression = ci.compression
     head = _RECORD.size + _CHUNK.size + len(compression.encode()) + 8
@@ -146,8 +160,9 @@ def _read_chunk(fd: int, ci, wanted, start_time, end_time) -> list[_Entry]:
     in_chunk = ci.message_index_offsets
     partial = wanted is not None and not wanted.issuperset(in_chunk)
 
-    if compression == "" and partial:
-        entries = _read_indexed_uncompressed(fd, ci, records_at, wanted)
+    if compression == "" and (partial or prefix):
+        mine = wanted if wanted is not None else frozenset(in_chunk)
+        entries = _read_indexed_uncompressed(fd, ci, records_at, mine, prefix)
     else:
         chunk = os.pread(fd, ci.chunk_length, ci.chunk_start_offset)
         op, _ = _RECORD.unpack_from(chunk, 0)
@@ -164,7 +179,7 @@ def _read_chunk(fd: int, ci, wanted, start_time, end_time) -> list[_Entry]:
             _, offsets = _index_offsets(index, ci, wanted)
             entries = _messages_at(records, offsets, wanted)
         else:
-            entries = _scan(records, wanted)
+            entries = _scan(records, wanted, records_at if not compression else None)
 
     if start_time is not None or end_time is not None:
         entries = [
@@ -177,8 +192,9 @@ def _read_chunk(fd: int, ci, wanted, start_time, end_time) -> list[_Entry]:
     return entries
 
 
-def _scan(records: memoryview, wanted) -> list[_Entry]:
-    """Every message record in a chunk's records, filtered by channel."""
+def _scan(records: memoryview, wanted, records_at: int | None = None) -> list[_Entry]:
+    """Every message record in a chunk's records, filtered by channel.
+    ``records_at`` is the records' file offset (None if decompressed)."""
     out = []
     append = out.append
     unpack_record = _RECORD.unpack_from
@@ -190,7 +206,8 @@ def _scan(records: memoryview, wanted) -> list[_Entry]:
             cid, seq, log_time, publish_time = unpack_message(records, pos + 9)
             if wanted is None or cid in wanted:
                 append((log_time, pos, cid, seq, publish_time,
-                        bytes(records[pos + _MESSAGE_HEAD:pos + 9 + length])))
+                        bytes(records[pos + _MESSAGE_HEAD:pos + 9 + length]), length - 22,
+                        -1 if records_at is None else records_at + pos + _MESSAGE_HEAD))
         pos += 9 + length
     if pos != end:
         raise _Unreadable("chunk records overrun their length")
@@ -231,51 +248,94 @@ def _messages_at(records, offsets: list[int], wanted) -> list[_Entry]:
         cid, seq, log_time, publish_time = unpack_message(records, pos + 9)
         if cid in wanted:
             out.append((log_time, pos, cid, seq, publish_time,
-                        bytes(records[pos + _MESSAGE_HEAD:pos + 9 + length])))
+                        bytes(records[pos + _MESSAGE_HEAD:pos + 9 + length]), length - 22, -1))
     return out
 
 
-def _read_indexed_uncompressed(fd: int, ci, records_at: int, wanted) -> list[_Entry]:
+def _read_indexed_uncompressed(fd: int, ci, records_at: int, wanted, prefix=None) -> list[_Entry]:
     """Wanted messages of an uncompressed chunk, reading only their records.
 
     A record's extent comes from the next indexed record's offset (or the
     end of the records), so runs of consecutive wanted records are read
-    with one ``pread`` each and nothing else in the chunk is touched.
+    with one ``pread`` each and nothing else in the chunk is touched. A
+    record of a ``prefix`` channel that is much longer than its prefix is
+    read on its own, only that far.
     """
     index = os.pread(fd, ci.message_index_length, ci.chunk_start_offset + ci.chunk_length)
-    every, mine_sorted = _index_offsets(index, ci, wanted)
+    every, mine_sorted, owner = _index_owners(index, ci, wanted)
     if not mine_sorted:
         return []
-    mine = set(mine_sorted)
     bounds = every
     bounds.append(ci.uncompressed_size)  # records end == uncompressed size here
+    at = {pos: i for i, pos in enumerate(bounds)}
+
+    # (lo, hi) byte ranges to read, each covering whole records or one cut record.
+    reads: list[tuple[int, int]] = []
+    run_lo = run_hi = -1
+    for pos in mine_sorted:
+        nxt = bounds[at[pos] + 1]
+        limit = None
+        if prefix:
+            want = prefix.get(owner[pos])
+            if want is not None and nxt - pos > _MESSAGE_HEAD + want + _PREFIX_SLACK:
+                limit = _MESSAGE_HEAD + want
+        if limit is not None:
+            if run_lo >= 0:
+                reads.append((run_lo, run_hi))
+                run_lo = -1
+            reads.append((pos, pos + limit))
+        elif run_lo >= 0 and run_hi == pos:
+            run_hi = nxt
+        else:
+            if run_lo >= 0:
+                reads.append((run_lo, run_hi))
+            run_lo, run_hi = pos, nxt
+    if run_lo >= 0:
+        reads.append((run_lo, run_hi))
 
     out = []
     unpack_record = _RECORD.unpack_from
     unpack_message = _MESSAGE.unpack_from
-    j, n = bounds.index(mine_sorted[0]), len(bounds) - 1
-    last = bounds.index(mine_sorted[-1])
-    while j <= last:
-        if bounds[j] not in mine:
-            j += 1
-            continue
-        run_start = j
-        while j < n and bounds[j] in mine:
-            j += 1
-        lo, hi = bounds[run_start], bounds[j]
+    i, n_mine = 0, len(mine_sorted)
+    for lo, hi in reads:
         buf = os.pread(fd, hi - lo, records_at + lo)
         if len(buf) != hi - lo:
             raise _Unreadable("short read inside a chunk")
-        for pos in bounds[run_start:j]:
+        while i < n_mine and mine_sorted[i] < hi:
+            pos = mine_sorted[i]
+            i += 1
             rel = pos - lo
             op, length = unpack_record(buf, rel)
             if op != _OP_MESSAGE:
                 raise _Unreadable(f"message index points at opcode {op}")
             cid, seq, log_time, publish_time = unpack_message(buf, rel + 9)
-            if cid in wanted:
-                out.append((log_time, pos, cid, seq, publish_time,
-                            buf[rel + _MESSAGE_HEAD:rel + 9 + length]))
+            out.append((log_time, pos, cid, seq, publish_time,
+                        buf[rel + _MESSAGE_HEAD:rel + 9 + length], length - 22,
+                        records_at + pos + _MESSAGE_HEAD))
     return out
+
+
+def _index_owners(index: bytes, ci, wanted) -> tuple[list[int], list[int], dict[int, int]]:
+    """Like :func:`_index_offsets`, plus each wanted offset's channel id."""
+    base = ci.chunk_start_offset + ci.chunk_length
+    every: list[int] = []
+    mine: list[int] = []
+    owner: dict[int, int] = {}
+    for cid, at in ci.message_index_offsets.items():
+        pos = at - base
+        op, _ = _RECORD.unpack_from(index, pos)
+        ch, nbytes = _INDEX_HEAD.unpack_from(index, pos + 9)
+        if op != _OP_MESSAGE_INDEX or ch != cid:
+            raise _Unreadable(f"no message index for channel {cid} at offset {at}")
+        n = nbytes // 16
+        offsets = struct.unpack_from(f"<{2 * n}Q", index, pos + 9 + _INDEX_HEAD.size)[1::2]
+        every.extend(offsets)
+        if cid in wanted:
+            mine.extend(offsets)
+            owner.update(dict.fromkeys(offsets, cid))
+    every.sort()
+    mine.sort()
+    return every, mine, owner
 
 
 def _decompress(compression: str, data, size: int) -> bytes:

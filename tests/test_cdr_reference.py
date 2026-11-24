@@ -443,3 +443,48 @@ class TestFramesAndHealth:
         path = _write_bag(tmp_path / "b.mcap", _mixed_messages(200), chunk_size=4096)
         report = BagFrame(path).health_report()
         assert set(report.topic_scores) == {"/imu", "/joints", "/pose", "/odom"}
+
+
+class TestPrefixReads:
+    """Rows of metadata-only types read a payload prefix, not the pixels."""
+
+    def _camera_bag(self, path, n=6, h=120, w=200):
+        msgs = []
+        for i in range(n):
+            pixels = np.full((h, w, 3), i, dtype=np.uint8).tobytes()  # 72 KB: past the prefix
+            msgs.append(("/cam", "sensor_msgs/msg/Image", {
+                "header": _header("camera_rgb_optical_frame", sec=i), "height": h, "width": w,
+                "encoding": "rgb8", "is_bigendian": 0, "step": w * 3, "data": pixels}))
+            msgs.append(("/pose", "geometry_msgs/msg/PoseStamped", {
+                "header": _header("map", sec=i), "pose": {"position": {"x": float(i)}}}))
+        return _write_bag(path, msgs, chunk_size=1 << 18)
+
+    def _reference_frame(self, path, topic):
+        rows = []
+        for m in parse_bag(path).read_messages(topics=[topic]):
+            row = {"timestamp_ns": m.timestamp_ns}
+            flatten_into(m.data, row)
+            rows.append(row)
+        return _rows_to_frame(rows)
+
+    def test_image_rows_from_a_prefix(self, tmp_path):
+        path = self._camera_bag(tmp_path / "cam.mcap")
+        (chunk,) = list(BagFrame(path)["/cam"].iter_chunks())
+        assert chunk.equals(self._reference_frame(path, "/cam"))
+        assert chunk["data_length"].to_list() == [120 * 200 * 3] * 6
+
+    def test_a_prefix_too_short_rereads_the_message(self, tmp_path, monkeypatch):
+        from resurrector.ingest import parser as parser_mod
+
+        monkeypatch.setattr(parser_mod, "_METADATA_PREFIX", 16)  # cuts into the header
+        path = self._camera_bag(tmp_path / "cam.mcap")
+        (chunk,) = list(BagFrame(path)["/cam"].iter_chunks())
+        assert chunk.equals(self._reference_frame(path, "/cam"))
+
+    def test_sizes_without_reading_payloads(self, tmp_path):
+        path = self._camera_bag(tmp_path / "cam.mcap")
+        got = list(parse_bag(path).iter_sizes())
+        with open(path, "rb") as f:
+            expected = [(ch.topic, m.log_time, len(m.data))
+                        for _, ch, m in make_reader(f).iter_messages()]
+        assert got == expected

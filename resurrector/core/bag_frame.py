@@ -703,8 +703,8 @@ class BagFrame:
         for ti in self.metadata.topics:
             states[ti.name] = TopicHealthState()
 
-        # Health needs timestamps and sizes only, so payloads stay undecoded.
-        for topic, timestamp_ns, raw in self._parser.iter_raw():
+        # Health needs timestamps and sizes only, so payloads are never read.
+        for topic, timestamp_ns, size in self._parser.iter_sizes():
             state = states.get(topic)
             if state is None:
                 # Topic not in metadata (shouldn't happen normally) — skip.
@@ -713,7 +713,7 @@ class BagFrame:
                 state=state,
                 topic=topic,
                 timestamp_ns=timestamp_ns,
-                message_size=len(raw) if raw else None,
+                message_size=size if size else None,
                 config=config,
                 expected_interval_ns=expected_intervals_ns.get(topic),
             )
