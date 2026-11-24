@@ -197,6 +197,17 @@ class TestSearchEmbeddings:
         for r in results:
             assert r["bag_id"] == bag_id
 
+    def test_zero_norm_embedding_is_never_a_match(self, populated_index):
+        """_make_indexed's first embedding is all zeros, which has no cosine
+        similarity. DuckDB 2.0 returns NaN for it, and NaN passes any
+        threshold and sorts first unless it's filtered out."""
+        self._make_indexed(populated_index)
+        results = populated_index.search_embeddings(
+            query_embedding=[0.05] * 512, top_k=10, min_similarity=-1.0,
+        )
+        assert results
+        assert all(r["similarity"] == r["similarity"] for r in results)  # no NaN
+
     def test_search_returns_similarity_column(self, populated_index):
         """The SELECT also computes similarity — that placeholder
         must get the embedding too, not the threshold."""
