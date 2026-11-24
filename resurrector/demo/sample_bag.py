@@ -174,9 +174,11 @@ def _encode_joint_state(
     def encode_float64_array(values: list[float], current_offset: int) -> tuple[bytes, int]:
         # CDR rule: pad before float64 data so it lands on an 8-byte boundary,
         # measured from the start of the inner CDR payload (post-encapsulation).
+        # An empty array has no data to align, so no padding (as Fast-CDR,
+        # and so real recordings, write it).
         count_bytes = struct.pack("<I", len(values))
         offset_after_count = current_offset + 4
-        pad_len = (-offset_after_count) % 8
+        pad_len = (-offset_after_count) % 8 if values else 0
         data_bytes = struct.pack(f"<{len(values)}d", *values) if values else b""
         return count_bytes + b"\x00" * pad_len + data_bytes, offset_after_count + pad_len + len(data_bytes)
 

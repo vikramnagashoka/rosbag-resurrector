@@ -151,16 +151,36 @@ class Meter:
         }
 
 
-def op_coverage(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -> dict:
-    from mcap.reader import make_reader
+def _decodable_types(summary) -> set[str]:
+    """Types this resurrector checkout decodes: registered decoders, plus any
+    type its schema compiler (if it has one) accepts from the bag."""
     from resurrector.ingest.parser import list_decoders
 
-    m.start()
     known = set(list_decoders())
+    try:
+        from resurrector.ingest.ros2msg import UnsupportedSchema, compile_decoder
+    except ImportError:  # checkouts before schema decoding
+        return known
+    for schema in summary.schemas.values():
+        if schema.name not in known and schema.encoding == "ros2msg":
+            try:
+                compile_decoder(schema.name, schema.data)
+                known.add(schema.name)
+            except UnsupportedSchema:
+                pass
+    return known
+
+
+def op_coverage(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -> dict:
+    from mcap.reader import make_reader
+    import resurrector.ingest.parser  # noqa: F401  (registers the built-in decoders)
+
+    m.start()
     with open(mcap, "rb") as f:
         summary = make_reader(f).get_summary()
     if summary is None:
         raise RuntimeError("no summary section; the recording may have been cut off")
+    known = _decodable_types(summary)
     counts = summary.statistics.channel_message_counts if summary.statistics else {}
     topics = []
     for ch in summary.channels.values():
@@ -218,7 +238,11 @@ def op_rosbags_read(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -
     m.start()
     n = 0
     with AnyReader([bag_dir or mcap], default_typestore=typestore) as reader:
-        for conn, _ts, raw in reader.messages(connections=reader.connections):
+        # rosbags 0.11.10 yields nothing from some indexed MCAPs (the
+        # construction bags) unless a start time is given; the bag's own
+        # start time still covers every message.
+        for conn, _ts, raw in reader.messages(connections=reader.connections,
+                                              start=reader.start_time):
             reader.deserialize(raw, conn.msgtype)
             n += 1
     return {"msgs": n}
@@ -226,20 +250,16 @@ def op_rosbags_read(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -
 
 def op_chunks(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -> dict:
     from resurrector.core.bag_frame import BagFrame
-    from resurrector.ingest.parser import list_decoders
 
     m.start()
-    known = set(list_decoders())
     bf = BagFrame(mcap)
     rows = unparsed = 0
     for topic in bf.topic_names:
-        view = bf[topic]
-        # Flattening drops "_"-prefixed keys, so an undecoded topic's chunks
-        # hold only timestamp_ns. Count it by type, as op_coverage does.
-        decodable = view.message_type in known
-        for chunk in view.iter_chunks():
+        for chunk in bf[topic].iter_chunks():
             rows += chunk.height
-            if not decodable:
+            # Flattening drops "_"-prefixed keys, so an undecoded message
+            # becomes a row with nothing but its timestamp.
+            if chunk.width == 1:
                 unparsed += chunk.height
     return {"msgs": rows, "msgs_unparsed": unparsed, "extra": {"topics": len(bf.topic_names)}}
 
@@ -310,6 +330,21 @@ class Bag:
     rev: str
     size: int
     problem: str = ""
+    messages: int | None = None  # from the bag's index, to check full reads
+
+
+# Ops that must read every message; a different count means a silent short read.
+FULL_READ_OPS = {"read", "mcap_read", "rosbags_read", "chunks"}
+
+
+def indexed_message_count(mcap: Path) -> int | None:
+    try:
+        from mcap.reader import make_reader
+        with open(mcap, "rb") as f:
+            summary = make_reader(f).get_summary()
+        return summary.statistics.message_count if summary and summary.statistics else None
+    except Exception:
+        return None
 
 
 def _sh(*cmd: str) -> str:
@@ -354,7 +389,8 @@ def resolve_bag(path: Path) -> Bag:
     if mcap is None:
         return Bag(label, None, None, dataset, "", 0, problem or "not downloaded")
     bag_dir = mcap.parent if (mcap.parent / "metadata.yaml").is_file() else None
-    return Bag(label, mcap, bag_dir, dataset, dataset_revision(mcap), mcap.stat().st_size)
+    return Bag(label, mcap, bag_dir, dataset, dataset_revision(mcap), mcap.stat().st_size,
+               messages=indexed_message_count(mcap))
 
 
 def discover_all() -> list[Path]:
@@ -550,6 +586,10 @@ class Runner:
                 except subprocess.TimeoutExpired:
                     res = {"status": "timeout", "error": f"stopped after {self.args.timeout:.0f} s"}
         shutil.rmtree(scratch, ignore_errors=True)
+        if (res["status"] == "ok" and op in FULL_READ_OPS and bag.messages is not None
+                and res.get("msgs") != bag.messages):
+            res["status"] = "short_read"
+            res["error"] = f"read {res.get('msgs')} of the {bag.messages} messages the bag's index lists"
 
         wall = res.get("wall_s")
         ok = res["status"] == "ok" and wall
