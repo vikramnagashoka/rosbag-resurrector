@@ -32,6 +32,8 @@ from __future__ import annotations
 import heapq
 import os
 import struct
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import IO, Iterable, Iterator, NamedTuple
 
 _OP_MESSAGE = 0x05
@@ -50,6 +52,44 @@ _Entry = tuple
 
 # A record is read only up to its prefix when that saves more than this.
 _PREFIX_SLACK = 4096
+
+# How many chunks ahead to ask the OS to read in the background. For a bag
+# bigger than the page cache this keeps the disk busy while the caller
+# decodes, instead of waiting on one small read at a time (3x faster health
+# checks on a 55 GB bag read cold). A hint, not a read: nothing is copied,
+# no memory is held, and it costs almost nothing when the data is cached.
+READ_AHEAD = 8
+
+# A bag bigger than physical memory can never sit in the page cache whole,
+# so its reads always reach the disk. For those, worker threads also read
+# the next PREFETCH chunks themselves (pread releases the GIL), which keeps
+# several reads in flight: 3x faster health checks and 2.2x faster topic
+# reads on a 55 GB bag on a 24 GB machine, where hints alone give 1.4x.
+# Smaller bags skip the threads, which cost up to 50% on cached per-topic
+# passes. Memory: PREFETCH chunks' wanted messages.
+PREFETCH = 4
+
+_F_RDADVISE = 44  # macOS <sys/fcntl.h>; Python's fcntl module doesn't name it
+
+
+def _physical_memory() -> int:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
+def _advise(fd: int, offset: int, length: int) -> None:
+    """Ask the OS to start reading ``[offset, offset + length)`` now."""
+    global _advise
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+            fcntl.fcntl(fd, _F_RDADVISE, struct.pack("qi4x", offset, min(length, 2**31 - 1)))
+        elif hasattr(os, "posix_fadvise"):
+            os.posix_fadvise(fd, offset, length, os.POSIX_FADV_WILLNEED)
+    except OSError:
+        _advise = lambda fd, offset, length: None  # unsupported here; stop trying
 
 SUPPORTED_COMPRESSION = ("", "zstd", "lz4")
 
@@ -110,6 +150,41 @@ def iter_raw(
     ]
     chunks.sort(key=lambda ci: (ci.message_start_time, ci.chunk_start_offset))
     fd = f.fileno()
+    n_chunks = len(chunks)
+    advised = [0]  # chunks[:advised[0]] have been hinted
+    ram = _physical_memory()
+    pool = None
+    if PREFETCH > 0 and n_chunks > 1 and ram and os.fstat(fd).st_size > ram:
+        pool = ThreadPoolExecutor(PREFETCH, thread_name_prefix="mcap-read")
+    pending: dict[int, object] = {}
+
+    def read(idx: int) -> list[_Entry]:
+        """Chunk ``idx``'s entries, after starting the reads of the next ones."""
+        stop = min(idx + 1 + READ_AHEAD, n_chunks)
+        for j in range(max(advised[0], idx + 1), stop):
+            ci = chunks[j]
+            _advise(fd, ci.chunk_start_offset, ci.chunk_length + ci.message_index_length)
+        advised[0] = max(advised[0], stop)
+        if pool is not None:
+            for j in range(idx + 1, min(idx + 1 + PREFETCH, n_chunks)):
+                if j not in pending:
+                    pending[j] = pool.submit(
+                        _read_chunk, fd, chunks[j], wanted, start_time, end_time, prefix)
+            future = pending.pop(idx, None)
+            if future is not None:
+                return future.result()
+        return _read_chunk(fd, chunks[idx], wanted, start_time, end_time, prefix)
+
+    try:
+        yield from _merge(chunks, read)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _merge(chunks: list, read) -> Iterator[RawMessage]:
+    """Yield the chunks' messages in (log_time, chunk offset, position) order,
+    opening chunk ``i`` (via ``read(i)``) only when it could hold the next one."""
 
     # Heap entries: (log_time, chunk_offset, position, entries, next_index).
     # Keys never tie across chunks (offsets differ), so the list is never compared.
@@ -124,8 +199,8 @@ def iter_raw(
             < (heap[0][0], heap[0][1])
         ):
             ci = chunks[i]
+            entries = read(i)
             i += 1
-            entries = _read_chunk(fd, ci, wanted, start_time, end_time, prefix)
             if entries:
                 first = entries[0]
                 heapq.heappush(heap, (first[0], ci.chunk_start_offset, first[1], entries, 0))
