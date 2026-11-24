@@ -427,13 +427,47 @@ def _decoder_for(msg_type: str, schema) -> DecoderFn | None:
     definition the bag embeds (``schema``), else None."""
     decoder = _DECODER_REGISTRY.get(msg_type)
     if decoder is not None:
-        return decoder
+        return _layout_adapter(msg_type, decoder, schema) or decoder
     if schema is not None and schema.encoding == "ros2msg" and schema.data:
         try:
             return compile_decoder(msg_type, schema.data)
         except UnsupportedSchema as exc:
             logger.warning("Can't decode '%s' from its embedded definition: %s", msg_type, exc)
     return None
+
+
+def _layout_adapter(msg_type: str, decoder: DecoderFn, schema) -> DecoderFn | None:
+    """A schema-based stand-in for a built-in decoder whose fixed field
+    order doesn't match the bag's definition, or None if it matches.
+
+    The Marker parser reads ROS 2 Humble's field order; Iron and later add
+    fields mid-message, which it would misread. With the bag's definition
+    at hand, decode from that and convert to the same output instead.
+    A user-registered decoder is never replaced.
+    """
+    if decoder not in (_parse_marker, _parse_marker_array):
+        return None
+    if schema is None or schema.encoding != "ros2msg" or not schema.data:
+        return None
+    from resurrector.core.scene import HUMBLE_MARKER_FIELDS, marker_from_fields
+    from resurrector.ingest.ros2msg import parse_definitions
+
+    try:
+        defs = parse_definitions(msg_type, schema.data.decode("utf-8", "replace"))
+        fields = tuple(f.name for f in defs.get("visualization_msgs/Marker", ()))
+        if fields == HUMBLE_MARKER_FIELDS:
+            return None
+        generic = compile_decoder(msg_type, schema.data)
+    except UnsupportedSchema:
+        return None
+
+    if decoder is _parse_marker:
+        return lambda data: {"marker": marker_from_fields(generic(data)).to_dict()}
+
+    def decode_array(data: bytes) -> dict[str, Any]:
+        markers = [marker_from_fields(m).to_dict() for m in generic(data)["markers"]]
+        return {"markers": markers, "_count": len(markers)}
+    return decode_array
 
 
 def _decode_with(decoder: DecoderFn | None, msg_type: str, data: bytes) -> dict[str, Any]:
@@ -577,6 +611,21 @@ def _register_builtin_decoders() -> None:
     register_decoder("visualization_msgs/msg/MarkerArray", _parse_marker_array)
 
 
+def _read_string_unpadded(buf: bytes, offset: int, msg_type: str = "?") -> tuple[str, int]:
+    """Like :func:`_safe_read_string`, but returns the offset right after the
+    string's bytes. CDR pads only to align the *next* field, so a 1-byte
+    field after a string starts immediately."""
+    (str_len,) = _safe_unpack("<I", buf, offset, msg_type)
+    offset += 4
+    if offset + str_len > len(buf):
+        raise CDRParseError(
+            msg_type, offset, str_len, len(buf) - offset,
+            detail=f"string length {str_len} exceeds buffer",
+        )
+    s = buf[offset:offset + str_len].decode("utf-8", errors="replace").rstrip("\x00")
+    return s, offset + str_len
+
+
 def _read_header(buf: bytes, offset: int, msg_type: str = "?") -> tuple[int, int, str, int]:
     """Read a std_msgs/Header from CDR buffer.
 
@@ -592,7 +641,9 @@ def _parse_imu(buf: bytes) -> dict[str, Any]:
     """Parse sensor_msgs/Imu from CDR buffer."""
     mt = "sensor_msgs/msg/Imu"
     sec, nsec, frame_id, off = _read_header(buf, 0, mt)
-    # orientation: 4 x float64
+    # orientation: 4 x float64, aligned to 8 (frame_id can end on any
+    # 4-byte boundary, so this padding is 0 or 4 bytes)
+    off = (off + 7) & ~7
     qx, qy, qz, qw = _safe_unpack("<4d", buf, off, mt)
     off += 32
     # orientation_covariance: 9 x float64
@@ -695,7 +746,11 @@ def _parse_image(buf: bytes) -> dict[str, Any]:
     sec, nsec, frame_id, off = _read_header(buf, 0, mt)
     height, width = _safe_unpack("<II", buf, off, mt)
     off += 8
-    encoding, off = _safe_read_string(buf, off, mt)
+    # is_bigendian is a uint8, so it sits right after the encoding string's
+    # bytes; padding comes only before step (uint32). Reading it at the
+    # next 4-byte boundary (as this did before 0.8.8) shifted step,
+    # data_length and the pixel offset by up to 3 bytes on real bags.
+    encoding, off = _read_string_unpadded(buf, off, mt)
     (is_bigendian,) = _safe_unpack("<B", buf, off, mt)
     off += 1
     off = (off + 3) & ~3

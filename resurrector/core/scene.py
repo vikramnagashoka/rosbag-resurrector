@@ -323,9 +323,14 @@ def _parse_transform_stamped(
 ) -> tuple[Transform | None, int]:
     """Parse one TransformStamped starting at ``off``. Returns (tf, new_off)."""
     # Header: sec (int32), nsec (uint32), frame_id (string)
+    off = (off + 3) & ~3
     sec, nsec = struct.unpack_from("<iI", buf, off)
     off += 8
     parent_frame, off = _read_cdr_string(buf, off)
+    # The next string's length is a uint32, aligned to 4. Reading it right
+    # after frame_id's bytes (as this did before 0.8.8) failed on most real
+    # TF messages: any frame name whose length isn't a multiple of 4.
+    off = (off + 3) & ~3
     child_frame, off = _read_cdr_string(buf, off)
     # Align to 8 for double-precision Vector3 + Quaternion
     off = (off + 7) & ~7
@@ -586,6 +591,38 @@ class Marker:
         }
 
 
+# The field order the hand-written parser below reads (ROS 2 Humble).
+# Iron and later insert texture_resource, texture and uv_coordinates
+# before text, and mesh_file before mesh_use_embedded_materials.
+HUMBLE_MARKER_FIELDS = (
+    "header", "ns", "id", "type", "action", "pose", "scale", "color", "lifetime",
+    "frame_locked", "points", "colors", "text", "mesh_resource",
+    "mesh_use_embedded_materials",
+)
+
+
+def marker_from_fields(m: dict[str, Any]) -> Marker:
+    """A :class:`Marker` from a schema-decoded Marker dict (any ROS 2 layout)."""
+    header, pose = m["header"], m["pose"]
+    p, q, sc, c, life = pose["position"], pose["orientation"], m["scale"], m["color"], m["lifetime"]
+    return Marker(
+        frame_id=header["frame_id"],
+        timestamp_ns=header["stamp_sec"] * 1_000_000_000 + header["stamp_nsec"],
+        ns=m["ns"],
+        id=m["id"],
+        type=m["type"],
+        action=m["action"],
+        position=(p["x"], p["y"], p["z"]),
+        orientation=(q["x"], q["y"], q["z"], q["w"]),
+        scale=(sc["x"], sc["y"], sc["z"]),
+        color=(c["r"], c["g"], c["b"], c["a"]),
+        lifetime_sec=life["sec"] + life["nanosec"] / 1e9,
+        frame_locked=bool(m["frame_locked"]),
+        text=m.get("text", ""),
+        mesh_resource=m.get("mesh_resource", ""),
+    )
+
+
 def _parse_marker_inline(buf: bytes, off: int) -> tuple[Marker | None, int]:
     """Parse a Marker body starting at ``off`` (no CDR header skip).
 
@@ -595,11 +632,15 @@ def _parse_marker_inline(buf: bytes, off: int) -> tuple[Marker | None, int]:
     its sequence-count header).
     """
     try:
-        # Header: sec (int32), nsec (uint32), frame_id (string)
+        # Header: sec (int32), nsec (uint32), frame_id (string). A marker
+        # inside a MarkerArray starts wherever the previous one ended.
+        off = (off + 3) & ~3
         sec, nsec = struct.unpack_from("<iI", buf, off)
         off += 8
         frame_id, off = _read_cdr_string(buf, off)
-        # ns (string), id (int32), type (int32), action (int32)
+        # ns (string), id (int32), type (int32), action (int32). The ns
+        # length is a uint32, so align to 4 after frame_id's bytes.
+        off = (off + 3) & ~3
         ns, off = _read_cdr_string(buf, off)
         off = (off + 3) & ~3
         marker_id, marker_type, marker_action = struct.unpack_from(

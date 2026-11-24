@@ -84,8 +84,10 @@ def _raw_frames_bag(path: Path, frames: list[tuple[str, np.ndarray, int]]) -> Pa
         step = len(data) // h
         data = data[:len(data) - cut]
         enc = encoding.encode() + b"\x00"
+        # is_bigendian (uint8) follows the string directly; step aligns to 4.
+        # The header _encode_cdr_header writes is a multiple of 4 long.
         return (struct.pack("<II", h, arr.shape[1]) + struct.pack("<I", len(enc)) + enc
-                + b"\x00" * ((4 - len(enc) % 4) % 4) + b"\x00" * 4
+                + b"\x00" + b"\x00" * ((-(13 + len(enc))) % 4)
                 + struct.pack("<I", step) + struct.pack("<I", len(data)) + data)
 
     mt = "sensor_msgs/msg/Image"

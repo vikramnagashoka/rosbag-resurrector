@@ -36,6 +36,12 @@ from mcap.writer import Writer
 # uses it to recognise a bag as ours before regenerating it.
 GENERATOR_LIBRARY = "rosbag-resurrector-testgen"
 
+# Bumped when the bytes this generator writes change. Layout "2" (0.8.8)
+# pads CDR the way real recorders do: an empty float64 array gets no
+# padding, and a uint8 right after a string isn't padded to 4 first.
+# Sample bags from an earlier layout read wrong now, so they're stale.
+CDR_LAYOUT = "2"
+
 # ROS2 CDR serialization helpers
 # We write raw CDR-encoded messages so we don't need actual ROS2 installed.
 
@@ -197,15 +203,19 @@ def _encode_image(
     """Encode a sensor_msgs/Image message in CDR."""
     header = _encode_cdr_header(t_sec, t_nsec, "camera_rgb_optical_frame")
     encoding_str = b"rgb8\x00"
-    padding = (4 - (len(encoding_str) % 4)) % 4
     step = width * 3
-    body = (
+    # is_bigendian (uint8) follows the encoding string directly; only step
+    # (uint32) is aligned, relative to the payload start.
+    head = (
         struct.pack("<II", height, width)
         + struct.pack("<I", len(encoding_str))
         + encoding_str
-        + b"\x00" * padding
         + struct.pack("<B", 0)  # is_bigendian
-        + b"\x00" * 3  # padding to align step
+    )
+    pad = (-(len(header) + len(head))) % 4
+    body = (
+        head
+        + b"\x00" * pad
         + struct.pack("<I", step)
         + struct.pack("<I", len(rgb_data))
         + rgb_data
@@ -558,6 +568,7 @@ def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Pa
             "resurrector_test",
             {
                 "generator": GENERATOR_LIBRARY,
+                "cdr_layout": CDR_LAYOUT,
                 "duration_sec": str(config.duration_sec),
                 "description": "Synthetic test bag",
             },
@@ -566,6 +577,17 @@ def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Pa
         writer.finish()
 
     return output_path
+
+
+def _cdr_layout(path: Path) -> str | None:
+    """The ``cdr_layout`` this generator recorded in the bag (None before 0.8.8)."""
+    from mcap.reader import make_reader
+
+    with open(path, "rb") as f:
+        for record in make_reader(f).iter_metadata():
+            if record.name == "resurrector_test":
+                return record.metadata.get("cdr_layout")
+    return None
 
 
 def written_by_generator(path: str | Path) -> bool:
@@ -598,6 +620,12 @@ def stale_sample_reason(path: str | Path) -> str | None:
         return "it is empty"
     if not written_by_generator(path):
         return None
+    try:
+        layout = _cdr_layout(path)
+    except Exception:
+        return "it is incomplete (an earlier run was interrupted)"
+    if layout != CDR_LAYOUT:
+        return "it was written with an older byte layout this version no longer reads"
     try:
         # Reading starts with the summary at the end of the file, so a
         # bag cut off mid-write fails here.

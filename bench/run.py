@@ -237,12 +237,11 @@ def op_rosbags_read(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -
     typestore = get_typestore(Stores.ROS2_HUMBLE)  # only for types a bag doesn't embed
     m.start()
     n = 0
-    with AnyReader([bag_dir or mcap], default_typestore=typestore) as reader:
-        # rosbags 0.11.10 yields nothing from some indexed MCAPs (the
-        # construction bags) unless a start time is given; the bag's own
-        # start time still covers every message.
-        for conn, _ts, raw in reader.messages(connections=reader.connections,
-                                              start=reader.start_time):
+    # The .mcap file itself, as the other readers get it. rosbags 0.11.10's
+    # bag-directory mode (metadata.yaml) yields no messages at all from the
+    # construction bags; file mode reads them in full.
+    with AnyReader([mcap], default_typestore=typestore) as reader:
+        for conn, _ts, raw in reader.messages(connections=reader.connections):
             reader.deserialize(raw, conn.msgtype)
             n += 1
     return {"msgs": n}
