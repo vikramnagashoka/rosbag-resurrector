@@ -424,15 +424,17 @@ class TestFastReader:
     def test_stopping_early_shuts_the_read_ahead_threads_down(self, tmp_path, monkeypatch):
         import threading
 
+        def readers():
+            return [t for t in threading.enumerate() if t.name.startswith("mcap-read")]
+
         monkeypatch.setattr(fast_mcap, "_physical_memory", lambda: 1)
         path = _write_bag(tmp_path / "b.mcap", _mixed_messages(400), chunk_size=2048)
-        before = threading.active_count()
         with open(path, "rb") as f:
             it = fast_mcap.iter_raw(f, make_reader(f).get_summary())
             assert len([next(it) for _ in range(5)]) == 5
-            assert threading.active_count() > before
+            assert readers()
             it.close()
-        assert threading.active_count() == before
+        assert not readers()
 
     def test_unindexed_file_falls_back_to_the_mcap_reader(self, tmp_path):
         path = tmp_path / "flat.mcap"
