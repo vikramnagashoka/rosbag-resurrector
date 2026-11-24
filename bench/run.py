@@ -95,7 +95,7 @@ OPS = {
 }
 
 FIELDS = [
-    "run_id", "time_utc", "git_commit", "git_dirty", "resurrector", "machine",
+    "run_id", "label", "time_utc", "git_commit", "git_dirty", "resurrector", "machine",
     "dataset", "dataset_rev", "bag", "bag_gb", "bag_vs_ram",
     "op", "cache", "repeat", "status", "error",
     "wall_s", "cpu_user_s", "cpu_sys_s", "mb_per_s", "msgs", "msgs_per_s", "msgs_unparsed",
@@ -281,6 +281,8 @@ CHILD_OPS = {
 
 def child_main(spec_file: str) -> int:
     spec = json.loads(Path(spec_file).read_text())
+    # Import resurrector from the tree under test, ahead of the editable install.
+    sys.path.insert(0, spec["src"])
     meter = Meter()
     bag_dir = Path(spec["bag_dir"]) if spec["bag_dir"] else None
     try:
@@ -396,7 +398,21 @@ def machine_info() -> dict:
     return info
 
 
-def package_versions() -> dict:
+def resurrector_import(src: Path) -> tuple[str, str]:
+    """(version, package dir) of the resurrector the children will import.
+
+    An editable install's metadata can lag the code (it said 0.7.1 while the
+    code was 0.8.7), so this asks the package itself, the same way a child
+    imports it.
+    """
+    out = _sh(sys.executable, "-I", "-c",
+              f"import sys; sys.path.insert(0, {str(src)!r}); import resurrector, os; "
+              "print(resurrector.__version__); print(os.path.dirname(resurrector.__file__))")
+    lines = out.splitlines()
+    return (lines[0], lines[1]) if len(lines) == 2 else ("", "")
+
+
+def package_versions(src: Path) -> dict:
     from importlib.metadata import PackageNotFoundError, version
 
     out = {}
@@ -406,17 +422,15 @@ def package_versions() -> dict:
             out[dist] = version(dist)
         except PackageNotFoundError:
             out[dist] = ""
-    # An editable install's metadata can lag the code (it said 0.7.1 while
-    # the code was 0.8.7), so ask the package the children will import.
-    out["rosbag-resurrector"] = _sh(
-        sys.executable, "-I", "-c", "import resurrector; print(resurrector.__version__)")
+    out["rosbag-resurrector"] = resurrector_import(src)[0]
     return out
 
 
-def git_info() -> dict:
-    commit = _sh("git", "-C", str(REPO), "rev-parse", "HEAD")
-    status = _sh("git", "-C", str(REPO), "status", "--porcelain", "--untracked-files=no")
-    return {"commit": commit, "dirty": bool(status)}
+def git_info(src: Path) -> dict:
+    commit = _sh("git", "-C", str(src), "rev-parse", "HEAD")
+    branch = _sh("git", "-C", str(src), "rev-parse", "--abbrev-ref", "HEAD")
+    status = _sh("git", "-C", str(src), "status", "--porcelain", "--untracked-files=no")
+    return {"commit": commit, "branch": branch, "dirty": bool(status)}
 
 
 def conditions() -> dict:
@@ -502,7 +516,7 @@ class Runner:
         self.machine = machine_info()
         self.ram = self.machine["ram_bytes"]
         self.git = git
-        self.versions = package_versions()
+        self.versions = package_versions(args.src)
         self.machine_label = " ".join(
             x for x in (self.machine["model"], self.machine["chip"],
                         f"{self.ram / 2**30:.0f}GB" if self.ram else "") if x)
@@ -514,7 +528,7 @@ class Runner:
         spec_file, result_file = scratch / "spec.json", scratch / "result.json"
         spec_file.write_text(json.dumps({
             "op": op, "mcap": str(bag.mcap), "bag_dir": str(bag.bag_dir or ""),
-            "scratch": str(scratch), "result": str(result_file),
+            "scratch": str(scratch), "result": str(result_file), "src": str(self.args.src),
         }))
         cond = conditions()
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", bag.label)
@@ -542,6 +556,7 @@ class Runner:
         msgs = res.get("msgs", "")
         row = {
             "run_id": self.run_id,
+            "label": self.args.label,
             "time_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "git_commit": self.git["commit"][:12],
             "git_dirty": self.git["dirty"],
@@ -638,6 +653,10 @@ def main(argv: list[str] | None = None) -> int:
                          "up to this, so a fanless laptop cools between runs")
     ap.add_argument("--timeout", type=float, default=3600.0, help="seconds before a run is stopped")
     ap.add_argument("--out", type=Path, default=ROSDATA / "bench-results")
+    ap.add_argument("--src", type=Path, default=REPO,
+                    help="source tree to benchmark, e.g. a `git worktree` of main "
+                         "(default: this checkout)")
+    ap.add_argument("--label", default="", help="free-text tag stored with every row")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--_child", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
@@ -683,7 +702,14 @@ def main(argv: list[str] | None = None) -> int:
             print(COLD_HELP.format(err=err, user=getpass.getuser()), file=sys.stderr)
             return 2
 
-    git = git_info()
+    args.src = args.src.expanduser().resolve()
+    _, pkg_dir = resurrector_import(args.src)
+    if not pkg_dir or Path(pkg_dir).resolve().parent != args.src:
+        print(f"resurrector imports from {pkg_dir or '(nowhere)'}, not from --src {args.src}",
+              file=sys.stderr)
+        return 2
+
+    git = git_info(args.src)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + (f"-{git['commit'][:7]}" if git["commit"] else "")
     out_dir = args.out / run_id
     runner = Runner(args, run_id, out_dir, git)
@@ -697,6 +723,7 @@ def main(argv: list[str] | None = None) -> int:
     cond = conditions()
     (out_dir / "run.json").write_text(json.dumps({
         "run_id": run_id,
+        "label": args.label,
         "started_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git": runner.git,
         "machine": runner.machine,
@@ -710,7 +737,7 @@ def main(argv: list[str] | None = None) -> int:
     }, indent=2))
 
     print(f"machine: {runner.machine_label}, {runner.machine['os']}, Python {runner.machine['python']}")
-    print(f"git: {runner.git['commit'][:12]}{' (uncommitted changes)' if runner.git['dirty'] else ''}"
+    print(f"git: {runner.git['branch']} {runner.git['commit'][:12]}{' (uncommitted changes)' if runner.git['dirty'] else ''}"
           f", resurrector {runner.versions['rosbag-resurrector']}")
     for w in condition_warnings(cond):
         print(f"  WARNING: {w}")
