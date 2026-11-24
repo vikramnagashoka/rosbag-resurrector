@@ -575,12 +575,11 @@ def _row_maker(topic: str, schema, warned: set[str]) -> Callable[[bytes, int], d
     fails) flatten to the timestamp alone, as before.
     """
     msg_type = schema.name if schema else "unknown"
-    decoder = _DECODER_REGISTRY.get(msg_type)
+    registered = _DECODER_REGISTRY.get(msg_type)
+    decoder = _decoder_for(msg_type, schema)  # the same choice read_messages makes
     row_fn = None
-    if decoder is None:
-        decoder = _decoder_for(msg_type, schema)
-        if decoder is not None:
-            row_fn = compile_row_decoder(msg_type, schema.data)
+    if registered is None and decoder is not None:
+        row_fn = compile_row_decoder(msg_type, schema.data)
 
     if row_fn is not None:
         def make(data: bytes, ts: int) -> dict:
@@ -809,7 +808,7 @@ def _parse_joint_state(buf: bytes) -> dict[str, Any]:
     A float64 array is padded to 8 bytes only when it has elements, as
     Fast-CDR writes it. Many drivers publish positions only, so an empty
     ``velocity`` or ``effort`` is common; padding it anyway (as this
-    decoder did before 0.8.8) misreads every such message.
+    decoder once did) misreads every such message.
     """
     mt = "sensor_msgs/msg/JointState"
     end = len(buf)
@@ -873,7 +872,7 @@ def _parse_image(buf: bytes) -> dict[str, Any]:
     off += 8
     # is_bigendian is a uint8, so it sits right after the encoding string's
     # bytes; padding comes only before step (uint32). Reading it at the
-    # next 4-byte boundary (as this did before 0.8.8) shifted step,
+    # next 4-byte boundary (as this once did) shifted step,
     # data_length and the pixel offset by up to 3 bytes on real bags.
     encoding, off = _read_string_unpadded(buf, off, mt)
     (is_bigendian,) = _safe_unpack("<B", buf, off, mt)

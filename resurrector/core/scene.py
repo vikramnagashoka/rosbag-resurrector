@@ -328,7 +328,7 @@ def _parse_transform_stamped(
     off += 8
     parent_frame, off = _read_cdr_string(buf, off)
     # The next string's length is a uint32, aligned to 4. Reading it right
-    # after frame_id's bytes (as this did before 0.8.8) failed on most real
+    # after frame_id's bytes (as this once did) failed on most real
     # TF messages: any frame name whose length isn't a multiple of 4.
     off = (off + 3) & ~3
     child_frame, off = _read_cdr_string(buf, off)

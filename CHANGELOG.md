@@ -6,6 +6,61 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ---
 
+## [Unreleased]
+
+### What's new
+
+Every message type in a bag decodes now, custom ones included, and the
+built-in decoders read real recordings correctly. Reading, DataFrame
+chunks, export and health checks are several times faster on real bags.
+
+### Fixed
+
+Benchmarking against three public datasets (manipulation, humanoid,
+mobile robot) and checking every built-in decoder against mcap_ros2
+found these. The synthetic bags the tests used were written with the
+same mistakes, so the tests never saw them.
+
+- `sensor_msgs/Image`: `step`, `data_length` and the pixel offset were
+  read 1 to 3 bytes off on real recordings, so frames from raw `Image`
+  topics (frame export, frame search, LeRobot video) came out shifted.
+- `tf2_msgs/TFMessage`: a transform whose frame name isn't a multiple of
+  4 bytes long ended the message, so most `/tf` messages in real bags
+  came back with no transforms (90% or more in the humanoid dataset).
+- `sensor_msgs/Imu`: orientation, angular velocity and acceleration were
+  garbage for some `frame_id` lengths.
+- `sensor_msgs/JointState`: every message with an empty `velocity` or
+  `effort` (common: many drivers publish positions only) failed to
+  decode.
+- `visualization_msgs/Marker` and `MarkerArray`: markers after the first
+  were misread, and bags recorded with ROS 2 Iron or later (which added
+  texture and mesh fields) misread every marker.
+- The synthetic sample bags now use the byte layout real recorders
+  write. A sample bag from an earlier version is regenerated the next
+  time it's used; your own bags are never touched.
+
+### Changed
+
+- **Any message type decodes.** A type with no built-in decoder used to
+  come back as an `_unparsed` placeholder: 25 to 62% of the messages in
+  the benchmark bags (`geometry_msgs/PoseStamped`, `nav_msgs/Odometry`,
+  custom types). Resurrector now compiles the message definition rosbag2
+  embeds in each MCAP file into a decoder, so those topics become typed
+  columns. Built-in and `register_decoder()` decoders still take
+  priority; a bag without a definition still needs `register_decoder()`.
+  Those topics now carry their fields everywhere a topic's columns go:
+  exports, `sync()`, and LeRobot's `observation.state` and `action` when
+  you select them, which used to get only timestamps from them.
+- **Faster reading.** MCAP files are read through their chunk and message
+  indexes: a topic's messages are read without touching the rest of each
+  chunk. Same messages in the same order as before.
+- **Health checks and density** read only message headers, not payloads.
+- `iter_chunks()`, `to_polars()` and export build rows directly from the
+  decoded bytes, and read only the metadata of camera frames and point
+  clouds.
+
+---
+
 ## [0.8.7] — 2026-10-11
 
 ### What's new

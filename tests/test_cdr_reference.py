@@ -280,11 +280,25 @@ class TestSchemaCompiler:
         row = compile_row_decoder(type_name, definition)(raw, 42)
         assert row == expected and list(row) == list(expected)
 
-    def test_custom_rows_match_flattened_dicts(self):
-        raw = _cdr("my_pkg/msg/Custom", _custom_message(), CUSTOM)
+    @pytest.mark.parametrize("over", [
+        {},
+        {"seq_f64": [], "bounded_i16": [], "blob": b"", "tags": [], "items": [], "long_seq": []},
+        {"seq_f64": [float(i) for i in range(21)], "tags": ["a" * 9, "b"], "long_seq": [1]},
+        {"items": [{"label": "x" * 5, "value": 9.0, "kind": 9}] * 30, "blob": b"z" * 1001},
+    ])
+    def test_custom_rows_match_flattened_dicts(self, over):
+        # Row decoders skip what rows drop (arrays of messages or strings,
+        # numeric arrays past 20, blobs); what they keep must not move.
+        raw = _cdr("my_pkg/msg/Custom", _custom_message(**over), CUSTOM)
         expected = {"timestamp_ns": 1}
         flatten_into(compile_decoder("my_pkg/msg/Custom", CUSTOM)(raw), expected)
-        assert compile_row_decoder("my_pkg/msg/Custom", CUSTOM)(raw, 1) == expected
+        row = compile_row_decoder("my_pkg/msg/Custom", CUSTOM)(raw, 1)
+        assert row == expected and list(row) == list(expected)
+
+    def test_row_decoder_rejects_what_the_dict_decoder_rejects(self):
+        raw = _cdr("my_pkg/msg/Custom", _custom_message(), CUSTOM)
+        with pytest.raises(Exception):
+            compile_row_decoder("my_pkg/msg/Custom", CUSTOM)(raw[: len(raw) - 40], 1)
 
     def test_truncated_message_raises(self):
         raw = _cdr("my_pkg/msg/Custom", _custom_message(), CUSTOM)

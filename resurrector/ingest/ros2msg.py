@@ -27,6 +27,12 @@ Two functions come out of the same generated reads:
   ``field.0``, ``field.1`` ..., everything else that ``_flatten_dict``
   skips left out, same key order), without building the dict first.
 
+The definition comes from the bag file, so it's untrusted input. Names
+from it reach the generated source only through ``repr()`` (type names
+must also match a strict identifier pattern), so a crafted definition
+can't inject code; array sizes and empty element types are bounded so it
+can't make a decoder loop without consuming bytes either.
+
 Wire format: CDR little-endian (XCDR1), the encoding every common ROS 2
 middleware writes. Alignment is relative to the byte after the 4-byte
 encapsulation header, and a sequence's elements are aligned only if it has
@@ -136,6 +142,8 @@ def parse_definitions(type_name: str, text: str) -> dict[str, list[_Field]]:
                 array, size = "", 0
             elif m.group(4) and not m.group(3):
                 array, size = "fixed", int(m.group(4))
+                if size > MAX_ARRAY_LEN:
+                    raise UnsupportedSchema(f"{name}.{fname}: array size {size} is implausible")
             else:
                 array, size = "seq", 0
             fields.append(_Field(fname, base, array, size))
@@ -153,9 +161,17 @@ _Node = tuple
 
 
 class _Gen:
-    """Emits the reads of one decode function and the tree of what they hold."""
+    """Emits the reads of one decode function and the tree of what they hold.
 
-    def __init__(self, defs: dict[str, list[_Field]], env: dict, counter: list[int]):
+    ``mode`` is "nested" (decode everything, for ``iter_messages``), "row"
+    (skip what a row leaves out: arrays of strings or messages, numeric
+    arrays past 20 values, byte blobs) or "skip" (decode nothing, just move
+    the offset past one value; for elements of skipped arrays).
+    """
+
+    def __init__(self, defs: dict[str, list[_Field]], env: dict, counter: list[int],
+                 mode: str = "nested"):
+        self.mode = mode
         self.defs = defs
         self.env = env
         self.counter = counter
@@ -211,6 +227,34 @@ class _Gen:
         self.advance(size * count)
         return temp
 
+    def skip(self, size: int, count: int) -> None:
+        """Move past ``count`` fixed-size values without reading them."""
+        if not count:
+            return
+        self.align(size)
+        n = size * count
+        if self.run:
+            self.run_fmt += f"{n}x"
+        else:
+            self.lines.append(f"o += {n}")
+        self.advance(n)
+
+    def skip_string(self) -> None:
+        n = self.fixed("I", 4)
+        self.flush()
+        self.lines.append(f"if o + {n} > L: raise E('string runs past the message')")
+        self.lines.append(f"o += {n}")
+        self.unknown()
+
+    def skip_loop(self, base: str, count: str) -> None:
+        if base != "string" and not self.defs.get(base):
+            raise UnsupportedSchema(f"array of field-less type {base}")
+        self.flush()
+        elem = _skip_function(base, self.defs, self.env, self.counter)
+        self.lines.append(f"for _ in range({count}):")
+        self.lines.append(f"    o = {elem}(b, o, L)")
+        self.unknown()
+
     def flush(self) -> None:
         if not self.run:
             return
@@ -241,42 +285,87 @@ class _Gen:
         return ("struct", [(f.name, self.field_node(f)) for f in fields])
 
     def field_node(self, f: _Field) -> _Node:
+        dropping = self.mode != "nested"   # rows don't need it
+        everything = self.mode == "skip"   # nothing is needed
+        none = ("opaque", "None")
         if f.array == "":
             if f.base in _PRIMITIVES:
                 code, size = _PRIMITIVES[f.base]
+                if everything:
+                    self.skip(size, 1)
+                    return none
                 return ("scalar", self.fixed(code, size))
             if f.base == "string":
+                if everything:
+                    self.skip_string()
+                    return none
                 return ("scalar", self.string())
             return self.struct_node(f.base)
         if f.array == "fixed":
             if f.base in _BLOB:
+                if dropping:
+                    self.skip(1, f.size)
+                    return none
                 return ("opaque", self.fixed("s", 1, f.size, kind="bytes") if f.size else "b''")
             if f.base in _PRIMITIVES:
                 code, size = _PRIMITIVES[f.base]
                 if f.size == 0:
                     return ("list", "[]", 0)
+                if dropping and (everything or f.size > ROW_LIST_MAX):
+                    self.skip(size, f.size)
+                    return none
                 if f.size > LIST_MAX:
                     return ("opaque", self.numpy_array(code, size, f.size))
                 return ("list", self.fixed(code, size, f.size, kind="list"), f.size)
+            if dropping:
+                self.skip_loop(f.base, str(f.size))
+                return none
             return ("opaque", self.loop(f, str(f.size)))
         # sequence: uint32 count, then the elements
         count = self.fixed("I", 4)
         self.flush()
         self.lines.append(f"if {count} > {MAX_ARRAY_LEN}: raise E('sequence length %d' % {count})")
         if f.base in _BLOB:
-            out = self.fresh("v")
             self.lines.append(f"if o + {count} > L: raise E('sequence runs past the message')")
+            if dropping:
+                self.lines.append(f"o += {count}")
+                self.unknown()
+                return none
+            out = self.fresh("v")
             self.lines.append(f"{out} = b[o:o + {count}]")
             self.lines.append(f"o += {count}")
             self.unknown()
             return ("opaque", out)
         if f.base in _PRIMITIVES:
             code, size = _PRIMITIVES[f.base]
+            align = _runtime_align(size) or "pass"
+            bounds = f"if o + {count} * {size} > L: raise E('sequence runs past the message')"
+            if everything:
+                self.lines += [f"if {count}:", f"    {align}", f"    {bounds}",
+                               f"    o += {count} * {size}"]
+                self.unknown()
+                return none
             out = self.fresh("v")
+            if dropping:
+                # Rows expand only lists of up to ROW_LIST_MAX numbers.
+                self.lines += [
+                    f"if {count}:",
+                    f"    {align}",
+                    f"    if {count} > {ROW_LIST_MAX}:",
+                    f"        {bounds}",
+                    f"        {out} = ()",
+                    "    else:",
+                    f"        {out} = unpack_from('<%d{code}' % {count}, b, o)",
+                    f"    o += {count} * {size}",
+                    "else:",
+                    f"    {out} = ()",
+                ]
+                self.unknown()
+                return ("list", out, None)
             dt = self.const(np.dtype(_NUMPY[code]), "D")
             self.lines += [
                 f"if {count}:",
-                f"    {_runtime_align(size) or 'pass'}",
+                f"    {align}",
                 f"    if {count} > {LIST_MAX}:",
                 f"        {out} = np.frombuffer(b, {dt}, {count}, o)",
                 "    else:",
@@ -287,6 +376,9 @@ class _Gen:
             ]
             self.unknown()
             return ("list", out, None)
+        if dropping:
+            self.skip_loop(f.base, count)
+            return none
         return ("opaque", self.loop(f, count))
 
     def string(self) -> str:
@@ -311,6 +403,10 @@ class _Gen:
 
     def loop(self, f: _Field, count: str) -> str:
         """An array of strings or messages, decoded element by element."""
+        if f.base != "string" and not self.defs.get(f.base):
+            # Each element must consume bytes, or a count from the data
+            # could spin the loop without ever running out of message.
+            raise UnsupportedSchema(f"array of field-less type {f.base}")
         self.flush()
         elem = _element_function(f.base, self.defs, self.env, self.counter)
         out = self.fresh("v")
@@ -374,6 +470,27 @@ def _render_row(node: _Node, prefix: str, out: list[str]) -> None:
     # opaque values stay out of rows
 
 
+def _skip_function(base: str, defs, env, counter) -> str:
+    """Name of a compiled ``f(b, o, L) -> o`` that moves past one array element."""
+    key = ("skip", base)
+    if key in env:
+        return env[key]
+    counter[0] += 1
+    name = f"_skip{counter[0]}"
+    env[key] = name
+    g = _Gen(defs, env, counter, mode="skip")
+    g.mod, g.res = 1, 0
+    if base == "string":
+        g.skip_string()
+    else:
+        g.struct_node(base)
+    g.flush()
+    body = "".join("    " + line + "\n" for line in g.lines)
+    src = f"def {name}(b, o, L):\n{body}    return o\n"
+    exec(compile(src, f"<ros2msg skip {base}>", "exec"), env)
+    return name
+
+
 def _element_function(base: str, defs, env, counter) -> str:
     """Name of a compiled ``f(b, o, L) -> (value, o)`` for one array element."""
     key = ("elem", base)
@@ -401,6 +518,8 @@ _HEAD = (
 # Real messages end within 3 bytes of padding. Much more left over means
 # the definition doesn't describe these bytes.
 _TAIL = (
+    "    if o > L:\n"
+    "        raise E('message is %d bytes shorter than its definition' % (o - L))\n"
     "    if L - o > 7:\n"
     "        raise E('%d bytes left after decoding: the definition does not match' % (L - o))\n"
 )
@@ -454,21 +573,26 @@ def _compile(type_name: str, text: str) -> tuple[Callable, Callable]:
         # nothing about the bytes, so leave the message undecoded.
         raise UnsupportedSchema(f"definition of {type_name} has no fields")
     env: dict[str, Any] = {"np": np, "unpack_from": struct.unpack_from, "E": CDRDecodeError}
-    g = _Gen(defs, env, [0])
+    counter = [0]
+    g = _Gen(defs, env, counter)
+    r = _Gen(defs, env, counter, mode="row")
     try:
         node = g.struct_node(main)
         g.flush()
+        rnode = r.struct_node(main)
+        r.flush()
     except RecursionError:
         raise UnsupportedSchema(f"{type_name} contains itself") from None
     body = "".join("    " + line + "\n" for line in g.lines)
+    row_reads = "".join("    " + line + "\n" for line in r.lines)
 
     row_lines: list[str] = []
-    _render_row(node, "", row_lines)
+    _render_row(rnode, "", row_lines)
     row_body = "".join("    " + line + "\n" for line in row_lines)
     src = (
         "def decode(b):\n" + _HEAD + body + _TAIL
         + f"    return {_render_nested(node)}\n\n"
-        "def decode_row(b, ts):\n" + _HEAD + body + _TAIL
+        "def decode_row(b, ts):\n" + _HEAD + row_reads + _TAIL
         + "    row = {'timestamp_ns': ts}\n" + row_body + "    return row\n"
     )
     exec(compile(src, f"<ros2msg {type_name}>", "exec"), env)

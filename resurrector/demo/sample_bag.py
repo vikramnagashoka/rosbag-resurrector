@@ -36,7 +36,7 @@ from mcap.writer import Writer
 # uses it to recognise a bag as ours before regenerating it.
 GENERATOR_LIBRARY = "rosbag-resurrector-testgen"
 
-# Bumped when the bytes this generator writes change. Layout "2" (0.8.8)
+# Bumped when the bytes this generator writes change. Layout "2"
 # pads CDR the way real recorders do: an empty float64 array gets no
 # padding, and a uint8 right after a string isn't padded to 4 first.
 # Sample bags from an earlier layout read wrong now, so they're stale.
@@ -580,7 +580,7 @@ def generate_bag(output_path: str | Path, config: BagConfig | None = None) -> Pa
 
 
 def _cdr_layout(path: Path) -> str | None:
-    """The ``cdr_layout`` this generator recorded in the bag (None before 0.8.8)."""
+    """The ``cdr_layout`` this generator recorded in the bag (None for layout 1)."""
     from mcap.reader import make_reader
 
     with open(path, "rb") as f:
