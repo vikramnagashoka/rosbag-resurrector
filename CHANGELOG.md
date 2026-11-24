@@ -53,7 +53,9 @@ same mistakes, so the tests never saw them.
   you select them, which used to get only timestamps from them.
 - **Faster reading.** MCAP files are read through their chunk and message
   indexes: a topic's messages are read without touching the rest of each
-  chunk. Same messages in the same order as before.
+  chunk. Upcoming chunks are read ahead, in parallel for a bag bigger than
+  RAM, so reading from disk overlaps with decoding. Same messages in the
+  same order as before.
 - **Health checks and density** read only message headers, not payloads.
 - `iter_chunks()`, `to_polars()` and export build rows directly from the
   decoded bytes, and read only the metadata of camera frames and point
