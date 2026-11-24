@@ -256,8 +256,9 @@ def op_chunks(m: Meter, mcap: Path, bag_dir: Path | None, scratch: Path) -> dict
     for topic in bf.topic_names:
         for chunk in bf[topic].iter_chunks():
             rows += chunk.height
-            # Flattening drops "_"-prefixed keys, so an undecoded message
-            # becomes a row with nothing but its timestamp.
+            # Rows with nothing but a timestamp: undecoded messages (their
+            # placeholder keys start with "_" and are dropped), and decoded
+            # ones whose fields don't flatten (lists of transforms).
             if chunk.width == 1:
                 unparsed += chunk.height
     return {"msgs": rows, "msgs_unparsed": unparsed, "extra": {"topics": len(bf.topic_names)}}
@@ -671,7 +672,10 @@ def _progress(i: int, total: int, row: dict) -> str:
     if row["rss_peak_mb"] != "":
         parts.append(f"peak {row['rss_peak_mb']:>7.0f} MB")
     if row["msgs"] and row["msgs_unparsed"] != "":
-        parts.append(f"{100 * row['msgs_unparsed'] / row['msgs']:.0f}% undecoded")
+        # For chunks this counts rows with nothing but a timestamp: undecoded
+        # messages, and decoded ones whose fields don't flatten (TF's lists).
+        what = "timestamp-only rows" if row["op"] == "chunks" else "undecoded"
+        parts.append(f"{100 * row['msgs_unparsed'] / row['msgs']:.0f}% {what}")
     return f"{head}  " + "  ".join(parts)
 
 
