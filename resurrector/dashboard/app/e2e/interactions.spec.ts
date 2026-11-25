@@ -510,9 +510,12 @@ test.describe('Notebook workspace (v0.8 overhaul)', () => {
     await expect(rows.first()).toBeVisible()
 
     // A bad expression surfaces the sandbox error instead of dying silently.
+    // Asserting the text also catches the server answering 500 (a raw
+    // SyntaxError) instead of the sandbox's 400.
     await editor.fill('import os')
     await page.locator('.nb-query .nb-search-go').click()
     await expect(page.locator('.nb-query-error')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.nb-query-error')).toContainText('not a valid expression')
   })
 
   test('command bar: unrecognized input offers "run as query cell"', async ({ page }) => {

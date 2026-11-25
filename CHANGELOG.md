@@ -62,11 +62,17 @@ topic of the 17.5, 34 and 55.7 GB bags. Reproduce with
 The demo sample bags are regenerated the first time they're used after
 upgrading.
 
+### Fixed
+
+- A query or bridge filter that isn't an expression (`import os`) is
+  rejected as "not a valid expression"; the dashboard answered it with a
+  500.
+
 ### Test counts
 
-- Backend: **BACKEND passed** (was 1799) with zarr and tensorflow
+- Backend: **1816 passed** (was 1799) with zarr and tensorflow
   installed and `tests/test_vision.py` excluded, plus a memory-regression
-  tier of SLOW (was 21)
+  tier of 21 (unchanged)
 - Frontend unit: **101 passed** (unchanged)
 - E2E: **56 behavioural** plus 7 visual (unchanged)
 

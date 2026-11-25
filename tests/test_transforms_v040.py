@@ -13,6 +13,7 @@ import pytest
 from resurrector.core.transforms import (
     apply_polars_expression,
     apply_transform,
+    validate_polars_expression,
 )
 
 
@@ -137,6 +138,16 @@ class TestPolarsExpressionSandbox:
             # ast.parse rejects 'import' in expression mode, but 'eval'
             # mode disallows imports anyway. Use __import__ trick to cover.
             apply_polars_expression(df, '__import__("os").system("ls")')
+
+    def test_rejects_statement_as_value_error(self):
+        # Would catch: a statement like `import os` escaping as a raw
+        # SyntaxError, which the dashboard answered with a 500.
+        df = pl.DataFrame({"x": [1.0]})
+        for expr in ("import os", "x = 1", 'pl.col("x" * 2'):
+            with pytest.raises(ValueError, match="not a valid expression"):
+                apply_polars_expression(df, expr)
+            with pytest.raises(ValueError, match="not a valid expression"):
+                validate_polars_expression(expr)
 
     def test_rejects_underscore_dunder_attribute(self):
         df = pl.DataFrame({"x": [1.0]})
