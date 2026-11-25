@@ -214,7 +214,7 @@ def info(
 
     bf = _open_bag(path)
     health = bf.health_report()
-    print_bag_info(bf.metadata, health, path.stat().st_size)
+    print_bag_info(bf.metadata, health, bf.path.stat().st_size)
 
 
 @app.command()
@@ -565,7 +565,7 @@ def export(
              "'time' (default): chronological, best for time-series. "
              "'random': each row (each synced row with --sync) goes to a "
              "split at random, the same way every run; reads the bag once "
-             "per split; not for lerobot. 'stratified' is a v0.6+ candidate "
+             "per split; not for lerobot. 'stratified' is not implemented yet "
              "(raises NotImplementedError). "
              "e.g. --split-strategy random",
     )] = "time",
@@ -1260,7 +1260,7 @@ def quicklook(
     header.append_text(badge)
     header.append(
         f"  Duration: {meta.duration_sec:.1f}s  "
-        f"Size: {format_size(path.stat().st_size)}  "
+        f"Size: {format_size(bf.path.stat().st_size)}  "
         f"Topics: {len(meta.topics)}  "
         f"Messages: {meta.message_count:,}",
         style="dim",

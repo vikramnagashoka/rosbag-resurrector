@@ -110,6 +110,10 @@ class _Unreadable(ValueError):
 
 def can_read(summary) -> bool:
     """Whether :func:`iter_raw` can read this file (else use the mcap reader)."""
+    if not hasattr(os, "pread"):
+        # Windows has no positional reads, which the chunk cursors and
+        # read-ahead threads share one descriptor through.
+        return False
     if summary is None or not summary.chunk_indexes:
         return False
     return all(

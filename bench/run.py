@@ -27,9 +27,9 @@ How it measures, and why:
 - Every row records the git commit, power and thermal state, swap in use
   and load average, and ``run.json`` adds the machine and package versions,
   so a number can be traced back to the conditions it was measured in.
-- Resurrector has built-in decoders for 9 message types. Any other type
-  comes back as raw bytes (``_unparsed``), and the Resurrector ops count
-  those messages. Skipping a message is faster than decoding it, so compare
+- Resurrector decodes any type whose ros2msg definition the bag embeds; a
+  type without one comes back as raw bytes (``_unparsed``), and the
+  Resurrector ops count those messages. Skipping a message is faster than decoding it, so compare
   throughput against mcap or rosbags only next to that count.
 
 Data lives in $ROSDATA (default ~/rosdata), which must not be a synced

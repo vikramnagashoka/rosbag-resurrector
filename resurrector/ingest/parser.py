@@ -397,9 +397,10 @@ _DECODER_REGISTRY: dict[str, DecoderFn] = {}
 def register_decoder(msg_type: str, decoder: DecoderFn) -> None:
     """Register a custom CDR decoder for a ROS 2 message type.
 
-    Lets users with custom message types (``my_pkg/msg/CustomThing``)
-    plug in a decoder so ``bf['/my_topic'].to_polars()`` produces typed
-    columns instead of the opaque ``_unparsed`` placeholder.
+    Types the bag embeds a ``ros2msg`` definition for decode without
+    this. Register a decoder for a type the bag has no definition for
+    (otherwise its messages come back as the opaque ``_unparsed``
+    placeholder), or to override the built-in or embedded decoder.
 
     Args:
         msg_type: Fully-qualified type string, e.g.
@@ -437,8 +438,9 @@ def unregister_decoder(msg_type: str) -> bool:
     """Remove a registered decoder. Returns True if one was present.
 
     Useful for tests or hot-reload scenarios. Removing a built-in
-    decoder is allowed — ``_unparsed`` placeholders will appear for
-    that type until another decoder is registered.
+    decoder is allowed: that type then decodes from the definition the
+    bag embeds, or comes back as ``_unparsed`` placeholders if it has
+    none, until another decoder is registered.
     """
     return _DECODER_REGISTRY.pop(msg_type, None) is not None
 
@@ -1090,6 +1092,33 @@ def _parse_pointcloud2(raw_data: bytes) -> dict[str, Any]:
     }
 
 
+def resolve_bag_path(path: str | Path) -> Path:
+    """The file to open for ``path``.
+
+    A rosbag2 directory recorded with MCAP storage opens as the ``.mcap``
+    file inside it. Anything else is returned unchanged.
+
+    Raises:
+        ValueError: the directory is split into several MCAP files; each
+            is a bag of its own here, so the caller names one.
+    """
+    from resurrector.ingest.scanner import ros2_mcap_files
+
+    path = Path(path)
+    if not path.is_dir():
+        return path
+    files = ros2_mcap_files(path)
+    if len(files) == 1:
+        return files[0]
+    if files:
+        names = ", ".join(f.name for f in files[:3]) + (", ..." if len(files) > 3 else "")
+        raise ValueError(
+            f"{path.name} is split into {len(files)} MCAP files ({names}); "
+            f"open one of them"
+        )
+    return path
+
+
 def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
     """Create a parser for the given bag file.
 
@@ -1105,7 +1134,7 @@ def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
             automatically. Set False to force a ``NotImplementedError``
             — useful when the caller wants to handle conversion itself.
     """
-    path = Path(path)
+    path = resolve_bag_path(path)
     ext = path.suffix.lower()
 
     if ext == ".mcap":

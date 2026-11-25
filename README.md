@@ -680,6 +680,7 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 | Format | Extension | Status |
 |--------|-----------|--------|
 | **MCAP (ROS 2 default)** | `.mcap` | **Fully supported** — primary format |
+| ROS 2 MCAP (directory bag) | dir with `metadata.yaml` + `.mcap` | **Fully supported** — opened through the `.mcap` inside; a bag split into several files is one bag per file |
 | ROS 2 SQLite (single shard) | `.db3` | Auto-converted via `ros2 bag convert` |
 | ROS 2 SQLite (directory bag) | dir with `metadata.yaml` | Recognized by scanner; auto-converted |
 | ROS 1 bag | `.bag` | Auto-converted via `mcap convert` |
@@ -740,7 +741,7 @@ These are constants the test suite verifies. There is no env var or config file 
 | `LARGE_TOPIC_THRESHOLD` | 1,000,000 messages | `to_polars()` / `to_pandas()` / `to_numpy()` raise `LargeTopicError` unless you pass `force=True`. Also the cutoff `engine="auto"` uses to pick streaming over eager in `bf.sync()` |
 | `NUMPY_HARD_CAP` | 1,000,000 rows | NumPy `.npz` export refuses entirely (no `force=` escape) and raises `LargeTopicError` pointing at Parquet |
 
-If you want to raise these on a big-RAM machine, the only options today are forking or monkey-patching the constants. A user-facing override is on the v0.5 wishlist.
+If you want to raise these on a big-RAM machine, the only options today are forking or monkey-patching the constants. There is no user-facing override yet.
 
 ## Development
 
@@ -752,7 +753,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (about 1,700; the slow memory-regression tier runs with -m slow)
+# Run tests (about 1,800; the slow memory-regression tier runs with -m slow)
 pytest tests/ -v
 
 # Build dashboard frontend

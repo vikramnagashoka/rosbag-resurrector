@@ -71,7 +71,7 @@ scripts reuse it.
 
 | # | Script | Feature | What you'll see |
 |---|--------|---------|-----------------|
-| 24 | `24_custom_type_decoders.py` | `register_decoder` for custom message types | A custom `my_pkg/msg/Vec3` flows as `_unparsed` until you register a decoder; same bag, same iteration, then suddenly `to_polars()` produces typed x/y/z columns. Plus a fail-closed demo where a buggy decoder doesn't abort the iteration |
+| 24 | `24_custom_type_decoders.py` | Custom message types: embedded definitions + `register_decoder` | A custom `my_pkg/msg/Vec3` decodes to typed x/y/z columns from the definition the bag embeds; a bag without one comes back `_unparsed` until you `register_decoder()`. Plus a fail-closed demo where a buggy decoder doesn't abort the iteration |
 | 25 | `25_concatenate_bags.py` | `concatenate_bags` N-bag stream | Three synth bags treated as one; time mode sorts by start_time, index mode preserves caller order; `to_polars()` spans all bags; topic missing in some bags is silently handled |
 | 26 | `26_bag_qc_fleet.py` | Bag-side QC tool — single + fleet | Synthetic 5-bag fleet with a deliberate rate anomaly (10Hz IMU vs 200Hz cluster) + a missing /tf topic. Fleet checks fire (rate_anomaly, topic_set_divergence, coverage_overlap). JSON output suitable for CI gating |
 

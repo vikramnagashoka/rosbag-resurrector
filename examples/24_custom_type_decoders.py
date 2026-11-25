@@ -62,7 +62,7 @@ def _generate_bag_with_custom_type(
 
 
 def main() -> None:
-    header("24 — v0.6.0: pluggable custom-type CDR decoders")
+    header("24 — custom message types: embedded definitions + register_decoder")
     out = ensure_output_dir()
     with_def = out / "v06_custom_type.mcap"
     bag_path = out / "v06_custom_type_no_definition.mcap"

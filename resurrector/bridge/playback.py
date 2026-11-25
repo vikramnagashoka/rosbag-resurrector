@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from resurrector.ingest.parser import MCAPParser, Message, BagMetadata
+from resurrector.ingest.parser import MCAPParser, Message, BagMetadata, resolve_bag_path
 
 logger = logging.getLogger("resurrector.bridge.playback")
 
@@ -44,7 +44,7 @@ class PlaybackEngine:
         loop: bool = False,
         message_callback: Callable[[Message], None] | None = None,
     ):
-        self._bag_path = Path(bag_path)
+        self._bag_path = resolve_bag_path(bag_path)
         self._parser = MCAPParser(self._bag_path)
         self._metadata: BagMetadata = self._parser.get_metadata()
         self._speed = max(0.1, min(speed, 20.0))

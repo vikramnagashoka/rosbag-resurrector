@@ -10,9 +10,9 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ### What's new
 
-Faster on real robot bags, and decoders for every message type a bag
-carries, custom ones included. Measured on three public ROS 2 datasets
-with a new benchmark harness in `bench/`.
+Faster on real robot bags, and every message type decodes from the
+definition the bag records, custom ones included. Measured on three
+public ROS 2 datasets with a new benchmark harness in `bench/`.
 
 ### Benchmarks
 
@@ -34,7 +34,7 @@ Decoding every message in a bag, against other Python readers:
 | Manipulation, 1.6 GB | 2.06 s | 3.65 s | 28.5 s |
 | Humanoid, 0.5 GB | 2.84 s | 4.01 s | 36.8 s |
 | Mobile robot, 17.5 GB | 3.12 s | 4.57 s | 22.8 s |
-| Mobile robot, 55.7 GB | 7.87 s | 14.6 s | |
+| Mobile robot, 55.7 GB | 7.87 s | 14.6 s | not run |
 
 Peak memory stays flat as bags grow: 239, 255 and 264 MB streaming every
 topic of the 17.5, 34 and 55.7 GB bags. Reproduce with
@@ -47,15 +47,19 @@ topic of the 17.5, 34 and 55.7 GB bags. Reproduce with
   `geometry_msgs/PoseStamped`, `nav_msgs/Odometry` and custom types come
   out as typed columns in DataFrames, exports, `sync()` and LeRobot
   export. Decoders registered with `register_decoder()` still take
-  priority.
+  priority, and cover types recorded as IDL.
 - **More robust decoding** of `Image`, `TFMessage`, `Imu`, `JointState`,
   `Marker` and `MarkerArray`, including the marker layout ROS 2 Iron and
   later record. Checked field for field against mcap-ros2-support on
   505,489 messages from the benchmark bags.
 - **Faster reading.** MCAP files are read through their chunk and
   message indexes, and upcoming chunks are read ahead (in parallel for a
-  bag bigger than RAM). Health checks and density read only message
-  headers.
+  bag bigger than RAM) on macOS and Linux. Health checks and density
+  read only message headers.
+- **ROS 2 recording folders open directly.** A folder `ros2 bag record`
+  writes with MCAP storage (the default since Iron) can be passed to
+  `scan`, `info`, `health`, `export`, the bridge and `BagFrame`; a
+  recording split into several files is one bag per file.
 - **`bench/`**: the benchmark harness, a pinned dataset download script
   and a before/after table generator.
 

@@ -15,7 +15,7 @@ import polars as pl
 
 from resurrector.core.exceptions import LargeTopicError
 from resurrector.ingest.parser import (
-    BagMetadata, MCAPParser, Message, TopicInfo, parse_bag,
+    BagMetadata, MCAPParser, Message, TopicInfo, parse_bag, resolve_bag_path,
     flatten_into, get_image_array, get_compressed_image_array,
 )
 from resurrector.ingest.health_check import BagHealthReport, HealthChecker, HealthConfig
@@ -514,9 +514,9 @@ class BagFrame:
 
             bf = BagFrame("~/.resurrector/demo_sample.mcap")
         """
-        self._path = Path(path)
-        if not self._path.exists():
-            raise FileNotFoundError(f"Bag file not found: {self._path}")
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Bag file not found: {path}")
+        self._path = resolve_bag_path(path)
 
         self._parser = parse_bag(self._path)
         self._metadata: BagMetadata | None = None

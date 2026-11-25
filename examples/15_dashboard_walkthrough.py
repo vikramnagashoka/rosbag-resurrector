@@ -28,7 +28,7 @@ from resurrector.ingest.scanner import scan_path
 
 
 def main() -> None:
-    header("05 — Dashboard walkthrough")
+    header("15 — Dashboard walkthrough")
     bag_path = ensure_sample_bag()
 
     # Index the sample bag so it appears in the Library.
@@ -144,7 +144,7 @@ def main() -> None:
     print(f"")
     print(f"   6. Compare runs page")
     print(f"      → {compare_url}")
-    print(f"      → after running 04_cross_bag_overlay.py first, you'll see")
+    print(f"      → after running 14_cross_bag_overlay.py first, you'll see")
     print(f"        two bags to overlay")
     print(f"")
     print("  ─" * 35)
