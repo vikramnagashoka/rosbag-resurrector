@@ -294,7 +294,10 @@ jobs:
     # (a macOS node/llhttp issue); CI uses plain Node since llhttp is
     # consistent on Ubuntu runners.
     name: E2E (Playwright, behavioural)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, which Playwright's Chromium
+    # install doesn't support yet ("Playwright does not support chromium on
+    # ubuntu26.04-x64"). Back to ubuntu-latest once it does.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

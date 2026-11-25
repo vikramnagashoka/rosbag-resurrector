@@ -289,6 +289,11 @@ def test_synced_export_bounded(sync_export_bag, tmp_path, fmt, downsample):
 
 def test_parquet_export_bounded(large_bag):
     """Streaming parquet export should stay bounded."""
+    # The export's first call imports pyarrow.parquet, which is ~20 MB of
+    # RSS on its own and grows with each pyarrow release. Import it first so
+    # the delta measures the export, which is what this test bounds.
+    import pyarrow.parquet  # noqa: F401
+
     bf = BagFrame(large_bag)
     with tempfile.TemporaryDirectory() as d:
         delta_mb, _ = _peak_rss_delta_mb(

@@ -512,8 +512,15 @@ class BagIndex:
             query_embedding,    # SELECT  list_cosine_similarity(fe.embedding, ?::DOUBLE[512])
             query_embedding,    # WHERE   list_cosine_similarity(fe.embedding, ?::DOUBLE[512])
             min_similarity,     # WHERE   ... >= ?
+            query_embedding,    # WHERE   NOT isnan(list_cosine_similarity(...))
         ]
-        conditions = ["list_cosine_similarity(fe.embedding, ?::DOUBLE[512]) >= ?"]
+        # DuckDB 2.0 returns NaN for a zero-norm embedding (1.x returned -1),
+        # and NaN compares greater than every number, so without the isnan
+        # check it passes any threshold and sorts first.
+        conditions = [
+            "list_cosine_similarity(fe.embedding, ?::DOUBLE[512]) >= ?",
+            "NOT isnan(list_cosine_similarity(fe.embedding, ?::DOUBLE[512]))",
+        ]
 
         if bag_id is not None:
             conditions.append("fe.bag_id = ?")
