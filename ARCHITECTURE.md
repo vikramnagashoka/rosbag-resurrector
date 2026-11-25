@@ -2,7 +2,7 @@
 
 *How RosBag Resurrector is built, and why it's built that way. A five-minute
 read covering the system shape, the decisions that carry load, and what I'd do
-differently. Last updated for v0.8.7 (October 2026).*
+differently. Last updated for v0.9.0 (November 2026).*
 
 ## The problem and its constraints
 
@@ -30,7 +30,7 @@ Three constraints shaped everything:
 flowchart LR
     subgraph ingest["ingest/"]
         SC[scanner<br/>discovery + fingerprint] --> IX[(DuckDB index<br/>bags · topics · tags<br/>CLIP embeddings)]
-        PA[parser<br/>MCAP → CDR decode]
+        PA[parser<br/>indexed MCAP read<br/>schema-built decoders]
         HC[health checks<br/>streaming, 5 dimensions]
     end
     subgraph core["core/"]
@@ -156,7 +156,10 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
 - CI matrix: Python 3.10–3.13 · 8 optional-extra installs (LeRobot
   exports round-tripped through the real library) · wheel-install
   smoke test · frontend build · e2e
-- 19 releases on PyPI; exporters to 7 formats (5 chunk-streamed, synced or not)
+- 20 releases on PyPI; exporters to 7 formats (5 chunk-streamed, synced or not)
+- Benchmarked on three public ROS 2 datasets up to 55.7 GB (`bench/`):
+  streaming every topic peaks at 239 to 264 MB from a 17.5 GB to a
+  55.7 GB bag
 - 5 streaming health dimensions: rate stability, size anomalies, time gaps,
   timestamp ordering, topic completeness
 
@@ -170,7 +173,7 @@ Playwright e2e suite (behavioral + visual baselines) grows a spec per cell.
   taxes every new endpoint now.
 - **The query sandbox is per-topic.** Free-form Polars expressions operate on
   one topic's frame; cross-topic joins still route through `sync()`. A
-  multi-topic query surface is the natural v0.9 extension.
+  multi-topic query surface is the natural next extension.
 - **Visual baselines are macOS-only.** The e2e visual suite runs locally, not
   in CI, until Linux baselines land — so the maintainer is the gate for pixel
   regressions. Honest, but a bus-factor of one.
