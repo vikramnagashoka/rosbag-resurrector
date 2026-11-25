@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
+from resurrector.core.exceptions import UndecodableTopicError
 from resurrector.core.export import ExportError
 
 app = FastAPI(
@@ -733,6 +734,111 @@ async def _export_error_handler(request: Request, exc: ExportError) -> JSONRespo
     return JSONResponse(status_code=422, content={"detail": _export_error_detail(exc)})
 
 
+def _undecodable_detail(topics: list) -> dict[str, Any]:
+    """The ``detail`` of a 422 for topics the dashboard can't decode."""
+    n = len(topics)
+    listed = "; ".join(f"{t.topic} ({t.message_type}: {t.reason})" for t in topics)
+    return {
+        "code": "undecodable_topics",
+        "message": (
+            f"{n} topic{'' if n == 1 else 's'} use{'s' if n == 1 else ''} a message type "
+            f"Resurrector can't decode, so {'its' if n == 1 else 'their'} fields can't be "
+            f"read: {listed}. Load a folder of .msg definitions from the notice above the "
+            f"notebook, or leave {'it' if n == 1 else 'them'} out; health still covers "
+            f"{'it' if n == 1 else 'them'}."
+        ),
+        "topics": [
+            {"topic": t.topic, "message_type": t.message_type, "reason": t.reason}
+            for t in topics
+        ],
+    }
+
+
+@app.exception_handler(UndecodableTopicError)
+async def _undecodable_handler(request: Request, exc: UndecodableTopicError) -> JSONResponse:
+    """A plot, sync, query, export or comparison asked for topics whose
+    message type has no decoder: 422 naming each with the reason, and
+    ``topics`` for the notebook's decoder notice."""
+    return JSONResponse(status_code=422, content={"detail": _undecodable_detail(exc.topics)})
+
+
+@app.get("/api/bags/{bag_id}/decoders")
+async def bag_decoders(bag_id: int) -> dict[str, Any]:
+    """Which of a bag's topics can't be decoded, and the decoder paths loaded.
+
+    Opens the bag's summary (cheap, no messages). ``undecodable`` lists
+    each topic with its type and the reason; the notebook shows them in a
+    notice with a field for a folder of ``.msg`` definitions
+    (``POST /api/decoders``). ``loaded_paths`` are the paths loaded in this
+    dashboard process (``--decoders``, ``RESURRECTOR_DECODERS``, or the
+    notice).
+    """
+    from resurrector.core.bag_frame import BagFrame
+    from resurrector.ingest.custom_decoders import loaded_paths
+
+    index = _get_index()
+    try:
+        bag = index.get_bag(bag_id)
+    finally:
+        index.close()
+    if bag is None:
+        raise HTTPException(404, "Bag not found")
+    try:
+        bf = BagFrame(bag["path"])
+        found = bf.undecodable_topics()
+    except FileNotFoundError:
+        raise HTTPException(404, f"Bag file is missing: {bag['path']}")
+    except (NotImplementedError, ValueError, OSError) as e:
+        # A .db3 without `ros2` to convert it, or a file cut off mid-write.
+        raise HTTPException(422, f"Can't read {bag['path']}: {e}")
+    return {
+        "undecodable": _undecodable_detail(found)["topics"],
+        "loaded_paths": [str(p) for p in loaded_paths()],
+    }
+
+
+@app.post("/api/decoders")
+async def load_decoders_api(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Load message definitions from a folder of ``.msg`` files on this machine.
+
+    Body: ``{"path": "~/ros2_ws/src"}``. The path must be inside the
+    allowed roots (``RESURRECTOR_ALLOWED_ROOTS``). The folder is searched
+    for ``<package>/msg/<Type>.msg``; the definitions apply to every bag
+    this dashboard opens until it stops.
+
+    Python decoder files are refused (400): loading one runs it, and this
+    endpoint is reachable by any web page the user has open, so only
+    ``resurrector dashboard --decoders`` or ``RESURRECTOR_DECODERS`` load
+    them. 404 when the path doesn't exist; 400 when it holds no ``.msg``
+    files.
+    """
+    from resurrector.ingest.custom_decoders import load_decoders, loaded_paths
+
+    raw = str((payload or {}).get("path") or "").strip()
+    if not raw:
+        raise HTTPException(400, "'path' is required: a folder of .msg files")
+    expanded = os.path.expanduser(raw)
+    target = _validate_path(expanded)
+    if target.suffix == ".py":
+        raise HTTPException(
+            400,
+            "The dashboard loads .msg folders only. To use a Python decoder, start "
+            "it with `resurrector dashboard --decoders decoders.py` or set "
+            "RESURRECTOR_DECODERS.",
+        )
+    try:
+        types = load_decoders(target)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "path": str(target),
+        "message_types": types,
+        "loaded_paths": [str(p) for p in loaded_paths()],
+    }
+
+
 @app.post("/api/bags/{bag_id}/export")
 async def export_bag(
     bag_id: int,
@@ -742,6 +848,10 @@ async def export_bag(
     output_dir: str = Query(default="./export", description="Output directory"),
     preset: str | None = Query(default=None, description="Named export preset (lerobot, rlds, etc.)"),
     downsample_hz: float | None = Query(default=None, description="Downsample rate; overrides preset"),
+    skip_undecodable: bool = Query(
+        default=False,
+        description="Leave out topics whose message type can't be decoded instead of answering 422",
+    ),
 ) -> dict[str, str]:
     """Run a synchronous bag export. Returns the output path on completion.
 
@@ -781,7 +891,10 @@ async def export_bag(
                 sync=sync,
                 downsample_hz=downsample_hz,
                 preset=preset,
+                skip_undecodable=skip_undecodable,
             )
+        except UndecodableTopicError:
+            raise  # 422, see _undecodable_handler
         except ValueError as e:
             # Unknown preset, etc. — surface as 400 not 500.
             raise HTTPException(400, str(e))
@@ -1708,6 +1821,8 @@ async def export_dataset_version_api(
             raise HTTPException(404, f"Version '{version}' not found for dataset '{name}'")
         try:
             path = mgr.export_version(name, version, output_dir=output_dir)
+        except UndecodableTopicError:
+            raise  # 422, see _undecodable_handler
         except ValueError as e:
             # The dataset and version were checked above, so a ValueError
             # here is about the bags' contents (a LeRobot frame error, a
@@ -1932,6 +2047,12 @@ async def start_bridge_api(payload: dict[str, Any] | None = None) -> dict[str, A
         cmd.append(str(bag_path))
         if "speed" in payload:
             cmd.extend(["--speed", str(payload["speed"])])
+        # No terminal to ask in: stream what can be decoded, with the
+        # definitions this dashboard has loaded.
+        from resurrector.ingest.custom_decoders import loaded_paths
+        for p in loaded_paths():
+            cmd.extend(["--decoders", str(p)])
+        cmd.append("--skip-undecodable")
     else:
         topics = payload.get("topics") or []
         if not topics:
@@ -2412,6 +2533,8 @@ async def compare_topics_api(payload: dict[str, Any]) -> dict[str, Any]:
                 labels=resolved_labels,
                 max_points_per_bag=max_points_per_bag,
             )
+        except UndecodableTopicError:
+            raise  # 422, see _undecodable_handler
         except ValueError as e:
             raise HTTPException(400, str(e))
 

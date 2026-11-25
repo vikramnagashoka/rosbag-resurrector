@@ -15,6 +15,8 @@ from resurrector.core.dataset import DatasetManager, BagRef, SyncConfig, Dataset
 from resurrector.ingest.parser import (
     register_decoder, unregister_decoder, list_decoders,
 )
+from resurrector.ingest.custom_decoders import load_decoders
+from resurrector.core.exceptions import UndecodableTopic, UndecodableTopicError
 from resurrector.core.concatenated import (
     ConcatenatedBagFrame, ConcatenatedTopicView, concatenate_bags,
 )
@@ -41,6 +43,9 @@ __all__ = [
     "register_decoder",
     "unregister_decoder",
     "list_decoders",
+    "load_decoders",
+    "UndecodableTopic",
+    "UndecodableTopicError",
     # v0.7 features
     "diff_bags",
     "BagDiff",

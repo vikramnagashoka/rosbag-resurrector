@@ -190,6 +190,7 @@ In Jupyter, just display the `bf` object — it renders a rich HTML table with h
 - **Dashboard scan returns 403** — by default, `RESURRECTOR_ALLOWED_ROOTS` defaults to your home directory. Set it (`os.pathsep`-separated) to broaden the scope
 - **Semantic search returns nothing** — frames are only indexed for bags you ran `resurrector index-frames` on, OR if your bags were scanned with v0.2.2+ (which pre-builds the frame index during `scan`)
 - **`.bag` or `.db3` raises NotImplementedError** — make sure `mcap` (for ROS 1) or `ros2` (for ROS 2 SQLite) is on your PATH; we shell out to them for auto-conversion
+- **A topic "can't be decoded"** — the bag records no usable definition of its message type. Pass `--decoders ~/ros2_ws/src` (a folder of `.msg` files); see [Message types](#message-types)
 
 ### Optional Extras
 
@@ -686,6 +687,29 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 | ROS 1 bag | `.bag` | Auto-converted via `mcap convert` |
 
 > **Note on legacy formats:** auto-conversion shells out to the official tools — `mcap convert` (Go binary, install via [mcap.dev/guides/cli](https://mcap.dev/guides/cli) or Homebrew/apt) for `.bag` files, and `ros2 bag convert` (ships with ROS 2) for `.db3`. Neither is bundled with the Python package because both are external binaries that pip can't ship. `resurrector doctor` will warn if either is missing — you only need the converter for the legacy format(s) you actually use.
+
+### Message types
+
+Every topic decodes from the message definition the bag records (rosbag2 embeds one per type), custom types included. When a type has no usable definition, for example a bag that recorded only an IDL definition, Resurrector names the topic up front:
+
+- `info` and `quicklook` list it with the reason.
+- `export`, `dataset export` and `bridge playback` ask what to do: load its definitions from a path, go on without it (the health checks still cover it), or stop. Without a terminal they exit and name the flags to pass.
+- The dashboard notebook shows a notice with a field for a `.msg` folder and a **Health only** button.
+- In Python, `to_polars()`, `iter_chunks()`, `sync()` and `export()` raise `UndecodableTopicError`; `bf.undecodable_topics()` lists them first.
+
+Point Resurrector at a folder of `.msg` files (your ROS workspace's `src/`, or an installed `share/` folder) or at a Python file that calls `register_decoder()`:
+
+```bash
+resurrector export run.mcap --decoders ~/ros2_ws/src
+export RESURRECTOR_DECODERS=~/ros2_ws/src   # every command, the dashboard and Python
+```
+
+```python
+import resurrector
+resurrector.load_decoders("~/ros2_ws/src")
+```
+
+Types the `.msg` files use but don't define, such as `std_msgs/Header`, come from the bag's other definitions. The dashboard loads `.msg` folders only: a Python decoder runs code, so load one with `--decoders` or `RESURRECTOR_DECODERS`.
 
 ## Architecture
 

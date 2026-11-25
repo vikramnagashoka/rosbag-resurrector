@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 # Find the resurrector entrypoint. Priority:
 # 1. CI / user-provided override via RESURRECTOR_BIN
 # 2. PATH (set by CI's `pip install -e .` step)
-# 3. Local dev venv at /tmp/v060-build (matches CLAUDE.md convention)
+# 3. Local dev venv at ~/.venvs/resurrector (CLAUDE.md), then the old /tmp/v060-build
 if [ -n "${RESURRECTOR_BIN:-}" ] && [ -x "${RESURRECTOR_BIN}" ]; then
   RESURRECTOR_CMD="${RESURRECTOR_BIN}"
   PYTHON_CMD="$(dirname "${RESURRECTOR_BIN}")/python"
@@ -20,6 +20,9 @@ elif command -v resurrector >/dev/null 2>&1; then
   RESURRECTOR_CMD="$(command -v resurrector)"
   PYTHON_CMD="$(dirname "${RESURRECTOR_CMD}")/python"
   [ -x "${PYTHON_CMD}" ] || PYTHON_CMD="$(dirname "${RESURRECTOR_CMD}")/python3"
+elif [ -x "${HOME}/.venvs/resurrector/bin/resurrector" ]; then
+  RESURRECTOR_CMD="${HOME}/.venvs/resurrector/bin/resurrector"
+  PYTHON_CMD="${HOME}/.venvs/resurrector/bin/python"
 elif [ -x "/tmp/v060-build/bin/resurrector" ]; then
   RESURRECTOR_CMD="/tmp/v060-build/bin/resurrector"
   PYTHON_CMD="/tmp/v060-build/bin/python"
@@ -48,6 +51,12 @@ export RESURRECTOR_BRIDGE_LOG_DIR="${E2E_ROOT}/logs"
 # runs to overlay.
 "${PYTHON_CMD}" "${REPO_ROOT}/tests/fixtures/make_scene_demo_bag.py" \
   "${E2E_ROOT}/scene_run_b.mcap" 6.0
+
+# A bag with a topic whose type has no decoder (IDL-only definition), plus
+# the .msg folder that decodes it — for the decoder-notice spec. The folder
+# is inside the allowed roots, as POST /api/decoders requires.
+"${PYTHON_CMD}" "${REPO_ROOT}/tests/fixtures/undecodable_bag.py" \
+  "${E2E_ROOT}/undecodable_demo.mcap" "${E2E_ROOT}/ws/src"
 
 # Pre-index so the Library page shows the bag immediately.
 "${RESURRECTOR_CMD}" scan "${E2E_ROOT}" --db "${E2E_ROOT}/index.db" >/dev/null 2>&1 || true

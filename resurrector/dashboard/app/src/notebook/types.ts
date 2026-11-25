@@ -43,6 +43,9 @@ export interface Notebook {
   topicCount: number
   messageCount: number
   bagTopics: { name: string; messageType: string; messageCount: number }[]
+  // Topics whose message type has no decoder (GET /api/bags/{id}/decoders):
+  // their fields can't be read, so no cell is offered them.
+  undecodableTopics?: string[]
   cells: Cell[]
 }
 
@@ -51,10 +54,14 @@ const IMAGE_TYPES = new Set([
 ])
 const POINTCLOUD_TYPES = new Set(['sensor_msgs/msg/PointCloud2'])
 
-// Image topics aren't line-plottable; everything else is offered in the
-// plot/stats topic dropdown (numeric extraction happens after fetch).
-export function plottableTopics(nb: Pick<Notebook, 'bagTopics'>): string[] {
-  return nb.bagTopics.filter(t => !IMAGE_TYPES.has(t.messageType)).map(t => t.name)
+// Image topics aren't line-plottable, and undecodable ones have no fields;
+// everything else is offered in the plot/stats topic dropdown (numeric
+// extraction happens after fetch).
+export function plottableTopics(nb: Pick<Notebook, 'bagTopics' | 'undecodableTopics'>): string[] {
+  const blocked = new Set(nb.undecodableTopics ?? [])
+  return nb.bagTopics
+    .filter(t => !IMAGE_TYPES.has(t.messageType) && !blocked.has(t.name))
+    .map(t => t.name)
 }
 export function imageTopics(nb: Pick<Notebook, 'bagTopics'>): string[] {
   return nb.bagTopics.filter(t => IMAGE_TYPES.has(t.messageType)).map(t => t.name)

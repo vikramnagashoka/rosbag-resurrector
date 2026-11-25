@@ -58,6 +58,7 @@ from resurrector.core.exceptions import (
     LargeTopicError,
     ResurrectorError,
     TopicNotFoundError,
+    UndecodableTopicError,
 )
 
 if TYPE_CHECKING:
@@ -1005,12 +1006,17 @@ def bag_label(bag_frame) -> str | Path:
 
 
 def check_topics(bag_frame: "BagFrame", topics: Sequence[str]) -> None:
-    """Raise :class:`TopicNotFoundError` if any of ``topics`` isn't in the bag."""
+    """Raise :class:`TopicNotFoundError` if any of ``topics`` isn't in the
+    bag, or :class:`UndecodableTopicError` if one's fields can't be read."""
     available = bag_topic_names(bag_frame)
     known = set(available)
     missing = [t for t in topics if t not in known]
     if missing:
         raise TopicNotFoundError(missing, available, bag_label(bag_frame))
+    finder = getattr(bag_frame, "undecodable_topics", None)
+    undecodable = finder(list(topics)) if finder is not None and topics else []
+    if undecodable:
+        raise UndecodableTopicError(undecodable)
 
 
 def topic_chunks(view, downsample_hz: float | None) -> Iterator:

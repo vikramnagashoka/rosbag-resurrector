@@ -1354,3 +1354,85 @@ test.describe('Datasets page when columns fail to serialize', () => {
     await expect(inline).toHaveCount(0)
   })
 })
+
+test.describe('Topics with no decoder (decoder notice)', () => {
+  // The hermetic env indexes undecodable_demo.mcap: /gizmo records only an
+  // IDL definition, /widget a normal one. ws/src under the allowed root has
+  // acme_msgs/msg/Gizmo.msg (tests/fixtures/undecodable_bag.py).
+  async function bagIdFor(request: APIRequestContext, stem: string): Promise<number> {
+    const bags: Array<{ id: number; path: string }> = await (await request.get('/api/bags')).json()
+    const bag = bags.find(b => b.path.endsWith(`${stem}.mcap`))
+    expect(bag, `${stem}.mcap is indexed`).toBeTruthy()
+    return bag!.id
+  }
+
+  test('the notice offers .msg definitions or health only, and a loaded folder decodes the topic', async ({ page, request }) => {
+    // Would catch: a topic with no decoder plotting and exporting timestamps
+    // only with nothing but a log line (before 0.9.0), the notice's Health
+    // only / Load definitions wiring, the export dialog offering a topic the
+    // backend refuses, or a load that leaves the notebook's lists stale.
+    const root: string = (await (await request.get('/api/system/paths')).json()).allowed_roots[0]
+    const bagId = await bagIdFor(request, 'undecodable_demo')
+
+    await page.goto(`/n/nb-bag-${bagId}`)
+    const notice = page.getByRole('region', { name: "Topics that can't be decoded" })
+    await expect(notice).toBeVisible({ timeout: 10_000 })
+    await expect(notice).toContainText('/gizmo')
+    await expect(notice).toContainText('acme_msgs/msg/Gizmo')
+    await expect(notice).toContainText('the bag has only a ros2idl definition of it')
+
+    // Export leaves it out and says why, instead of a 422 after clicking.
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const modal = page.locator('.nb-export')
+    await expect(modal.locator('.nb-export-topic', { hasText: '/widget' })).toBeVisible()
+    await expect(modal.locator('.nb-export-topic', { hasText: '/gizmo' })).toHaveCount(0)
+    await expect(modal).toContainText('Not exportable (no decoder): /gizmo')
+    await modal.getByRole('button', { name: 'Close' }).click()
+
+    // Health only folds the notice to one line, which reopens it.
+    await notice.getByRole('button', { name: 'Health only' }).click()
+    await expect(notice).toHaveCount(0)
+    await expect(page.getByText('/gizmo: health only, no decoder.')).toBeVisible()
+    await page.getByRole('button', { name: 'Load definitions…' }).click()
+    await expect(notice).toBeVisible()
+
+    // A path that doesn't exist: the server's reason, still undecodable.
+    const field = notice.getByLabel('Folder of .msg files')
+    await field.fill(`${root}/no-such-folder`)
+    await notice.getByRole('button', { name: 'Load definitions' }).click()
+    await expect(notice).toContainText('No such file or folder')
+    await expect(field).toHaveAttribute('aria-invalid', 'true')
+
+    // The workspace's .msg folder: decoded, notice replaced by the success line.
+    await field.fill(`${root}/ws/src`)
+    await notice.getByRole('button', { name: 'Load definitions' }).click()
+    await expect(page.getByText(/Loaded 1 message type from .*\/gizmo decodes now\./)).toBeVisible()
+    await expect(notice).toHaveCount(0)
+    const after = await (await request.get(`/api/bags/${bagId}/decoders`)).json()
+    expect(after.undecodable).toEqual([])
+
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    await expect(modal.locator('.nb-export-topic', { hasText: '/gizmo' })).toBeVisible()
+    await expect(modal).not.toContainText('Not exportable')
+  })
+
+  test('accent buttons keep their fill on hover', async ({ page, request }) => {
+    // Would catch: .nb-btn:hover (near-white) outranking .nb-btn-accent, which
+    // blanked the hovered Export and Load definitions buttons (white label on
+    // white). Found while building the decoder notice.
+    const bagId = await bagIdFor(request, 'scene_demo')
+    await page.goto(`/n/nb-bag-${bagId}`)
+    const exportBtn = page.getByRole('button', { name: 'Export', exact: true })
+    await exportBtn.hover()
+    await expect(exportBtn).toHaveCSS('background-color', 'rgb(37, 99, 201)')
+  })
+
+  test('the scene demo bag shows no notice', async ({ page, request }) => {
+    // Would catch: the notice showing for bags whose topics all decode.
+    const bagId = await bagIdFor(request, 'scene_demo')
+    await page.goto(`/n/nb-bag-${bagId}`)
+    await expect(page.locator('.nb-header-meta')).toContainText('topics', { timeout: 10_000 })
+    await page.waitForTimeout(800)
+    expect(await page.locator('.nb-decoder-notice').count()).toBe(0)
+  })
+})

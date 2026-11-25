@@ -47,7 +47,15 @@ topic of the 17.5, 34 and 55.7 GB bags. Reproduce with
   `geometry_msgs/PoseStamped`, `nav_msgs/Odometry` and custom types come
   out as typed columns in DataFrames, exports, `sync()` and LeRobot
   export. Decoders registered with `register_decoder()` still take
-  priority, and cover types recorded as IDL.
+  priority.
+- **Your own message definitions, when a bag lacks them.** A topic whose
+  type has no usable definition in the bag (an IDL-only one, say) is
+  named up front: `info` lists it, `export` and the bridge ask whether to
+  load its definitions or go on with health only, and the notebook shows
+  the same choice. Definitions load from a folder of `.msg` files or a
+  Python decoder, with `--decoders PATH`, `RESURRECTOR_DECODERS` or
+  `resurrector.load_decoders()`. In Python, reading such a topic's fields
+  raises `UndecodableTopicError`.
 - **More robust decoding** of `Image`, `TFMessage`, `Imu`, `JointState`,
   `Marker` and `MarkerArray`, including the marker layout ROS 2 Iron and
   later record. Checked field for field against mcap-ros2-support on
@@ -71,6 +79,7 @@ upgrading.
 - A query or bridge filter that isn't an expression (`import os`) is
   rejected as "not a valid expression"; the dashboard answered it with a
   500.
+- The notebook's Export button keeps its color on hover.
 
 ### Test counts
 

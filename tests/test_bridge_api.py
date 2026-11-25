@@ -108,10 +108,12 @@ class TestBridgeOutputCannotBlockBridge:
         assert r.status_code == 500, r.text
         detail = r.json()["detail"]
         assert "exited during startup" in detail
-        assert "InvalidMagic" in detail
+        # The bridge opens the bag first, so the cause is the CLI's one-line
+        # bad-bag message rather than an mcap InvalidMagic traceback.
+        assert "isn't an MCAP file" in detail
         log_path = bridge_env / "logs" / f"bridge-{port}.log"
         assert str(log_path) in detail
-        assert "InvalidMagic" in log_path.read_text()
+        assert "isn't an MCAP file" in log_path.read_text()
 
     def test_startup_error_line_skips_uvicorn_shutdown_chatter(self, tmp_path):
         # uvicorn logs INFO shutdown lines after a bind failure; the
@@ -183,7 +185,7 @@ class TestBridgeLogFallback:
         assert r.status_code == 500, r.text
         detail = r.json()["detail"]
         assert "exited during startup" in detail
-        assert "InvalidMagic" in detail
+        assert "isn't an MCAP file" in detail
         [log] = temp_dir.glob(f"resurrector-bridge-{port}-*.log")
         assert str(log) in detail
 

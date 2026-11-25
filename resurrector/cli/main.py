@@ -10,6 +10,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape as rich_escape
 
+from resurrector.cli.undecodable import DECODERS_HELP, SKIP_HELP
 from resurrector.core.export import TENSORFLOW_WHERE
 
 app = typer.Typer(
@@ -211,10 +212,12 @@ def info(
       resurrector info experiment.mcap
     """
     from resurrector.cli.formatters import print_bag_info
+    from resurrector.cli.undecodable import info_note
 
     bf = _open_bag(path)
     health = bf.health_report()
     print_bag_info(bf.metadata, health, bf.path.stat().st_size)
+    info_note(bf.undecodable_topics())
 
 
 @app.command()
@@ -579,6 +582,12 @@ def export(
              "vector instead of `observation.state`. Repeatable. "
              "e.g. --action-topic /cmd_vel",
     )] = None,
+    decoders: Annotated[Optional[list[Path]], typer.Option("--decoders",
+        help=DECODERS_HELP,
+    )] = None,
+    skip_undecodable: Annotated[bool, typer.Option("--skip-undecodable",
+        help=SKIP_HELP,
+    )] = False,
 ):
     """Export bag data to ML-ready formats — Parquet, HDF5, NumPy, Zarr, LeRobot, RLDS.
 
@@ -647,7 +656,11 @@ def export(
             "Missing argument 'PATH'. e.g. resurrector export run.mcap --preset lerobot"
         )
 
+    from resurrector.cli import undecodable
+    from resurrector.core.exceptions import UndecodableTopicError
+
     bf = _open_bag(path)
+    undecodable.load_paths(decoders)
     # `sync` arg in CLI is the method string (or None); BagFrame.export
     # takes a bool sync + str sync_method separately. Resolve here.
     do_sync = sync is not None if preset is None else None  # let preset decide
@@ -673,20 +686,36 @@ def export(
 
     # Errors go to stderr, unwrapped: an ExportError has one failed column
     # per line, which hard wrapping at 80 columns would break up.
+    # An undecodable topic is raised before anything is written, so asking
+    # and then exporting again is safe.
+    skip, left_out = False, []
     try:
-        result_path = bf.export(
-            topics=topics,
-            format=format,
-            output=str(output),
-            sync=do_sync,
-            sync_method=sync_method,
-            downsample_hz=downsample,
-            preset=preset,
-            split=split_dict,
-            split_strategy=split_strategy,
-            task=task,
-            action_topics=action_topic,
-        )
+        while True:
+            try:
+                result_path = bf.export(
+                    topics=topics,
+                    format=format,
+                    output=str(output),
+                    sync=do_sync,
+                    sync_method=sync_method,
+                    downsample_hz=downsample,
+                    preset=preset,
+                    split=split_dict,
+                    split_strategy=split_strategy,
+                    task=task,
+                    action_topics=action_topic,
+                    skip_undecodable=skip,
+                )
+                break
+            except UndecodableTopicError as e:
+                if skip:
+                    err_console.print(
+                        "[red]Export failed: none of the selected topics can be decoded, "
+                        "so there is nothing to export.[/red]"
+                    )
+                    raise typer.Exit(1)
+                if skip_undecodable or undecodable.ask(e.topics) == undecodable.SKIP:
+                    skip, left_out = True, e.topics
     except ExportError as e:
         err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
@@ -700,6 +729,8 @@ def export(
         err_console.print(f"[red]{rich_escape(str(e))}[/red]")
         raise typer.Exit(1)
 
+    if left_out:
+        undecodable.left_out_note(left_out)
     console.print(f"[green]Exported to {result_path}[/green]")
     if preset:
         console.print(f"[dim]Used preset: {preset}[/dim]")
@@ -834,6 +865,9 @@ def benchmark(
         help="Exit non-zero if any metric regressed past its tolerance. "
              "The CI gate. e.g. --fail-on-regression",
     )] = False,
+    decoders: Annotated[Optional[list[Path]], typer.Option("--decoders",
+        help=DECODERS_HELP,
+    )] = None,
 ):
     """Extract scalar metrics from a bag and gate on regressions vs a baseline.
 
@@ -880,11 +914,19 @@ def benchmark(
     if baseline is not None and baseline.exists():
         baseline_values = json.loads(baseline.read_text())
 
-    try:
-        report = run_benchmark(bag, specs, baseline_values)
-    except UnknownMetricError as e:
-        console.print(f"[red]Metric error: {rich_escape(str(e))}[/red]")
-        raise typer.Exit(1)
+    from resurrector.cli import undecodable
+    from resurrector.core.exceptions import UndecodableTopicError
+
+    undecodable.load_paths(decoders)
+    while True:
+        try:
+            report = run_benchmark(bag, specs, baseline_values)
+            break
+        except UnknownMetricError as e:
+            console.print(f"[red]Metric error: {rich_escape(str(e))}[/red]")
+            raise typer.Exit(1)
+        except UndecodableTopicError as e:
+            undecodable.ask(e.topics, can_skip=False)
 
     if json_output:
         json_output.write_text(report.to_json())
@@ -1300,6 +1342,8 @@ def quicklook(
             table.add_row(g_label, topic_name, freq, f"{topic.message_count:,}", f"[cyan]{bar}[/cyan]", h)
 
     console.print(table)
+    from resurrector.cli.undecodable import info_note
+    info_note(bf.undecodable_topics())
 
     # Highlight anomalies
     if health.issues:
@@ -1518,6 +1562,9 @@ def dataset_export(
     db: Annotated[Optional[Path], typer.Option("--db",
         help="Path to a non-default index database. e.g. --db /data/myindex.db",
     )] = None,
+    decoders: Annotated[Optional[list[Path]], typer.Option("--decoders",
+        help=DECODERS_HELP,
+    )] = None,
 ):
     """Materialize a dataset version to disk with auto-generated README + SHA256 manifest.
 
@@ -1529,11 +1576,21 @@ def dataset_export(
     Example:
       resurrector dataset export pick-place-experiments 1.0 -o ./datasets
     """
+    from resurrector.cli import undecodable
     from resurrector.core.dataset import DatasetManager, version_format_hint
+    from resurrector.core.exceptions import UndecodableTopicError
     from resurrector.core.export import ExportError
+    undecodable.load_paths(decoders)
     mgr = DatasetManager(db)
     try:
-        result = mgr.export_version(name, version, str(output))
+        while True:
+            # Raised before any bag is written, so exporting again is safe.
+            # The version names its topics, so there's no going on without one.
+            try:
+                result = mgr.export_version(name, version, str(output))
+                break
+            except UndecodableTopicError as e:
+                undecodable.ask(e.topics, can_skip=False)
     except ExportError as e:
         err_console.print(f"[red]Export failed: {rich_escape(str(e))}[/red]")
         if e.suggested_formats:
@@ -1991,6 +2048,12 @@ def bridge_playback(
              "to capture the post-processing stream. Parent dir is "
              "created. e.g. --record session.mcap",
     )] = None,
+    decoders: Annotated[Optional[list[Path]], typer.Option("--decoders",
+        help=DECODERS_HELP,
+    )] = None,
+    skip_undecodable: Annotated[bool, typer.Option("--skip-undecodable",
+        help=SKIP_HELP,
+    )] = False,
 ):
     """Stream a recorded bag over WebSocket — PlotJuggler-compatible.
 
@@ -2006,6 +2069,19 @@ def bridge_playback(
     """
     import uvicorn
     from resurrector.bridge.server import create_bridge_app
+    from resurrector.cli import undecodable
+
+    bf = _open_bag(bag)
+    undecodable.load_paths(decoders)
+    while problems := bf.undecodable_topics(topics):
+        if skip_undecodable or undecodable.ask(problems) == undecodable.SKIP:
+            left_out = {t.topic for t in problems}
+            topics = [t for t in (topics or bf.topic_names) if t not in left_out]
+            if not topics:
+                err_console.print("[red]None of the topics can be decoded, so there is nothing to stream.[/red]")
+                raise typer.Exit(1)
+            undecodable.left_out_note(problems)
+            break
 
     bridge = create_bridge_app(
         mode="playback", bag_path=bag, speed=speed,
@@ -2098,6 +2174,9 @@ def dashboard(
         help="Path to a non-default index database. Defaults to "
              "~/.resurrector/index.db. e.g. --db /data/myindex.db",
     )] = None,
+    decoders: Annotated[Optional[list[Path]], typer.Option("--decoders",
+        help=DECODERS_HELP + " The dashboard itself loads .msg folders only.",
+    )] = None,
 ):
     """Launch the local web dashboard at http://localhost:8080.
 
@@ -2114,6 +2193,9 @@ def dashboard(
       RESURRECTOR_ALLOWED_ROOTS=/data/bags resurrector dashboard --port 9090
     """
     import uvicorn
+
+    from resurrector.cli import undecodable
+    undecodable.load_paths(decoders)
 
     console.print(f"[bold]Starting RosBag Resurrector Dashboard[/bold]")
     console.print(f"Open [cyan]http://{host}:{port}[/cyan] in your browser")
