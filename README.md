@@ -753,7 +753,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (about 1,800; the slow memory-regression tier runs with -m slow)
+# Run tests (about 1,900; the slow memory-regression tier runs with -m slow)
 pytest tests/ -v
 
 # Build dashboard frontend

@@ -6,7 +6,7 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ---
 
-## [0.9.0] — 2026-11-24
+## [0.9.0] — 2026-11-25
 
 ### What's new
 
@@ -74,7 +74,7 @@ upgrading.
 
 ### Test counts
 
-- Backend: **1816 passed** (was 1799) with zarr and tensorflow
+- Backend: **1901 passed** (was 1799) with zarr and tensorflow
   installed and `tests/test_vision.py` excluded, plus a memory-regression
   tier of 21 (unchanged)
 - Frontend unit: **101 passed** (unchanged)
