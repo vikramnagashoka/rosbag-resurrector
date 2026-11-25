@@ -83,11 +83,11 @@ upgrading.
 
 ### Test counts
 
-- Backend: **1901 passed** (was 1799) with zarr and tensorflow
+- Backend: **1958 passed** (was 1799) with zarr and tensorflow
   installed and `tests/test_vision.py` excluded, plus a memory-regression
   tier of 21 (unchanged)
-- Frontend unit: **101 passed** (unchanged)
-- E2E: **56 behavioural** plus 7 visual (unchanged)
+- Frontend unit: **109 passed** (was 101)
+- E2E: **59 behavioural** (was 56) plus 7 visual
 
 ---
 
