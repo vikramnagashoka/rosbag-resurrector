@@ -52,6 +52,7 @@ def _build_tf_message(transforms: list[tuple[str, str, int, tuple, tuple]]) -> b
         nsec = ts_ns % 1_000_000_000
         body += struct.pack("<iI", sec, nsec)
         body += _build_string(parent)
+        body = _align(body, 4)  # the child string's length is a uint32
         body += _build_string(child)
         body = _align(body, 8)
         body += struct.pack("<3d", *trans)

@@ -86,6 +86,7 @@ def build_marker_body(
     """
     body = struct.pack("<iI", ts_sec, ts_nsec)
     body += _build_string(frame_id)
+    body = _pad_to(body, outer_offset, 4)  # ns length is a uint32
     body += _build_string(ns)
     body = _pad_to(body, outer_offset, 4)
     body += struct.pack("<iii", marker_id, marker_type, action)
@@ -132,6 +133,7 @@ def build_marker_array(markers: list[dict]) -> bytes:
     """
     out = struct.pack("<I", len(markers))  # 4 bytes count
     for m in markers:
+        out += b"\x00" * ((-len(out)) % 4)  # a Marker starts with an int32
         outer_offset = len(out)
         out += build_marker_body(outer_offset=outer_offset, **m)
     return b"\x00\x01\x00\x00" + out
@@ -282,7 +284,9 @@ class TestParseMarkerArray:
         raw = b"\x00\x01\x00\x00" + struct.pack("<I", 3)
         m1 = build_marker_body(marker_id=1, outer_offset=4)  # after count
         raw += m1
-        m2 = build_marker_body(marker_id=2, outer_offset=4 + len(m1))
+        pad = (-(4 + len(m1))) % 4  # the next Marker starts with an int32
+        raw += b"\x00" * pad
+        m2 = build_marker_body(marker_id=2, outer_offset=4 + len(m1) + pad)
         raw += m2
         # Missing the third — decoder should return the 2 parsable markers
         out = parse_marker_array(raw)

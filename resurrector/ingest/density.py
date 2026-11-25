@@ -108,11 +108,12 @@ def compute_density(
     # Memory: bounded by num_topics * bins. Never materializes
     # per-topic timestamp lists.
     last_bin = bins - 1
-    for msg in parser.read_messages(topics=list(target)):
-        c = counters.get(msg.topic)
+    # Timestamps only: payloads are never read, let alone decoded.
+    for topic, timestamp_ns, _size in parser.iter_sizes(topics=list(target)):
+        c = counters.get(topic)
         if c is None:
             continue
-        offset = msg.timestamp_ns - start_ns
+        offset = timestamp_ns - start_ns
         # Compute and clamp the bin index inline. Avoids np.clip
         # per-message overhead.
         idx = int(offset / bin_width_ns)

@@ -1,0 +1,6 @@
+# Comparison readers for bench/run.py, pinned so runs on different days are
+# comparable. Bump deliberately and note it next to the results.
+#   ~/.venvs/resurrector/bin/pip install -r bench/requirements.txt
+rosbags==0.11.10
+mcap==1.4.0
+mcap-ros2-support==0.5.7

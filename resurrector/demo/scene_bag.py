@@ -100,6 +100,7 @@ def encode_tf_message(transforms: list[dict[str, Any]]) -> bytes:
     for t in transforms:
         body += struct.pack("<iI", t["ts_sec"], t["ts_nsec"])
         body += _build_string(t["parent"])
+        body = _align(body, 4)  # the next string's length is a uint32
         body += _build_string(t["child"])
         body = _align(body, 8)
         body += struct.pack("<3d", *t["translation"])

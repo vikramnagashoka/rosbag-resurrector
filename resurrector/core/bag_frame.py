@@ -16,7 +16,7 @@ import polars as pl
 from resurrector.core.exceptions import LargeTopicError
 from resurrector.ingest.parser import (
     BagMetadata, MCAPParser, Message, TopicInfo, parse_bag,
-    get_image_array, get_compressed_image_array,
+    flatten_into, get_image_array, get_compressed_image_array,
 )
 from resurrector.ingest.health_check import BagHealthReport, HealthChecker, HealthConfig
 
@@ -252,10 +252,15 @@ class TopicView:
             # Chunks can have different columns, so concatenate diagonally.
             full = pl.concat(buckets, how="diagonal_relaxed")
         """
+        # Rows come straight from the parser: the same rows as flattening
+        # each iter_messages() dict, built without the dict where it can.
         buffer: list[dict[str, Any]] = []
-        for msg in self.iter_messages():
-            row = {"timestamp_ns": msg.timestamp_ns}
-            _flatten_dict(msg.data, row)
+        rows = parse_bag(self._bag_path).iter_rows(
+            topics=[self._topic_name],
+            start_time_ns=self._start_time_ns,
+            end_time_ns=self._end_time_ns,
+        )
+        for _topic, row in rows:
             buffer.append(row)
             if len(buffer) >= chunk_size:
                 yield _rows_to_frame(buffer)
@@ -698,18 +703,19 @@ class BagFrame:
         for ti in self.metadata.topics:
             states[ti.name] = TopicHealthState()
 
-        for msg in self._parser.read_messages():
-            state = states.get(msg.topic)
+        # Health needs timestamps and sizes only, so payloads are never read.
+        for topic, timestamp_ns, size in self._parser.iter_sizes():
+            state = states.get(topic)
             if state is None:
                 # Topic not in metadata (shouldn't happen normally) — skip.
                 continue
             update_state(
                 state=state,
-                topic=msg.topic,
-                timestamp_ns=msg.timestamp_ns,
-                message_size=len(msg.raw_data) if msg.raw_data else None,
+                topic=topic,
+                timestamp_ns=timestamp_ns,
+                message_size=size if size else None,
                 config=config,
-                expected_interval_ns=expected_intervals_ns.get(msg.topic),
+                expected_interval_ns=expected_intervals_ns.get(topic),
             )
 
         self._health_report = checker.run_streaming(
@@ -1145,19 +1151,5 @@ def _rows_to_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
-def _flatten_dict(d: dict, out: dict, prefix: str = "") -> None:
-    """Flatten a nested dict using dot notation, skipping internal keys."""
-    for key, value in d.items():
-        if key.startswith("_"):
-            continue
-        full_key = f"{prefix}{key}" if not prefix else f"{prefix}.{key}"
-        if isinstance(value, dict):
-            _flatten_dict(value, out, full_key)
-        elif isinstance(value, list):
-            # For small lists (e.g., joint positions), expand to indexed columns
-            if len(value) <= 20 and all(isinstance(v, (int, float)) for v in value):
-                for i, v in enumerate(value):
-                    out[f"{full_key}.{i}"] = v
-            # Skip large lists (e.g., lidar ranges) — they need special handling
-        else:
-            out[full_key] = value
+# Kept under its old name; the rules live with the parser now.
+_flatten_dict = flatten_into
