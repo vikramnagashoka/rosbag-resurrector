@@ -102,6 +102,8 @@ from resurrector.core.exceptions import (
     SyncBufferExceededError,
     SyncOutOfOrderError,
     SyncSchemaDriftError,
+    UndecodableTopic,
+    UndecodableTopicError,
 )
 
 if TYPE_CHECKING:
@@ -234,6 +236,8 @@ def iter_synchronize(
         ValueError: Unknown ``engine`` or ``method``, or
             ``chunk_size < 1``. Raised by the call itself, before
             iteration.
+        UndecodableTopicError: A topic's message type can't be decoded
+            (also a ``ValueError``). Raised by the call itself.
         KeyError: Unknown ``anchor``. Streaming raises it on the call;
             eager on the first ``next()`` (it must read the topics to
             know which are empty).
@@ -247,6 +251,13 @@ def iter_synchronize(
     """
     if chunk_size < 1:
         raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+    undecodable = [
+        UndecodableTopic(name, view.message_type, reason)
+        for name, view in topic_views.items()
+        if (reason := getattr(view, "undecodable_reason", None)) is not None
+    ]
+    if undecodable:
+        raise UndecodableTopicError(undecodable)
     if not topic_views:
         return iter(())
 

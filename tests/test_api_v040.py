@@ -240,6 +240,22 @@ class TestTransformPreviewEndpoint:
             )
             assert r.status_code == 400
 
+    async def test_statement_expression_400(self, app_client, indexed_bag):
+        # Would catch: `import os` raising a raw SyntaxError out of the
+        # sandbox, which this endpoint answered with a 500 and a traceback.
+        _, _, bag_id = indexed_bag
+        async with app_client as client:
+            r = await client.post(
+                "/api/transforms/preview",
+                json={
+                    "bag_id": bag_id,
+                    "topic": "/imu/data",
+                    "expression": "import os",
+                },
+            )
+            assert r.status_code == 400, r.text
+            assert "not a valid expression" in r.json()["detail"]
+
     async def test_missing_op_or_expression_400(self, app_client, indexed_bag):
         _, _, bag_id = indexed_bag
         async with app_client as client:

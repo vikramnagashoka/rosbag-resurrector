@@ -87,6 +87,26 @@ export interface Bag {
   tags: { key: string; value: string }[]
 }
 
+// GET /api/bags/{id}/decoders: topics whose message type has no decoder.
+// Every endpoint that reads their fields answers 422 `undecodable_topics`
+// until a folder of .msg definitions is loaded (POST /api/decoders).
+export interface UndecodableTopicInfo {
+  topic: string
+  message_type: string
+  reason: string
+}
+
+export interface BagDecoders {
+  undecodable: UndecodableTopicInfo[]
+  loaded_paths: string[]
+}
+
+export interface LoadDecodersResponse {
+  path: string
+  message_types: string[]
+  loaded_paths: string[]
+}
+
 export interface TopicRow {
   [column: string]: unknown
 }
@@ -309,6 +329,9 @@ export const api = {
   listBags: (query?: { search?: string; after?: string; before?: string; has_topic?: string; min_health?: number }) =>
     request<Bag[]>('GET', '/api/bags', { query }),
   getBag: (id: number) => request<Bag>('GET', `/api/bags/${id}`),
+  getBagDecoders: (id: number) => request<BagDecoders>('GET', `/api/bags/${id}/decoders`),
+  loadDecoders: (path: string) =>
+    request<LoadDecodersResponse>('POST', '/api/decoders', { body: { path } }),
   getBagHealth: (id: number) => request<HealthReport>('GET', `/api/bags/${id}/health`),
   getTopicData: (
     bagId: number,

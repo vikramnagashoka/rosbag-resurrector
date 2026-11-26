@@ -77,3 +77,38 @@ def test_health_on_a_directory_reports_the_good_bags(tmp_path, good_bag):
     assert result.exit_code == 1, result.output
     assert "good.mcap" in result.stdout
     assert "Can't read" in result.stderr and "broken.mcap" in result.stderr
+
+
+def _ros2_mcap_dir(root, good_bag, files=1):
+    """A rosbag2 directory recorded with MCAP storage, as `ros2 bag record` writes it."""
+    bag_dir = root / "rosbag2_2026_11_24-10_00_00"
+    bag_dir.mkdir(parents=True)
+    names = [f"{bag_dir.name}_{i}.mcap" for i in range(files)]
+    (bag_dir / "metadata.yaml").write_text(
+        "rosbag2_bagfile_information:\n  version: 9\n  storage_identifier: mcap\n"
+        "  relative_file_paths:\n" + "".join(f"    - {n}\n" for n in names)
+    )
+    for n in names:
+        (bag_dir / n).write_bytes(good_bag.read_bytes())
+    return bag_dir
+
+
+@pytest.mark.parametrize("command", list(COMMANDS))
+def test_ros2_mcap_directory_opens(command, tmp_path, good_bag):
+    # Would catch: every command answering "Unsupported file format" for
+    # the folder `ros2 bag record` writes by default since Iron.
+    bag_dir = _ros2_mcap_dir(tmp_path, good_bag)
+    extra = [a.format(out=tmp_path / "out") for a in COMMANDS[command]]
+    result = _run(command, bag_dir, *extra)
+    assert result.exit_code == 0, result.output
+    if command in ("info", "quicklook"):
+        # The size is the bag file's, not the directory entry's.
+        from resurrector.cli.formatters import format_size
+        assert format_size(good_bag.stat().st_size) in result.output, result.output
+
+
+def test_split_ros2_mcap_directory_names_its_files(tmp_path, good_bag):
+    bag_dir = _ros2_mcap_dir(tmp_path, good_bag, files=2)
+    result = _run("info", bag_dir)
+    assert result.exit_code == 1, result.output
+    assert "split into 2 MCAP files" in result.stderr, result.stderr

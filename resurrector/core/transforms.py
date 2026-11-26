@@ -372,7 +372,10 @@ def validate_polars_expression(expr_str: str):
 
     import ast
 
-    tree = ast.parse(expr_str, mode="eval")
+    try:
+        tree = ast.parse(expr_str, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"not a valid expression: {e.msg}") from e
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             if node.id != "pl":

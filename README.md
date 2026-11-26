@@ -190,6 +190,7 @@ In Jupyter, just display the `bf` object — it renders a rich HTML table with h
 - **Dashboard scan returns 403** — by default, `RESURRECTOR_ALLOWED_ROOTS` defaults to your home directory. Set it (`os.pathsep`-separated) to broaden the scope
 - **Semantic search returns nothing** — frames are only indexed for bags you ran `resurrector index-frames` on, OR if your bags were scanned with v0.2.2+ (which pre-builds the frame index during `scan`)
 - **`.bag` or `.db3` raises NotImplementedError** — make sure `mcap` (for ROS 1) or `ros2` (for ROS 2 SQLite) is on your PATH; we shell out to them for auto-conversion
+- **A topic "can't be decoded"** — the bag records no usable definition of its message type. Pass `--decoders ~/ros2_ws/src` (a folder of `.msg` files); see [Message types](#message-types)
 
 ### Optional Extras
 
@@ -680,11 +681,35 @@ Built ROS 2 first. MCAP is the modern ROS 2 default format (recommended since RO
 | Format | Extension | Status |
 |--------|-----------|--------|
 | **MCAP (ROS 2 default)** | `.mcap` | **Fully supported** — primary format |
+| ROS 2 MCAP (directory bag) | dir with `metadata.yaml` + `.mcap` | **Fully supported** — opened through the `.mcap` inside; a bag split into several files is one bag per file |
 | ROS 2 SQLite (single shard) | `.db3` | Auto-converted via `ros2 bag convert` |
 | ROS 2 SQLite (directory bag) | dir with `metadata.yaml` | Recognized by scanner; auto-converted |
 | ROS 1 bag | `.bag` | Auto-converted via `mcap convert` |
 
 > **Note on legacy formats:** auto-conversion shells out to the official tools — `mcap convert` (Go binary, install via [mcap.dev/guides/cli](https://mcap.dev/guides/cli) or Homebrew/apt) for `.bag` files, and `ros2 bag convert` (ships with ROS 2) for `.db3`. Neither is bundled with the Python package because both are external binaries that pip can't ship. `resurrector doctor` will warn if either is missing — you only need the converter for the legacy format(s) you actually use.
+
+### Message types
+
+Every topic decodes from the message definition the bag records (rosbag2 embeds one per type), custom types included. When a type has no usable definition, for example a bag that recorded only an IDL definition, Resurrector names the topic up front:
+
+- `info` and `quicklook` list it with the reason.
+- `export`, `dataset export` and `bridge playback` ask what to do: load its definitions from a path, go on without it (the health checks still cover it), or stop. Without a terminal they exit and name the flags to pass.
+- The dashboard notebook shows a notice with a field for a `.msg` folder and a **Health only** button.
+- In Python, `to_polars()`, `iter_chunks()`, `sync()` and `export()` raise `UndecodableTopicError`; `bf.undecodable_topics()` lists them first.
+
+Point Resurrector at a folder of `.msg` files (your ROS workspace's `src/`, or an installed `share/` folder) or at a Python file that calls `register_decoder()`:
+
+```bash
+resurrector export run.mcap --decoders ~/ros2_ws/src
+export RESURRECTOR_DECODERS=~/ros2_ws/src   # every command, the dashboard and Python
+```
+
+```python
+import resurrector
+resurrector.load_decoders("~/ros2_ws/src")
+```
+
+Types the `.msg` files use but don't define, such as `std_msgs/Header`, come from the bag's other definitions. The dashboard loads `.msg` folders only: a Python decoder runs code, so load one with `--decoders` or `RESURRECTOR_DECODERS`.
 
 ## Architecture
 
@@ -740,7 +765,7 @@ These are constants the test suite verifies. There is no env var or config file 
 | `LARGE_TOPIC_THRESHOLD` | 1,000,000 messages | `to_polars()` / `to_pandas()` / `to_numpy()` raise `LargeTopicError` unless you pass `force=True`. Also the cutoff `engine="auto"` uses to pick streaming over eager in `bf.sync()` |
 | `NUMPY_HARD_CAP` | 1,000,000 rows | NumPy `.npz` export refuses entirely (no `force=` escape) and raises `LargeTopicError` pointing at Parquet |
 
-If you want to raise these on a big-RAM machine, the only options today are forking or monkey-patching the constants. A user-facing override is on the v0.5 wishlist.
+If you want to raise these on a big-RAM machine, the only options today are forking or monkey-patching the constants. There is no user-facing override yet.
 
 ## Development
 
@@ -752,7 +777,7 @@ pip install -e ".[dev]"
 # Generate test bags
 python tests/fixtures/generate_test_bags.py
 
-# Run tests (about 1,700; the slow memory-regression tier runs with -m slow)
+# Run tests (about 1,950; the slow memory-regression tier runs with -m slow)
 pytest tests/ -v
 
 # Build dashboard frontend

@@ -105,8 +105,15 @@ def _normalize(name: str, package: str = "") -> str:
     raise UnsupportedSchema(f"bad type name {name!r}")
 
 
-def parse_definitions(type_name: str, text: str) -> dict[str, list[_Field]]:
-    """``{"pkg/Type": [fields]}`` for the main type and every type it uses."""
+def normalize_type_name(name: str) -> str:
+    """``"pkg/msg/Type"`` or ``"pkg/Type"`` as ``"pkg/Type"``, the form
+    definitions name types by."""
+    return _normalize(name)
+
+
+def split_definitions(type_name: str, text: str) -> dict[str, str]:
+    """``{"pkg/Type": body}``: the main type's text, then each ``MSG:``
+    block's, as written."""
     blocks = _SEPARATOR.split(text)
     raw = {_normalize(type_name): blocks[0]}
     for block in blocks[1:]:
@@ -115,6 +122,19 @@ def parse_definitions(type_name: str, text: str) -> dict[str, list[_Field]]:
         if not first.startswith("MSG:"):
             raise UnsupportedSchema(f"definition block without a MSG: line: {first!r}")
         raw[_normalize(first[4:].strip())] = body
+    return raw
+
+
+def referenced_types(type_name: str, body: str) -> list[str]:
+    """The message types ``body`` (one type's fields, no ``MSG:`` blocks)
+    uses, as ``"pkg/Type"``."""
+    fields = parse_definitions(type_name, body)[_normalize(type_name)]
+    return [f.base for f in fields if f.base not in _PRIMITIVES and f.base != "string"]
+
+
+def parse_definitions(type_name: str, text: str) -> dict[str, list[_Field]]:
+    """``{"pkg/Type": [fields]}`` for the main type and every type it uses."""
+    raw = split_definitions(type_name, text)
     for name, body in _BUILTIN_TYPES.items():
         raw.setdefault(name, body)
 

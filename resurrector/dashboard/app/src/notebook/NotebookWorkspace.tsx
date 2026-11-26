@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import '../styles/notebook.css'
-import { api, CapabilityMap, Bag, ApiError } from '../api'
+import { api, CapabilityMap, Bag, ApiError, UndecodableTopicInfo } from '../api'
 import {
   Notebook, Folder, HealthTier, CellType, Cell, nextCellId, nextFolderId,
   plottableTopics, imageTopics, pointcloudTopics, topicMessageCount,
@@ -11,6 +11,7 @@ import { buildCatalog, filterCatalog, CommandEntry } from './commands'
 import CommandPalette from './CommandPalette'
 import CellFeed from './CellFeed'
 import ExportDialog from './ExportDialog'
+import DecoderNotice from './DecoderNotice'
 
 // The notebook workspace: rail + header + cell feed + docked command bar.
 // PR 1 wires it to real indexed bags and adds the cell framework + the
@@ -77,6 +78,12 @@ export default function NotebookWorkspace() {
   const [caps, setCaps] = useState<CapabilityMap | null>(null)
   const [copied, setCopied] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  // Per bag id: topics with no decoder (fetched when a bag's notebook opens),
+  // whether the user chose "Health only" for them, and the line shown once
+  // a loaded folder made them decodable.
+  const [undecodable, setUndecodable] = useState<Record<number, UndecodableTopicInfo[]>>({})
+  const [healthOnly, setHealthOnly] = useState<Record<number, boolean>>({})
+  const [decodedNote, setDecodedNote] = useState<Record<number, string>>({})
   // Per-cell UI state, keyed by cell id.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [runtime, setRuntime] = useState<Record<string, number>>({})
@@ -133,6 +140,48 @@ export default function NotebookWorkspace() {
   }, [])
 
   const active = notebooks.find(n => n.id === activeId) ?? null
+  const activeBagId = active?.bagId
+
+  function applyUndecodable(bagId: number, list: UndecodableTopicInfo[]) {
+    const names = list.map(t => t.topic)
+    setNotebooks(prev => prev.map(n => (n.bagId === bagId ? { ...n, undecodableTopics: names } : n)))
+  }
+
+  async function refreshUndecodable(bagId: number): Promise<UndecodableTopicInfo[]> {
+    const r = await api.getBagDecoders(bagId)
+    setUndecodable(prev => ({ ...prev, [bagId]: r.undecodable }))
+    applyUndecodable(bagId, r.undecodable)
+    return r.undecodable
+  }
+
+  // Ask once per bag which topics can't be decoded. A notebook that just
+  // had a bag attached carries no list yet, so it gets the known one.
+  useEffect(() => {
+    if (activeBagId == null) return
+    const known = undecodable[activeBagId]
+    if (known === undefined) {
+      refreshUndecodable(activeBagId).catch(() => { /* no notice on failure */ })
+    } else if (active && active.undecodableTopics === undefined) {
+      applyUndecodable(activeBagId, known)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBagId, active?.id, active?.undecodableTopics, undecodable])
+
+  async function onDefinitionsLoaded(bagId: number, path: string, types: string[]) {
+    const before = (undecodable[bagId] ?? []).map(t => t.topic)
+    // Loaded definitions apply to every bag the server opens, so every
+    // other bag's list is stale too: drop them; each re-checks when opened.
+    setUndecodable({})
+    const remaining = await refreshUndecodable(bagId)
+    if (remaining.length === 0) {
+      const count = types.length
+      setDecodedNote(prev => ({
+        ...prev,
+        [bagId]: `Loaded ${count} message type${count === 1 ? '' : 's'} from ${path}. ` +
+          `${before.join(', ')} ${before.length === 1 ? 'decodes' : 'decode'} now.`,
+      }))
+    }
+  }
 
   // A cell appended to the ACTIVE notebook scrolls into view — otherwise
   // adding from a chip while scrolled up appends invisibly below the fold
@@ -622,6 +671,22 @@ export default function NotebookWorkspace() {
 
         <div className="nb-feed" ref={feedRef}>
           <div className="nb-feed-inner">
+            {activeBagId != null && (
+              <DecoderNotice
+                key={activeBagId}
+                topics={undecodable[activeBagId] ?? []}
+                healthOnly={!!healthOnly[activeBagId]}
+                success={decodedNote[activeBagId] ?? null}
+                onHealthOnly={() => setHealthOnly(prev => ({ ...prev, [activeBagId]: true }))}
+                onReopen={() => setHealthOnly(prev => ({ ...prev, [activeBagId]: false }))}
+                onDismissSuccess={() => setDecodedNote(prev => {
+                  const next = { ...prev }
+                  delete next[activeBagId]
+                  return next
+                })}
+                onLoaded={(path, types) => onDefinitionsLoaded(activeBagId, path, types)}
+              />
+            )}
             {active && !active.bagId ? (
               // Blank investigation — bind it to an indexed bag before analysis.
               <div className="nb-bagpick">
@@ -767,7 +832,10 @@ export default function NotebookWorkspace() {
       {exportOpen && active?.bagId != null && (
         <ExportDialog
           bagId={active.bagId}
-          availableTopics={active.bagTopics.map(t => t.name)}
+          availableTopics={active.bagTopics
+            .map(t => t.name)
+            .filter(t => !(active.undecodableTopics ?? []).includes(t))}
+          undecodableTopics={active.undecodableTopics ?? []}
           onClose={() => setExportOpen(false)}
         />
       )}

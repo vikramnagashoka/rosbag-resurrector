@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from dataclasses import dataclass
 
 
 class ResurrectorError(Exception):
@@ -98,6 +99,60 @@ class EmptyExportError(ResurrectorError, ValueError):
             f"exported range, so no file was written."
         )
         super().__init__(self.message)
+
+
+@dataclass(frozen=True)
+class UndecodableTopic:
+    """A topic whose message type has no decoder, and why."""
+
+    topic: str
+    message_type: str
+    reason: str
+
+
+class UndecodableTopicError(ResurrectorError, ValueError):
+    """An API that reads message fields was asked for topics whose
+    message type can't be decoded.
+
+    Raised before anything is read or written. ``iter_chunks``,
+    ``to_polars``, ``sync`` and every export raise it, instead of
+    returning frames with only ``timestamp_ns``. ``iter_messages`` still
+    yields these messages, raw bytes included, and the health checks
+    cover them, since they need only timestamps and sizes.
+
+    Attributes
+    ----------
+    topics : list[UndecodableTopic]
+    """
+
+    def __init__(self, topics: list[UndecodableTopic], export: bool = False):
+        self.topics = list(topics)
+        n = len(self.topics)
+        width = max(len(t.topic) for t in self.topics) if self.topics else 0
+        lines = [
+            f"{n} topic{'' if n == 1 else 's'} use{'s' if n == 1 else ''} a message "
+            f"type Resurrector can't decode, so {'its' if n == 1 else 'their'} "
+            f"fields can't be read:"
+        ]
+        lines += [f"  {t.topic:<{width}}  {t.message_type}: {t.reason}" for t in self.topics]
+        lines.append(
+            "Load the message definitions with resurrector.load_decoders(path): a "
+            "folder of .msg files (your ROS workspace or an installed share/ "
+            "folder), or a Python file that calls register_decoder."
+        )
+        it = "it" if n == 1 else "them"
+        if export:
+            lines.append(
+                f"Or pass skip_undecodable=True to export the other topics; "
+                f"health_report() still covers {it}."
+            )
+        else:
+            lines.append(f"Or leave {it} out; health_report() still covers {it}.")
+        self.message = "\n".join(lines)
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 class SyncBufferExceededError(ResurrectorError):

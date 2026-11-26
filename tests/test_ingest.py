@@ -93,6 +93,52 @@ class TestScanner:
         assert not is_ros2_bag_directory(fixture.parent)
 
 
+class TestRos2McapDirectory:
+    """A rosbag2 directory recorded with MCAP storage (the default since Iron)."""
+
+    def _bag_dir(self, root, bag, files=1, storage="mcap"):
+        d = root / "rec" / "run_1"
+        d.mkdir(parents=True)
+        names = [f"run_1_{i}.mcap" for i in range(files)]
+        (d / "metadata.yaml").write_text(
+            f"rosbag2_bagfile_information:\n  version: 9\n  storage_identifier: {storage}\n"
+        )
+        for n in names:
+            (d / n).write_bytes(bag.read_bytes())
+        return d
+
+    def test_scan_indexes_the_mcap_inside(self, tmp_dir, healthy_bag):
+        # Would catch: scanning a recordings folder indexing 0 bags because
+        # the directory was taken for a .db3 bag and its .mcap skipped.
+        d = self._bag_dir(tmp_dir, healthy_bag)
+        for target in (d.parent, d):
+            results = scan_path(target)
+            assert [r.path.name for r in results] == ["run_1_0.mcap"], target
+            assert results[0].extension == ".mcap"
+
+    def test_split_directory_gives_one_entry_per_file(self, tmp_dir, healthy_bag):
+        d = self._bag_dir(tmp_dir, healthy_bag, files=2)
+        assert [r.path.name for r in scan_path(d.parent)] == ["run_1_0.mcap", "run_1_1.mcap"]
+        with pytest.raises(ValueError, match="split into 2 MCAP files"):
+            parse_bag(d)
+
+    def test_bagframe_opens_the_directory(self, tmp_dir, healthy_bag):
+        from resurrector.core.bag_frame import BagFrame
+        d = self._bag_dir(tmp_dir, healthy_bag)
+        bf = BagFrame(d)
+        assert bf.path == d / "run_1_0.mcap"
+        assert bf.topic_names == BagFrame(healthy_bag).topic_names
+        assert parse_bag(d).get_metadata().message_count == bf.metadata.message_count
+
+    def test_sqlite_directory_with_a_converted_mcap_stays_a_directory(self, tmp_dir, healthy_bag):
+        # A .db3 bag auto-converted in place holds an .mcap next to its
+        # shards; it is still the one directory bag, not that file.
+        d = self._bag_dir(tmp_dir, healthy_bag, storage="sqlite3")
+        (d / "run_1_0.db3").write_bytes(b"")
+        results = scan_path(d.parent)
+        assert [r.path.name for r in results] == ["run_1"]
+
+
 class TestParser:
     def test_parse_metadata(self, healthy_bag):
         parser = MCAPParser(healthy_bag)

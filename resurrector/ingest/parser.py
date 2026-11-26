@@ -21,7 +21,9 @@ logger = logging.getLogger("resurrector.ingest.parser")
 
 from mcap.reader import make_reader
 
-from resurrector.ingest import fast_mcap
+from resurrector.core.exceptions import UndecodableTopic
+from resurrector.ingest import custom_decoders, fast_mcap
+from resurrector.ingest.custom_decoders import load_decoders  # noqa: F401  (re-exported)
 from resurrector.ingest.ros2msg import (
     CDRDecodeError, UnsupportedSchema, compile_decoder, compile_row_decoder,
 )
@@ -110,6 +112,41 @@ class MCAPParser:
         self.path = Path(path)
         if not self.path.exists():
             raise FileNotFoundError(f"MCAP file not found: {self.path}")
+        self._bodies: dict[str, str] | None = None
+
+    def _bag_bodies(self) -> dict[str, str]:
+        """``{"pkg/Type": fields}`` from every ``ros2msg`` definition the bag
+        embeds: what definitions loaded with :func:`load_decoders` borrow
+        the types they use from. Read on first use, only when one is needed."""
+        if self._bodies is None:
+            with open(self.path, "rb") as f:
+                summary = _summary(f, make_reader(f))
+            self._bodies = custom_decoders.bodies_from_schemas(
+                summary.schemas.values() if summary else ()
+            )
+        return self._bodies
+
+    def undecodable_topics(self, topics: list[str] | None = None) -> list[UndecodableTopic]:
+        """Topics (of ``topics``, default all) whose message type has no
+        decoder: no registered one, no usable embedded definition, and
+        nothing loaded with :func:`load_decoders`. Reads only the summary."""
+        with open(self.path, "rb") as f:
+            summary = _summary(f, make_reader(f))
+        if summary is None:
+            return []
+        wanted = None if topics is None else set(topics)
+        found: dict[str, UndecodableTopic] = {}
+        for channel in summary.channels.values():
+            if wanted is not None and channel.topic not in wanted:
+                continue
+            if channel.topic in found:
+                continue
+            schema = summary.schemas.get(channel.schema_id) if channel.schema_id else None
+            msg_type = schema.name if schema else "unknown"
+            _, _, reason = _choose_decoder(msg_type, schema, self._bag_bodies)
+            if reason is not None:
+                found[channel.topic] = UndecodableTopic(channel.topic, msg_type, reason)
+        return [found[t] for t in sorted(found)]
 
     def get_metadata(self) -> BagMetadata:
         """Read bag metadata without loading messages."""
@@ -229,25 +266,32 @@ class MCAPParser:
         Each topic's decoder is picked once: a registered decoder
         (built-in or :func:`register_decoder`) if there is one, else one
         compiled from the definition the bag embeds for that type
-        (:mod:`resurrector.ingest.ros2msg`). Only a type with neither
-        comes back as an ``_unparsed`` placeholder.
+        (:mod:`resurrector.ingest.ros2msg`), else one compiled from
+        definitions loaded with :func:`load_decoders`. A type with none
+        of these comes back as an ``_unparsed`` placeholder, raw bytes
+        included; :meth:`undecodable_topics` lists those topics up front.
         """
         warned: set[str] = set()
-        decoders: dict[int, tuple[str, DecoderFn | None]] = {}
-        for channel, schema, log_time, sequence, data, _, _ in self._raw(
-            topics, start_time_ns, end_time_ns,
-        ):
-            entry = decoders.get(channel.id)
-            if entry is None:
-                msg_type = schema.name if schema else "unknown"
-                entry = decoders[channel.id] = (msg_type, _decoder_for(msg_type, schema))
-            msg_type, decoder = entry
-            parsed = _decode_with(decoder, msg_type, data)
-            if parsed.get("_unparsed") and msg_type not in warned:
-                _warn_unparsed(channel.topic, msg_type)
-                warned.add(msg_type)
-            yield Message(topic=channel.topic, timestamp_ns=log_time, data=parsed,
-                          raw_data=data, sequence=sequence)
+        failures = _FailureLog()
+        decoders: dict[int, tuple[str, DecoderFn | None, str | None]] = {}
+        try:
+            for channel, schema, log_time, sequence, data, _, _ in self._raw(
+                topics, start_time_ns, end_time_ns,
+            ):
+                entry = decoders.get(channel.id)
+                if entry is None:
+                    msg_type = schema.name if schema else "unknown"
+                    decoder, _, reason = _choose_decoder(msg_type, schema, self._bag_bodies)
+                    entry = decoders[channel.id] = (msg_type, decoder, reason)
+                msg_type, decoder, reason = entry
+                parsed = _decode_with(decoder, msg_type, data, failures)
+                if parsed.get("_unparsed") and msg_type not in warned:
+                    _warn_unparsed(channel.topic, msg_type, reason)
+                    warned.add(msg_type)
+                yield Message(topic=channel.topic, timestamp_ns=log_time, data=parsed,
+                              raw_data=data, sequence=sequence)
+        finally:
+            failures.close()
 
     def iter_raw(
         self,
@@ -296,6 +340,7 @@ class MCAPParser:
         dict, which is most of what makes ``iter_chunks`` fast.
         """
         warned: set[str] = set()
+        failures = _FailureLog()
         makers: dict[int, Callable[[bytes, int], dict]] = {}
         fd = -1
         try:
@@ -304,7 +349,9 @@ class MCAPParser:
             ):
                 make = makers.get(channel.id)
                 if make is None:
-                    make = makers[channel.id] = _row_maker(channel.topic, schema, warned)
+                    make = makers[channel.id] = _row_maker(
+                        channel.topic, schema, warned, failures, self._bag_bodies,
+                    )
                 row = make(data, log_time)
                 if len(row) == 1 and size > len(data) and offset >= 0:
                     # The metadata didn't fit in the prefix: decode it all.
@@ -313,6 +360,7 @@ class MCAPParser:
                     row = make(os.pread(fd, size, offset), log_time)
                 yield channel.topic, row
         finally:
+            failures.close()
             if fd >= 0:
                 os.close(fd)
 
@@ -397,9 +445,11 @@ _DECODER_REGISTRY: dict[str, DecoderFn] = {}
 def register_decoder(msg_type: str, decoder: DecoderFn) -> None:
     """Register a custom CDR decoder for a ROS 2 message type.
 
-    Lets users with custom message types (``my_pkg/msg/CustomThing``)
-    plug in a decoder so ``bf['/my_topic'].to_polars()`` produces typed
-    columns instead of the opaque ``_unparsed`` placeholder.
+    Types the bag embeds a ``ros2msg`` definition for decode without
+    this, and :func:`load_decoders` covers types with ``.msg`` files.
+    Register a decoder for a type neither can describe (otherwise APIs
+    that read fields raise :class:`UndecodableTopicError` for it), or to
+    override the built-in or embedded decoder.
 
     Args:
         msg_type: Fully-qualified type string, e.g.
@@ -437,8 +487,9 @@ def unregister_decoder(msg_type: str) -> bool:
     """Remove a registered decoder. Returns True if one was present.
 
     Useful for tests or hot-reload scenarios. Removing a built-in
-    decoder is allowed — ``_unparsed`` placeholders will appear for
-    that type until another decoder is registered.
+    decoder is allowed: that type then decodes from the definition the
+    bag embeds, or comes back as ``_unparsed`` placeholders if it has
+    none, until another decoder is registered.
     """
     return _DECODER_REGISTRY.pop(msg_type, None) is not None
 
@@ -469,18 +520,50 @@ def _channel_ids(summary, topics: list[str] | None) -> list[int] | None:
     return [cid for cid, ch in summary.channels.items() if ch.topic in wanted]
 
 
-def _decoder_for(msg_type: str, schema) -> DecoderFn | None:
-    """The registered decoder for ``msg_type``, else one compiled from the
-    definition the bag embeds (``schema``), else None."""
+def _no_bodies() -> dict[str, str]:
+    return {}
+
+
+def _choose_decoder(
+    msg_type: str, schema, bag_bodies: Callable[[], dict[str, str]] = _no_bodies,
+) -> tuple[DecoderFn | None, str | bytes | None, str | None]:
+    """``(decoder, definition, reason)`` for one channel.
+
+    In order: the registered decoder for ``msg_type``; one compiled from
+    the definition the bag embeds (``schema``); one compiled from
+    definitions loaded with :func:`load_decoders`, with types it uses
+    filled in from ``bag_bodies()``. ``definition`` is the text a
+    compiled decoder came from (None for a registered one). With no
+    decoder, ``reason`` says why, for :class:`UndecodableTopicError`.
+    """
     decoder = _DECODER_REGISTRY.get(msg_type)
     if decoder is not None:
-        return _layout_adapter(msg_type, decoder, schema) or decoder
+        return _layout_adapter(msg_type, decoder, schema) or decoder, None, None
+    embedded_error = None
     if schema is not None and schema.encoding == "ros2msg" and schema.data:
         try:
-            return compile_decoder(msg_type, schema.data)
+            return compile_decoder(msg_type, schema.data), schema.data, None
         except UnsupportedSchema as exc:
-            logger.warning("Can't decode '%s' from its embedded definition: %s", msg_type, exc)
-    return None
+            embedded_error = exc
+    loaded = custom_decoders.definition_for(msg_type, bag_bodies)
+    if loaded is not None:
+        try:
+            return compile_decoder(msg_type, loaded), loaded, None
+        except UnsupportedSchema as exc:
+            return None, None, f"its loaded definition can't be decoded ({exc})"
+    if embedded_error is not None:
+        reason = f"its definition can't be decoded ({embedded_error})"
+    elif schema is None or not schema.data:
+        reason = "the bag has no definition of it"
+    else:
+        reason = f"the bag has only a {schema.encoding} definition of it"
+    return None, None, reason
+
+
+def _decoder_for(msg_type: str, schema) -> DecoderFn | None:
+    """The decoder :func:`_choose_decoder` picks, without the bag's other
+    definitions to fill in from."""
+    return _choose_decoder(msg_type, schema)[0]
 
 
 def _layout_adapter(msg_type: str, decoder: DecoderFn, schema) -> DecoderFn | None:
@@ -517,7 +600,9 @@ def _layout_adapter(msg_type: str, decoder: DecoderFn, schema) -> DecoderFn | No
     return decode_array
 
 
-def _decode_with(decoder: DecoderFn | None, msg_type: str, data: bytes) -> dict[str, Any]:
+def _decode_with(
+    decoder: DecoderFn | None, msg_type: str, data: bytes, failures: "_FailureLog | None" = None,
+) -> dict[str, Any]:
     """Decode one message, turning failures into placeholders (see above)."""
     if len(data) < 4:
         return {}
@@ -529,24 +614,52 @@ def _decode_with(decoder: DecoderFn | None, msg_type: str, data: bytes) -> dict[
     try:
         return decoder(data)
     except Exception as exc:
-        return _decode_failure(msg_type, data, exc)
+        return _decode_failure(msg_type, data, exc, failures)
 
 
-def _decode_failure(msg_type: str, data: bytes, exc: Exception) -> dict[str, Any]:
+def _decode_failure(
+    msg_type: str, data: bytes, exc: Exception, failures: "_FailureLog | None" = None,
+) -> dict[str, Any]:
     """Log a message that didn't decode; return its ``_parse_error`` placeholder."""
+    if failures is None or failures.first(msg_type):
+        logger.warning("CDR parse error for '%s' (%d bytes): %s", msg_type, len(data), exc)
     if isinstance(exc, (CDRParseError, CDRDecodeError)):
-        logger.warning("CDR parse error for '%s': %s", msg_type, exc)
         return {"_parse_error": True, "_msg_type": msg_type, "_raw_size": len(data),
                 "_error": str(exc)}
-    logger.warning("CDR parse error for '%s' (%d bytes): %s", msg_type, len(data), exc)
     return {"_parse_error": True, "_msg_type": msg_type, "_raw_size": len(data)}
 
 
-def _warn_unparsed(topic: str, msg_type: str) -> None:
+class _FailureLog:
+    """Messages that failed to decode during one read.
+
+    The first failure of each type is logged with its error; the rest are
+    counted and logged as one line when the read ends, so a topic whose
+    every message fails leaves two lines in the log, not one per message.
+    """
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    def first(self, msg_type: str) -> bool:
+        n = self.counts.get(msg_type, 0)
+        self.counts[msg_type] = n + 1
+        return n == 0
+
+    def close(self) -> None:
+        for msg_type, n in self.counts.items():
+            if n > 1:
+                logger.warning(
+                    "%d messages of type '%s' failed to decode (the first error is above)",
+                    n, msg_type,
+                )
+        self.counts.clear()
+
+
+def _warn_unparsed(topic: str, msg_type: str, reason: str | None = None) -> None:
     logger.warning(
-        "Topic '%s': no parser for message type '%s' — "
-        "data will be available as raw bytes only",
-        topic, msg_type,
+        "Topic '%s': can't decode %s%s, so its messages carry raw bytes only. "
+        "Load its definitions with resurrector.load_decoders(path).",
+        topic, msg_type, f" ({reason})" if reason else "",
     )
 
 
@@ -566,20 +679,24 @@ def _row_prefix(channel, schema) -> int | None:
     return None
 
 
-def _row_maker(topic: str, schema, warned: set[str]) -> Callable[[bytes, int], dict]:
+def _row_maker(
+    topic: str, schema, warned: set[str], failures: _FailureLog,
+    bag_bodies: Callable[[], dict[str, str]] = _no_bodies,
+) -> Callable[[bytes, int], dict]:
     """``make(data, ts) -> row`` for one channel, as :meth:`MCAPParser.iter_rows` uses it.
 
-    A registered decoder's dict is flattened. A type decoded from its
-    embedded definition gets the generated row function, which builds the
-    same row without the dict. Placeholders (undecodable, or a message that
-    fails) flatten to the timestamp alone, as before.
+    A registered decoder's dict is flattened. A type decoded from a
+    definition (embedded, or loaded with :func:`load_decoders`) gets the
+    generated row function, which builds the same row without the dict.
+    Placeholders (undecodable, or a message that fails) flatten to the
+    timestamp alone.
     """
     msg_type = schema.name if schema else "unknown"
-    registered = _DECODER_REGISTRY.get(msg_type)
-    decoder = _decoder_for(msg_type, schema)  # the same choice read_messages makes
+    # The same choice read_messages makes.
+    decoder, definition, reason = _choose_decoder(msg_type, schema, bag_bodies)
     row_fn = None
-    if registered is None and decoder is not None:
-        row_fn = compile_row_decoder(msg_type, schema.data)
+    if decoder is not None and definition is not None:
+        row_fn = compile_row_decoder(msg_type, definition)
 
     if row_fn is not None:
         def make(data: bytes, ts: int) -> dict:
@@ -588,16 +705,16 @@ def _row_maker(topic: str, schema, warned: set[str]) -> Callable[[bytes, int], d
             try:
                 return row_fn(data, ts)
             except Exception as exc:
-                _decode_failure(msg_type, data, exc)
+                _decode_failure(msg_type, data, exc, failures)
                 return {"timestamp_ns": ts}
         return make
 
     flat: list = [None]  # compiled flattener, made from the first decoded message
 
     def make(data: bytes, ts: int) -> dict:
-        parsed = _decode_with(decoder, msg_type, data)
+        parsed = _decode_with(decoder, msg_type, data, failures)
         if parsed.get("_unparsed") and msg_type not in warned:
-            _warn_unparsed(topic, msg_type)
+            _warn_unparsed(topic, msg_type, reason)
             warned.add(msg_type)
         row = {"timestamp_ns": ts}
         fn = flat[0]
@@ -1090,6 +1207,33 @@ def _parse_pointcloud2(raw_data: bytes) -> dict[str, Any]:
     }
 
 
+def resolve_bag_path(path: str | Path) -> Path:
+    """The file to open for ``path``.
+
+    A rosbag2 directory recorded with MCAP storage opens as the ``.mcap``
+    file inside it. Anything else is returned unchanged.
+
+    Raises:
+        ValueError: the directory is split into several MCAP files; each
+            is a bag of its own here, so the caller names one.
+    """
+    from resurrector.ingest.scanner import ros2_mcap_files
+
+    path = Path(path)
+    if not path.is_dir():
+        return path
+    files = ros2_mcap_files(path)
+    if len(files) == 1:
+        return files[0]
+    if files:
+        names = ", ".join(f.name for f in files[:3]) + (", ..." if len(files) > 3 else "")
+        raise ValueError(
+            f"{path.name} is split into {len(files)} MCAP files ({names}); "
+            f"open one of them"
+        )
+    return path
+
+
 def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
     """Create a parser for the given bag file.
 
@@ -1105,7 +1249,7 @@ def parse_bag(path: str | Path, auto_convert: bool = True) -> MCAPParser:
             automatically. Set False to force a ``NotImplementedError``
             — useful when the caller wants to handle conversion itself.
     """
-    path = Path(path)
+    path = resolve_bag_path(path)
     ext = path.suffix.lower()
 
     if ext == ".mcap":

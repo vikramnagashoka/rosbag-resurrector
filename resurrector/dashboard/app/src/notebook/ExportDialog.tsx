@@ -32,10 +32,12 @@ function applyTopicFilter(topics: string[], filter: string | null): string[] {
 }
 
 export default function ExportDialog({
-  bagId, availableTopics, onClose,
+  bagId, availableTopics, undecodableTopics = [], onClose,
 }: {
   bagId: number
   availableTopics: string[]
+  // Topics with no decoder: left out of the list, named under it.
+  undecodableTopics?: string[]
   onClose: () => void
 }) {
   const [presets, setPresets] = useState<ExportPreset[]>([])
@@ -235,6 +237,12 @@ export default function ExportDialog({
               </label>
             ))}
           </div>
+          {undecodableTopics.length > 0 && (
+            <div className="nb-export-hint">
+              Not exportable (no decoder): {undecodableTopics.join(', ')}. Load their .msg
+              definitions from the notice above the notebook to include them.
+            </div>
+          )}
         </div>
 
         <label className={lerobot ? 'nb-export-sync is-disabled' : 'nb-export-sync'}>

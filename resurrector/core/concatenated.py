@@ -216,6 +216,14 @@ class ConcatenatedBagFrame:
         """Sum of underlying bag durations (no overlap detection)."""
         return sum(bf.metadata.duration_sec for bf in self._bag_frames)
 
+    def undecodable_topics(self, topics: list[str] | None = None) -> list:
+        """:meth:`BagFrame.undecodable_topics` over every bag, one entry per topic."""
+        found: dict = {}
+        for bf in self._bag_frames:
+            for t in bf.undecodable_topics(topics):
+                found.setdefault(t.topic, t)
+        return [found[t] for t in sorted(found)]
+
     def __getitem__(self, topic: str) -> ConcatenatedTopicView:
         if topic not in self.topics:
             raise KeyError(

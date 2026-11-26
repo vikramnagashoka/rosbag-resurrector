@@ -625,7 +625,7 @@ def stale_sample_reason(path: str | Path) -> str | None:
     except Exception:
         return "it is incomplete (an earlier run was interrupted)"
     if layout != CDR_LAYOUT:
-        return "it was written with an older byte layout this version no longer reads"
+        return "it was written by an earlier version"
     try:
         # Reading starts with the summary at the end of the file, so a
         # bag cut off mid-write fails here.

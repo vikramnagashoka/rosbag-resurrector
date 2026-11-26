@@ -7,18 +7,21 @@ Polars/Pandas DataFrames, and integrated health checking.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
 import polars as pl
 
-from resurrector.core.exceptions import LargeTopicError
+from resurrector.core.exceptions import LargeTopicError, UndecodableTopic, UndecodableTopicError
 from resurrector.ingest.parser import (
-    BagMetadata, MCAPParser, Message, TopicInfo, parse_bag,
+    BagMetadata, MCAPParser, Message, TopicInfo, parse_bag, resolve_bag_path,
     flatten_into, get_image_array, get_compressed_image_array,
 )
 from resurrector.ingest.health_check import BagHealthReport, HealthChecker, HealthConfig
+
+_log = logging.getLogger("resurrector.core.bag_frame")
 
 _IMAGE_TYPES = {
     "sensor_msgs/msg/Image",
@@ -168,6 +171,20 @@ class TopicView:
         """True iff the topic is ``sensor_msgs/msg/Image`` or ``CompressedImage``."""
         return self._topic_info.message_type in _IMAGE_TYPES
 
+    @property
+    def undecodable_reason(self) -> str | None:
+        """Why this topic's message fields can't be read, or None when they can.
+
+        Not None when the type has no registered decoder, the bag embeds
+        no usable definition of it, and nothing loaded with
+        :func:`resurrector.load_decoders` covers it. Then ``iter_chunks``,
+        ``to_polars`` and everything built on them raise
+        :class:`UndecodableTopicError`; ``iter_messages`` still yields the
+        raw bytes, and the health checks still cover the topic.
+        """
+        found = parse_bag(self._bag_path).undecodable_topics([self._topic_name])
+        return found[0].reason if found else None
+
     def iter_messages(self) -> Iterator[Message]:
         """Yield raw decoded messages one at a time. Memory bounded by message size.
 
@@ -223,6 +240,10 @@ class TopicView:
     def iter_chunks(self, chunk_size: int = 50_000) -> Iterator[pl.DataFrame]:
         """Yield the topic as Polars DataFrames in fixed-size chunks. Bounded memory.
 
+        Raises :class:`UndecodableTopicError` on the call, before reading,
+        when the topic's message type can't be decoded (see
+        :attr:`undecodable_reason`).
+
         This is the core streaming primitive. Memory usage is bounded
         by ``chunk_size`` regardless of total topic size — open a 100 GB
         bag without OOMing. Nested message fields are flattened with
@@ -252,10 +273,17 @@ class TopicView:
             # Chunks can have different columns, so concatenate diagonally.
             full = pl.concat(buckets, how="diagonal_relaxed")
         """
+        parser = parse_bag(self._bag_path)
+        undecodable = parser.undecodable_topics([self._topic_name])
+        if undecodable:
+            raise UndecodableTopicError(undecodable)
+        return self._iter_chunks(parser, chunk_size)
+
+    def _iter_chunks(self, parser: MCAPParser, chunk_size: int) -> Iterator[pl.DataFrame]:
         # Rows come straight from the parser: the same rows as flattening
         # each iter_messages() dict, built without the dict where it can.
         buffer: list[dict[str, Any]] = []
-        rows = parse_bag(self._bag_path).iter_rows(
+        rows = parser.iter_rows(
             topics=[self._topic_name],
             start_time_ns=self._start_time_ns,
             end_time_ns=self._end_time_ns,
@@ -514,9 +542,9 @@ class BagFrame:
 
             bf = BagFrame("~/.resurrector/demo_sample.mcap")
         """
-        self._path = Path(path)
-        if not self._path.exists():
-            raise FileNotFoundError(f"Bag file not found: {self._path}")
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Bag file not found: {path}")
+        self._path = resolve_bag_path(path)
 
         self._parser = parse_bag(self._path)
         self._metadata: BagMetadata | None = None
@@ -568,6 +596,22 @@ class BagFrame:
         """
         topic_info = self._find_topic(topic_name)
         return TopicView(self._path, topic_name, topic_info)
+
+    def undecodable_topics(self, topics: list[str] | None = None) -> list[UndecodableTopic]:
+        """Topics whose message fields can't be read, with the reason for each.
+
+        Reads only the bag's summary. Of ``topics`` (default: all), the
+        ones whose type has no registered decoder, no usable definition
+        in the bag, and nothing loaded with :func:`resurrector.load_decoders`.
+        Reading their fields raises :class:`UndecodableTopicError`; the
+        health checks still cover them.
+
+        Example::
+
+            for t in bf.undecodable_topics():
+                print(t.topic, t.message_type, t.reason)
+        """
+        return self._parser.undecodable_topics(topics)
 
     def _find_topic(self, name: str) -> TopicInfo:
         """Find a topic by name, raising KeyError if not found."""
@@ -801,6 +845,7 @@ class BagFrame:
         split_strategy: str = "time",
         task: str | None = None,
         action_topics: list[str] | None = None,
+        skip_undecodable: bool = False,
     ) -> Path:
         """Export bag data to ML-friendly formats — the main bulk-export entry point.
 
@@ -849,12 +894,19 @@ class BagFrame:
                 (defaults to the bag's file stem).
             action_topics: ``lerobot`` only — topics whose numeric fields
                 become the ``action`` vector instead of ``observation.state``.
+            skip_undecodable: Leave out topics whose message type can't be
+                decoded (see :meth:`undecodable_topics`) and export the rest,
+                instead of raising. A warning names the topics left out.
 
         Returns:
             ``Path`` to the output directory.
 
         Raises:
             LargeTopicError: Per-format thresholds (NumPy hard cap at 1 M).
+            UndecodableTopicError: A selected topic's message type can't be
+                decoded and ``skip_undecodable`` is False, or every selected
+                topic is undecodable (also a ``ValueError``). Nothing is
+                written.
             ValueError: If ``preset`` is not known, ``split`` ratios don't
                 sum to ~1.0, ``split_strategy`` is unknown, the preset's
                 topic filter matches none of the bag's topics, or a random
@@ -918,6 +970,20 @@ class BagFrame:
         else:
             topic_names = resolved["topics"]
             resolved.pop("topic_filter")
+
+        selected = list(topic_names) if topic_names is not None else self.topic_names
+        undecodable = self.undecodable_topics(selected)
+        if undecodable:
+            if not skip_undecodable:
+                raise UndecodableTopicError(undecodable, export=True)
+            left_out = {t.topic for t in undecodable}
+            topic_names = [t for t in selected if t not in left_out]
+            if not topic_names:
+                raise UndecodableTopicError(undecodable)
+            _log.info(
+                "Not exporting %s: the message type can't be decoded",
+                ", ".join(sorted(left_out)),
+            )
 
         # Split path: compute splits, export each into its own subdir
         if split is not None:

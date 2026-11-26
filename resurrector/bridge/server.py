@@ -76,8 +76,8 @@ class BridgeServer:
         #   LiveSubscriber's on_topic_discovered callback feeds
         #   register_topic_info as messages arrive
         if record_path is not None and self._playback is not None:
-            from resurrector.ingest.parser import MCAPParser
-            parser = MCAPParser(bag_path)
+            from resurrector.ingest.parser import MCAPParser, resolve_bag_path
+            parser = MCAPParser(resolve_bag_path(bag_path))
             metadata = parser.get_metadata()
             self._recorder = BridgeRecorder(
                 output_path=record_path,

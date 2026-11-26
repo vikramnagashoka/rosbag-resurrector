@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -435,6 +436,21 @@ class TestFastReader:
             assert readers()
             it.close()
         assert not readers()
+
+    def test_no_pread_falls_back_to_the_mcap_reader(self, tmp_path, monkeypatch):
+        # Would catch: the fast reader calling os.pread on Windows, which
+        # doesn't have it, so every indexed bag failed to open there.
+        path = _write_bag(tmp_path / "b.mcap", _mixed_messages(200), chunk_size=4096)
+        bf = BagFrame(path)
+        fast = {t: next(bf[t].iter_chunks(chunk_size=10_000)) for t in bf.topic_names}
+        fast_health = bf.health_report()
+        monkeypatch.delattr(os, "pread")
+        with open(path, "rb") as f:
+            assert not fast_mcap.can_read(make_reader(f).get_summary())
+        bf = BagFrame(path)
+        for t in bf.topic_names:
+            assert next(bf[t].iter_chunks(chunk_size=10_000)).equals(fast[t]), t
+        assert bf.health_report().score == fast_health.score
 
     def test_unindexed_file_falls_back_to_the_mcap_reader(self, tmp_path):
         path = tmp_path / "flat.mcap"

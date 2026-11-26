@@ -69,8 +69,9 @@ def gather_evidence(
     - ``health_issues``: health findings whose time range overlaps the window
     - ``totals``: window message count, most/least active topic
 
-    Memory-bounded: per-topic counting streams ``iter_chunks`` and tallies
-    in-window rows; nothing is materialized whole.
+    Memory-bounded: per-topic counting streams message timestamps
+    (``iter_sizes``, no decoding, so topics of any type count); nothing is
+    materialized whole.
     """
     from resurrector.core.bag_frame import BagFrame
 
@@ -89,19 +90,14 @@ def gather_evidence(
     # Per-topic in-window activity.
     topic_activity: list[dict[str, Any]] = []
     total_in_window = 0
+    counts: dict[str, int] = {}
+    for topic, ts, _size in bf._parser.iter_sizes(
+        start_time_ns=win_start_ns, end_time_ns=win_end_ns + 1,  # end is exclusive
+    ):
+        if win_start_ns <= ts <= win_end_ns:
+            counts[topic] = counts.get(topic, 0) + 1
     for ti in meta.topics:
-        count = 0
-        try:
-            view = bf[ti.name]
-        except KeyError:
-            continue
-        for chunk in view.iter_chunks():
-            if "timestamp_ns" not in chunk.columns:
-                continue
-            ts = chunk["timestamp_ns"]
-            # Count rows within the window.
-            in_win = ((ts >= win_start_ns) & (ts <= win_end_ns)).sum()
-            count += int(in_win)
+        count = counts.get(ti.name, 0)
         if count > 0:
             topic_activity.append({
                 "topic": ti.name,

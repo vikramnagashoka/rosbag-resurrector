@@ -6,60 +6,88 @@ Each release has a **What's New** one-liner summary followed by feature lists gr
 
 ---
 
-## [Unreleased]
+## [0.9.0] — 2026-11-25
 
 ### What's new
 
-Every message type in a bag decodes now, custom ones included, and the
-built-in decoders read real recordings correctly. Reading, DataFrame
-chunks, export and health checks are several times faster on real bags.
+Faster on real robot bags, and every message type decodes from the
+definition the bag records, custom ones included. Measured on three
+public ROS 2 datasets with a new benchmark harness in `bench/`.
+
+### Benchmarks
+
+MacBook Air M5 (24 GB), warm cache, median of 3 runs (2 for the 34 and
+55.7 GB bags). Speedup over 0.8.7:
+
+| Bag | DataFrame chunks | Health check | Parquet export |
+|---|---|---|---|
+| Manipulation (VLA_pick_and_place), 1.6 GB | 4.7x | 5.1x | 4.5x |
+| Humanoid (Lidar-Tactile), 0.5 GB | 4.7x | 3.5x | 4.6x |
+| Mobile robot (construction-rosbags), 17.5 GB | 3.2x | 4.3x | 3.0x |
+| Mobile robot, 34 GB | 2.0x | 2.5x | 1.7x |
+| Mobile robot, 55.7 GB | 1.8x | 2.3x | 1.7x |
+
+Decoding every message in a bag, against other Python readers:
+
+| Bag | Resurrector 0.9.0 | rosbags 0.11.10 | mcap-ros2-support 0.5.7 |
+|---|---|---|---|
+| Manipulation, 1.6 GB | 2.06 s | 3.65 s | 28.5 s |
+| Humanoid, 0.5 GB | 2.84 s | 4.01 s | 36.8 s |
+| Mobile robot, 17.5 GB | 3.12 s | 4.57 s | 22.8 s |
+| Mobile robot, 55.7 GB | 7.87 s | 14.6 s | not run |
+
+Peak memory stays flat as bags grow: 239, 255 and 264 MB streaming every
+topic of the 17.5, 34 and 55.7 GB bags. Reproduce with
+`bench/download_datasets.sh` and `bench/run.py`.
+
+### Improved
+
+- **Decoders for any message type.** Resurrector builds a decoder from
+  the message definition embedded in each MCAP file, so
+  `geometry_msgs/PoseStamped`, `nav_msgs/Odometry` and custom types come
+  out as typed columns in DataFrames, exports, `sync()` and LeRobot
+  export. Decoders registered with `register_decoder()` still take
+  priority.
+- **Your own message definitions, when a bag lacks them.** A topic whose
+  type has no usable definition in the bag (an IDL-only one, say) is
+  named up front: `info` lists it, `export` and the bridge ask whether to
+  load its definitions or go on with health only, and the notebook shows
+  the same choice. Definitions load from a folder of `.msg` files or a
+  Python decoder, with `--decoders PATH`, `RESURRECTOR_DECODERS` or
+  `resurrector.load_decoders()`. In Python, reading such a topic's fields
+  raises `UndecodableTopicError`.
+- **More robust decoding** of `Image`, `TFMessage`, `Imu`, `JointState`,
+  `Marker` and `MarkerArray`, including the marker layout ROS 2 Iron and
+  later record. Checked field for field against mcap-ros2-support on
+  505,489 messages from the benchmark bags.
+- **Faster reading.** MCAP files are read through their chunk and
+  message indexes, and upcoming chunks are read ahead (in parallel for a
+  bag bigger than RAM) on macOS and Linux. Health checks and density
+  read only message headers.
+- **ROS 2 recording folders open directly.** A folder `ros2 bag record`
+  writes with MCAP storage (the default since Iron) can be passed to
+  `scan`, `info`, `health`, `export`, the bridge and `BagFrame`; a
+  recording split into several files is one bag per file.
+- **`bench/`**: the benchmark harness, a pinned dataset download script
+  and a before/after table generator.
+
+The demo sample bags are regenerated the first time they're used after
+upgrading.
 
 ### Fixed
 
-Benchmarking against three public datasets (manipulation, humanoid,
-mobile robot) and checking every built-in decoder against mcap_ros2
-found these. The synthetic bags the tests used were written with the
-same mistakes, so the tests never saw them.
+- A query or bridge filter that isn't an expression (`import os`) is
+  rejected as "not a valid expression"; the dashboard answered it with a
+  500.
+- The notebook's Export button keeps its color on hover.
 
-- `sensor_msgs/Image`: `step`, `data_length` and the pixel offset were
-  read 1 to 3 bytes off on real recordings, so frames from raw `Image`
-  topics (frame export, frame search, LeRobot video) came out shifted.
-- `tf2_msgs/TFMessage`: a transform whose frame name isn't a multiple of
-  4 bytes long ended the message, so most `/tf` messages in real bags
-  came back with no transforms (90% or more in the humanoid dataset).
-- `sensor_msgs/Imu`: orientation, angular velocity and acceleration were
-  garbage for some `frame_id` lengths.
-- `sensor_msgs/JointState`: every message with an empty `velocity` or
-  `effort` (common: many drivers publish positions only) failed to
-  decode.
-- `visualization_msgs/Marker` and `MarkerArray`: markers after the first
-  were misread, and bags recorded with ROS 2 Iron or later (which added
-  texture and mesh fields) misread every marker.
-- The synthetic sample bags now use the byte layout real recorders
-  write. A sample bag from an earlier version is regenerated the next
-  time it's used; your own bags are never touched.
+### Test counts
 
-### Changed
-
-- **Any message type decodes.** A type with no built-in decoder used to
-  come back as an `_unparsed` placeholder: 25 to 62% of the messages in
-  the benchmark bags (`geometry_msgs/PoseStamped`, `nav_msgs/Odometry`,
-  custom types). Resurrector now compiles the message definition rosbag2
-  embeds in each MCAP file into a decoder, so those topics become typed
-  columns. Built-in and `register_decoder()` decoders still take
-  priority; a bag without a definition still needs `register_decoder()`.
-  Those topics now carry their fields everywhere a topic's columns go:
-  exports, `sync()`, and LeRobot's `observation.state` and `action` when
-  you select them, which used to get only timestamps from them.
-- **Faster reading.** MCAP files are read through their chunk and message
-  indexes: a topic's messages are read without touching the rest of each
-  chunk. Upcoming chunks are read ahead, in parallel for a bag bigger than
-  RAM, so reading from disk overlaps with decoding. Same messages in the
-  same order as before.
-- **Health checks and density** read only message headers, not payloads.
-- `iter_chunks()`, `to_polars()` and export build rows directly from the
-  decoded bytes, and read only the metadata of camera frames and point
-  clouds.
+- Backend: **1958 passed** (was 1799) with zarr and tensorflow
+  installed and `tests/test_vision.py` excluded, plus a memory-regression
+  tier of 21 (unchanged)
+- Frontend unit: **109 passed** (was 101)
+- E2E: **59 behavioural** (was 56) plus 7 visual
 
 ---
 

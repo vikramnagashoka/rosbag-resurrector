@@ -16,6 +16,7 @@ Two discovery modes:
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,6 +101,27 @@ def is_ros2_bag_directory(path: Path) -> bool:
     return path.is_dir() and (path / ROS2_BAG_MARKER).is_file()
 
 
+_MCAP_STORAGE = re.compile(r"storage_identifier:\s*['\"]?mcap\b")
+
+
+def ros2_mcap_files(path: Path) -> list[Path]:
+    """The ``.mcap`` files of a rosbag2 directory recorded with MCAP storage.
+
+    Empty for anything else, including a ``.db3`` bag directory that holds
+    an ``.mcap`` converted from it. MCAP is rosbag2's default storage since
+    Iron; such a directory is opened through its MCAP files directly.
+    """
+    if not is_ros2_bag_directory(path):
+        return []
+    try:
+        metadata = (path / ROS2_BAG_MARKER).read_text(errors="replace")
+    except OSError:
+        return []
+    if not _MCAP_STORAGE.search(metadata):
+        return []
+    return sorted(p for p in path.glob("*.mcap") if p.is_file())
+
+
 def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
     """Scan a file or directory for bag files.
 
@@ -111,9 +133,10 @@ def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
             cryptographically reproducible.
 
     Returns:
-        List of ScannedFile objects for each discovered bag file. ROS 2
-        directory-format bags are returned as a single entry pointing
-        to the directory itself (not the .db3 shards inside).
+        List of ScannedFile objects for each discovered bag file. A ROS 2
+        bag directory recorded with MCAP storage gives one entry per
+        ``.mcap`` file in it; a ``.db3`` one is a single entry pointing to
+        the directory itself (not the .db3 shards inside).
     """
     path = Path(path)
     if not path.exists():
@@ -124,6 +147,8 @@ def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
     if path.is_file():
         if path.suffix.lower() in BAG_EXTENSIONS:
             results.append(_scan_file(path, full_hash=full_hash))
+    elif ros2_mcap_files(path):
+        results.extend(_scan_file(m, full_hash=full_hash) for m in ros2_mcap_files(path))
     elif is_ros2_bag_directory(path):
         # The argument itself is a ROS 2 bag directory.
         results.append(_scan_ros2_directory(path, full_hash=full_hash))
@@ -134,6 +159,8 @@ def scan_path(path: str | Path, full_hash: bool = False) -> list[ScannedFile]:
         seen_ros2_roots: set[Path] = set()
         for entry in sorted(path.rglob("*")):
             if entry.is_dir() and is_ros2_bag_directory(entry):
+                if ros2_mcap_files(entry):
+                    continue  # its .mcap files are indexed as files below
                 resolved = entry.resolve()
                 if resolved in seen_ros2_roots:
                     continue
